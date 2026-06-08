@@ -87,7 +87,7 @@ pub fn render(frame: &mut Frame, state: &ProgressState) {
 }
 
 fn render_title(frame: &mut Frame, area: Rect) {
-  let title = Paragraph::new(" spindel ")
+  let title = Paragraph::new(" spindle ")
     .style(Style::default().fg(Color::Cyan))
     .block(Block::default().borders(Borders::BOTTOM));
   frame.render_widget(title, area);

@@ -123,7 +123,7 @@ fn compute_perceptual_hash(path: &Path) -> Result<Vec<u8>> {
 
 fn decode_via_magick(path: &Path) -> Result<image::DynamicImage> {
   let tmp = std::env::temp_dir()
-    .join(format!("spindel_conv_{}.png", std::process::id()));
+    .join(format!("spindle_conv_{}.png", std::process::id()));
   let status = std::process::Command::new("magick")
     .arg("convert")
     .arg(path)

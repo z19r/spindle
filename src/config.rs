@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::FileCategory;
 
 #[derive(Parser, Debug)]
-#[command(name = "spindel", about = "AI-powered file organizer")]
+#[command(name = "spindle", about = "AI-powered file organizer")]
 pub struct CliArgs {
   /// Directories to scan
   pub dirs: Vec<PathBuf>,
@@ -60,7 +60,7 @@ pub struct CliArgs {
   #[arg(long)]
   pub undo: bool,
 
-  /// Path to undo log file (defaults to <output>/.spindel_undo.json)
+  /// Path to undo log file (defaults to <output>/.spindle_undo.json)
   #[arg(long)]
   pub undo_log: Option<PathBuf>,
 
@@ -206,9 +206,9 @@ fn dirs_home() -> PathBuf {
 }
 
 fn config_path() -> PathBuf {
-  directories::ProjectDirs::from("", "", "spindel")
+  directories::ProjectDirs::from("", "", "spindle")
     .map(|d| d.config_dir().to_path_buf())
-    .unwrap_or_else(|| dirs_home().join(".config").join("spindel"))
+    .unwrap_or_else(|| dirs_home().join(".config").join("spindle"))
     .join("config.toml")
 }
 
