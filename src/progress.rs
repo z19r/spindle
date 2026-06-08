@@ -332,7 +332,7 @@ mod tests {
   fn total_sleep_budget_scales_and_is_in_open_band() {
     assert_eq!(total_sleep_budget(0, 10), Duration::ZERO);
     let low = total_sleep_budget(1, 40).as_millis();
-    assert!(low >= 401 && low < 1500);
+    assert!((401..1500).contains(&low));
     let high = total_sleep_budget(40, 40).as_millis();
     assert!(high > 400 && high <= 1499);
     assert!(low < high);

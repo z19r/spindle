@@ -276,9 +276,9 @@ mod tests {
   use std::time::SystemTime;
   use tempfile::TempDir;
 
-  use crate::model::{
-    FileType, ImageFormat, ScannedFile, VideoFormat,
-  };
+  use crate::model::{FileType, ImageFormat, ScannedFile};
+  #[cfg(not(feature = "video"))]
+  use crate::model::VideoFormat;
 
   fn make_test_file(
     dir: &Path,
@@ -499,6 +499,7 @@ mod tests {
     assert_eq!(cached.unwrap().summary, "A sunset over the ocean");
   }
 
+  #[cfg(not(feature = "video"))]
   fn make_video_file(
     dir: &Path,
     name: &str,
