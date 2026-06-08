@@ -135,7 +135,7 @@ impl ClaudeProvider {
     {
       let mut this = self;
       this.base_url = url.into();
-      return this;
+      this
     }
     #[cfg(not(test))]
     {
@@ -235,7 +235,7 @@ fn extract_json(raw: &str) -> String {
     if let Some(end) = content.find("```") {
       return content[..end].trim().to_string();
     }
-    if let Some(open) = content.find(|c| c == '{' || c == '[') {
+    if let Some(open) = content.find(['{', '[']) {
       return content[open..].trim().to_string();
     }
   }

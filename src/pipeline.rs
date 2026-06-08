@@ -552,7 +552,7 @@ mod tests {
     let (tx, mut rx) = mpsc::channel(64);
     let result = run(&FakeProvider, &config, tx).await.unwrap();
 
-    assert!(result.all_dupes.len() >= 1);
+    assert!(!result.all_dupes.is_empty());
     assert!(result.plan.stats.duplicates_found >= 1);
 
     let mut events = vec![];

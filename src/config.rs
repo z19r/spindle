@@ -416,8 +416,10 @@ near_duplicate_threshold = 12
 
   #[test]
   fn debug_redacts_api_key() {
-    let mut ai_config = AiConfig::default();
-    ai_config.api_key = Some("sk-secret-key-12345".to_string());
+    let ai_config = AiConfig {
+      api_key: Some("sk-secret-key-12345".to_string()),
+      ..Default::default()
+    };
 
     let debug_output = format!("{:?}", ai_config);
 

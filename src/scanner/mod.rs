@@ -182,7 +182,7 @@ mod tests {
 
     let txt = results
       .iter()
-      .find(|f| f.path.extension().map_or(false, |e| e == "txt"))
+      .find(|f| f.path.extension().is_some_and(|e| e == "txt"))
       .unwrap();
     assert_eq!(
       txt.file_type,
@@ -199,7 +199,7 @@ mod tests {
     let results = scan_directory(dir.path()).unwrap();
     let jpg = results
       .iter()
-      .find(|f| f.path.extension().map_or(false, |e| e == "jpg"))
+      .find(|f| f.path.extension().is_some_and(|e| e == "jpg"))
       .unwrap();
 
     assert_eq!(jpg.size, 8); // b"fake jpg" = 8 bytes
