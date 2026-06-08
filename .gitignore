@@ -1,0 +1,12 @@
+/target
+.env
+Cargo.lock
+
+# Tool-specific (personal)
+.aider.conventions.md
+.windsurfrules
+.prettierrc
+.rtk/
+.serena/
+.whetstone/
+STACK-SETUP.md

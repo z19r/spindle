@@ -1,0 +1,41 @@
+root = true
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[*.{rb,erb,ru,rake,gemspec}]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[reg*.[ch]]
+indent_style = tab
+indent_size = 8
+
+[enc/*]
+indent_style = tab
+indent_size = 8
+
+[*.{yml,yaml,haml,jbuilder,jsx,html,sls,tf}]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[{*[Mm]akefile*,*.mak,*.mk,depend}]
+indent_style = tab
+indent_size = 4
