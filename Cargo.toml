@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "AI-powered file organizer that uses content analysis to intelligently group and sort files"
 license = "MIT"
+repository = "https://github.com/z19r/spindle"
+homepage = "https://github.com/z19r/spindle"
+readme = "README.md"
+keywords = ["file-organizer", "ai", "content-analysis", "deduplication", "tui"]
+categories = ["command-line-utilities", "filesystem"]
+authors = ["Zack Kitzmiller"]
 
 [dependencies]
 # CLI
@@ -77,3 +83,8 @@ dotenv = "0.15.0"
 [features]
 default = []
 video = []  # Future: rsmpeg for video keyframe extraction
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

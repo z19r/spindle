@@ -1,49 +1,83 @@
-# Rust project justfile
 default:
-    @echo "Available Rust commands:"
     @just --list
 
-# Run the application
-dry-run:
-    @echo "Running Rust application..."
-    @cargo run -- --dry-run
+# Run the application (dry-run)
+dry-run *ARGS:
+    cargo run -- --dry-run {{ARGS}}
 
-# Build the application
+# Build
 build:
-    @echo "Building Rust application..."
-    @cargo build
+    cargo build
 
 # Build for release
 build-release:
-    @echo "Building Rust application for release..."
-    @cargo build --release
+    cargo build --release
 
 # Run tests
 test:
-    @echo "Running Rust tests..."
-    @cargo test
+    cargo test
 
 # Run tests with coverage
 test-coverage:
-    @echo "Running Rust tests with coverage..."
-    @cargo test --no-run
-    @cargo llvm-cov --html
+    cargo llvm-cov --html
 
-# Run linting
+# Lint (clippy + fmt check)
 lint:
-    @echo "Running Clippy..."
-    @cargo clippy
+    cargo fmt --check
+    cargo clippy --all-targets --all-features -- -D warnings
 
 # Format code
 fmt:
-    @echo "Formatting Rust code..."
-    @cargo fmt
+    cargo fmt
 
-# Install dependencies
-install:
-    @echo "Installing Rust dependencies..."
-    @cargo build
+# Release quality gate (fmt + clippy + test)
+release-check:
+    cargo fmt --check
+    cargo clippy --all-targets --all-features -- -D warnings
+    cargo test
 
-bar:
-  @just build
-  ./target/debug/spindel
+# Preview what a release would do without changing anything
+release-dry-run LEVEL:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ ! "{{LEVEL}}" =~ ^(patch|minor|major)$ ]]; then
+        echo "Usage: just release-dry-run patch|minor|major"; exit 1
+    fi
+    CURRENT=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+    echo "Current version: $CURRENT"
+    echo "Bump level: {{LEVEL}}"
+    just release-check
+    echo ""
+    echo "All checks passed. Run: just release {{LEVEL}}"
+
+# Bump version, create release branch + PR (requires: cargo-set-version, gh)
+release LEVEL: release-check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ ! "{{LEVEL}}" =~ ^(patch|minor|major)$ ]]; then
+        echo "Usage: just release patch|minor|major"; exit 1
+    fi
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "Error: dirty working tree"; exit 1
+    fi
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$BRANCH" != "main" ]]; then
+        echo "Error: must be on main (currently on $BRANCH)"; exit 1
+    fi
+    git pull --ff-only origin main
+    cargo set-version --bump {{LEVEL}}
+    cargo check --quiet
+    VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+    git checkout -b "release/v${VERSION}"
+    git add Cargo.toml Cargo.lock
+    git commit -m "release: v${VERSION}"
+    git push -u origin "release/v${VERSION}"
+    gh pr create \
+        --title "release: v${VERSION}" \
+        --body "Bump to v${VERSION} ({{LEVEL}} release)" \
+        --base main
+    echo ""
+    echo "PR created. Next steps:"
+    echo "  gh pr checks           # watch CI"
+    echo "  gh pr merge --squash --delete-branch"
+    echo "  gh run watch           # watch release workflow"
