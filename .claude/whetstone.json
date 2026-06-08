@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "whetstone_version": "3.1.0",
+  "integration_version": 1,
+  "provider": "icm",
+  "tool_versions": {
+    "rtk": "0.42.3",
+    "icm": "0.10.43",
+    "headroom": "0.22.4"
+  },
+  "migration_id": "20260608-205849",
+  "created_at": "2026-06-08T06:15:13.640568353Z",
+  "updated_at": "2026-06-08T20:58:49.106571871Z"
+}
