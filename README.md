@@ -9,7 +9,7 @@ Spindle scans directories, fingerprints files (BLAKE3 + perceptual hashing), det
 ## Install
 
 ```bash
-cargo install spindel
+cargo install spindle
 ```
 
 Or download a binary from [Releases](https://github.com/z19r/spindle/releases).
@@ -18,16 +18,16 @@ Or download a binary from [Releases](https://github.com/z19r/spindle/releases).
 
 ```bash
 # Scan and organize (dry-run by default)
-spindel /path/to/messy/folder
+spindle /path/to/messy/folder
 
 # Find duplicates only
-spindel --dupes-only /path/to/folder
+spindle --dupes-only /path/to/folder
 
 # Describe files without grouping
-spindel --describe-only /path/to/folder
+spindle --describe-only /path/to/folder
 
 # Verbose output
-spindel -v /path/to/folder
+spindle -v /path/to/folder
 ```
 
 ## Configuration

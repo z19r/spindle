@@ -1190,7 +1190,7 @@ fn render_header(frame: &mut Frame, area: Rect, state: &ReviewState) {
     .border_type(BorderType::Rounded)
     .title_top(Line::from(vec![
       Span::styled(" ", Style::default().bg(theme::BG_HEADER)),
-      Span::styled(" spindel ", theme::title_badge()),
+      Span::styled(" spindle ", theme::title_badge()),
       Span::styled(" ", Style::default().bg(theme::BG_HEADER)),
     ]))
     .title_top(

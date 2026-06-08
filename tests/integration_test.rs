@@ -4,17 +4,17 @@ use std::path::Path;
 use anyhow::Result;
 use tempfile::TempDir;
 
-use spindel::ai::{AiProvider, DescribeContext};
-use spindel::analyze::{analyze_batch, analyze_file, AnalyzeOptions};
-use spindel::executor::{execute_plan, undo};
-use spindel::fingerprint::{
+use spindle::ai::{AiProvider, DescribeContext};
+use spindle::analyze::{analyze_batch, analyze_file, AnalyzeOptions};
+use spindle::executor::{execute_plan, undo};
+use spindle::fingerprint::{
   compute_blake3, find_exact_duplicates, find_near_duplicates,
   fingerprint_files,
 };
-use spindel::group::build_groups;
-use spindel::model::*;
-use spindel::plan::propose_plan;
-use spindel::scanner::{scan_directories, scan_directory};
+use spindle::group::build_groups;
+use spindle::model::*;
+use spindle::plan::propose_plan;
+use spindle::scanner::{scan_directories, scan_directory};
 
 fn create_test_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
   use image::{ImageBuffer, RgbaImage};

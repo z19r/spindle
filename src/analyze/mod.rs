@@ -22,8 +22,8 @@ impl Default for AnalyzeOptions {
 
 fn default_cache_dir() -> PathBuf {
   directories::BaseDirs::new()
-    .map(|d| d.cache_dir().join("spindel"))
-    .unwrap_or_else(|| PathBuf::from(".cache/spindel"))
+    .map(|d| d.cache_dir().join("spindle"))
+    .unwrap_or_else(|| PathBuf::from(".cache/spindle"))
 }
 
 fn cache_path(cache_dir: &Path, blake3_hash: &[u8; 32]) -> PathBuf {

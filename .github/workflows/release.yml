@@ -10,8 +10,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  CRATE_NAME: spindel
-  BIN_NAME: spindel
+  CRATE_NAME: spindle
+  BIN_NAME: spindle
 
 concurrency:
   group: release

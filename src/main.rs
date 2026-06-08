@@ -3,19 +3,19 @@ use clap::Parser;
 use dotenv::dotenv;
 use tracing_subscriber::EnvFilter;
 
-use spindel::ai::ClaudeProvider;
-use spindel::config::{CliArgs, Config};
-use spindel::executor::execute_plan;
-use spindel::fingerprint::{
+use spindle::ai::ClaudeProvider;
+use spindle::config::{CliArgs, Config};
+use spindle::executor::execute_plan;
+use spindle::fingerprint::{
   find_exact_duplicates, fingerprint_files,
 };
-use spindel::model::{
+use spindle::model::{
   ApprovedPlan, ExecutionReport, FileGroup, FileMove,
 };
-use spindel::pipeline::{self, PipelineConfig, PipelineEvent};
-use spindel::progress::{self, PipelineProgress};
-use spindel::scanner::{scan_directories_filtered, ScanOptions};
-use spindel::tui::{self, ReviewAction, ReviewMode, ReviewState};
+use spindle::pipeline::{self, PipelineConfig, PipelineEvent};
+use spindle::progress::{self, PipelineProgress};
+use spindle::scanner::{scan_directories_filtered, ScanOptions};
+use spindle::tui::{self, ReviewAction, ReviewMode, ReviewState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,9 +23,9 @@ async fn main() -> Result<()> {
   let cli = CliArgs::parse();
 
   let filter = match cli.verbose {
-    0 => "spindel=info",
-    1 => "spindel=debug",
-    _ => "spindel=trace",
+    0 => "spindle=info",
+    1 => "spindle=debug",
+    _ => "spindle=trace",
   };
   tracing_subscriber::fmt()
     .with_env_filter(EnvFilter::new(filter))
@@ -124,10 +124,10 @@ async fn main() -> Result<()> {
 
 fn run_undo(cli: &CliArgs, config: &Config) -> Result<()> {
   let undo_path = cli.undo_log.clone().unwrap_or_else(|| {
-    config.general.output_dir.join(".spindel_undo.json")
+    config.general.output_dir.join(".spindle_undo.json")
   });
   println!("Undoing from: {}", undo_path.display());
-  let restored = spindel::executor::undo(&undo_path)?;
+  let restored = spindle::executor::undo(&undo_path)?;
   println!(
     "Restored {} files to their original locations.",
     restored.len()
@@ -157,7 +157,7 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
   print!("  Fingerprinting...  ");
   let fingerprinted = fingerprint_files(scanned)?;
   let exact_dupes = find_exact_duplicates(&fingerprinted);
-  let near_dupes = spindel::fingerprint::find_near_duplicates(
+  let near_dupes = spindle::fingerprint::find_near_duplicates(
     &fingerprinted,
     config.duplicates.near_duplicate_threshold,
   );
@@ -202,12 +202,12 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
 }
 
 fn dupes_to_groups(
-  dupes: &[spindel::model::DuplicateSet],
-  fingerprinted: &[spindel::model::FingerprintedFile],
+  dupes: &[spindle::model::DuplicateSet],
+  fingerprinted: &[spindle::model::FingerprintedFile],
 ) -> (
   Vec<FileGroup>,
   Vec<FileMove>,
-  Vec<spindel::model::DuplicateType>,
+  Vec<spindle::model::DuplicateType>,
 ) {
   let mut groups = Vec::new();
   let mut moves = Vec::new();
@@ -226,10 +226,10 @@ fn dupes_to_groups(
     members.extend(&set.duplicates);
 
     let rationale = match set.duplicate_type {
-      spindel::model::DuplicateType::Exact => {
+      spindle::model::DuplicateType::Exact => {
         format!("Byte-identical — keep {}", canonical_name)
       }
-      spindel::model::DuplicateType::NearDuplicate { distance } => {
+      spindle::model::DuplicateType::NearDuplicate { distance } => {
         format!(
           "Perceptually similar (distance {}) — keep {}",
           distance, canonical_name
@@ -278,7 +278,7 @@ fn execute_review(
   review_state: &ReviewState,
 ) -> Result<()> {
   let undo_log_path =
-    config.general.output_dir.join(".spindel_undo.json");
+    config.general.output_dir.join(".spindle_undo.json");
 
   match review_state.review_mode() {
     ReviewMode::Organize => {
@@ -403,8 +403,8 @@ fn print_undo_info(report: &ExecutionReport) {
 
 fn default_cache_dir() -> std::path::PathBuf {
   directories::BaseDirs::new()
-    .map(|d| d.cache_dir().join("spindel"))
-    .unwrap_or_else(|| std::path::PathBuf::from(".cache/spindel"))
+    .map(|d| d.cache_dir().join("spindle"))
+    .unwrap_or_else(|| std::path::PathBuf::from(".cache/spindle"))
 }
 
 fn format_bytes(bytes: u64) -> String {
