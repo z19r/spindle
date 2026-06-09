@@ -276,9 +276,9 @@ mod tests {
   use std::time::SystemTime;
   use tempfile::TempDir;
 
-  use crate::model::{FileType, ImageFormat, ScannedFile};
   #[cfg(not(feature = "video"))]
   use crate::model::VideoFormat;
+  use crate::model::{FileType, ImageFormat, ScannedFile};
 
   fn make_test_file(
     dir: &Path,
