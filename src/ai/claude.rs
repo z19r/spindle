@@ -15,6 +15,7 @@ pub struct ClaudeProvider {
   api_key: String,
   model: String,
   base_url: String,
+  max_retries: usize,
 }
 
 #[derive(Serialize)]
@@ -115,6 +116,7 @@ impl ClaudeProvider {
   pub fn new(
     api_key: impl Into<String>,
     model: impl Into<String>,
+    max_retries: usize,
   ) -> Self {
     let api_key = if cfg!(test) {
       api_key.into()
@@ -127,6 +129,7 @@ impl ClaudeProvider {
       api_key,
       model: model.into(),
       base_url: LOCAL_BASE_URL.to_string(),
+      max_retries,
     }
   }
 
@@ -152,49 +155,105 @@ impl ClaudeProvider {
     let fqdn = api_endpoint_fqdn(&self.base_url);
     log_claude_api_call(&self.api_key, &endpoint, &fqdn);
 
-    let response = self
-      .client
-      .post(&endpoint)
-      .header("x-api-key", &self.api_key)
-      .header("anthropic-version", "2023-06-01")
-      .header("content-type", "application/json")
-      .json(&request)
-      .send()
-      .await
-      .context("Failed to send request to Claude API")?;
+    let mut last_err: Option<anyhow::Error> = None;
 
-    let status = response.status();
-    if !status.is_success() {
-      let body = response.text().await.unwrap_or_default();
-      anyhow::bail!("Claude API error ({}): {}", status, body);
+    for attempt in 0..=self.max_retries {
+      let result = self
+        .client
+        .post(&endpoint)
+        .header("x-api-key", &self.api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&request)
+        .send()
+        .await;
+
+      let response = match result {
+        Ok(resp) => resp,
+        Err(e) => {
+          if attempt < self.max_retries {
+            let delay = 1u64 << attempt;
+            tracing::warn!(
+              attempt = attempt + 1,
+              max = self.max_retries,
+              delay_secs = delay,
+              error = %e,
+              "Request failed, retrying"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(delay))
+              .await;
+            last_err = Some(e.into());
+            continue;
+          }
+          return Err(e)
+            .context("Failed to send request to Claude API");
+        }
+      };
+
+      let status = response.status();
+
+      if is_retryable_status(status) && attempt < self.max_retries {
+        let body = response.text().await.unwrap_or_default();
+        let delay = 1u64 << attempt;
+        tracing::warn!(
+          attempt = attempt + 1,
+          max = self.max_retries,
+          status = %status,
+          delay_secs = delay,
+          "Retryable API error ({}): {}",
+          status,
+          preview(&body, 200),
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(delay))
+          .await;
+        last_err = Some(anyhow::anyhow!(
+          "Claude API error ({}): {}",
+          status,
+          body
+        ));
+        continue;
+      }
+
+      if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Claude API error ({}): {}", status, body);
+      }
+
+      let api_response: ApiResponse = response
+        .json()
+        .await
+        .context("Failed to parse Claude API response")?;
+
+      let truncated =
+        api_response.stop_reason.as_deref() == Some("max_tokens");
+
+      let raw = api_response
+        .content
+        .into_iter()
+        .find_map(|block| block.text)
+        .context("No text content in Claude API response")?;
+
+      if truncated {
+        anyhow::bail!(
+          "Claude response truncated (hit max_tokens limit). \
+           Increase max_tokens or reduce the input size. \
+           Partial response ({} bytes): {}",
+          raw.len(),
+          preview(&raw, 500),
+        );
+      }
+
+      return Ok(extract_json(&raw));
     }
 
-    let api_response: ApiResponse = response
-      .json()
-      .await
-      .context("Failed to parse Claude API response")?;
-
-    let truncated =
-      api_response.stop_reason.as_deref() == Some("max_tokens");
-
-    let raw = api_response
-      .content
-      .into_iter()
-      .find_map(|block| block.text)
-      .context("No text content in Claude API response")?;
-
-    if truncated {
-      anyhow::bail!(
-        "Claude response truncated (hit max_tokens limit). \
-         Increase max_tokens or reduce the input size. \
-         Partial response ({} bytes): {}",
-        raw.len(),
-        preview(&raw, 500),
-      );
-    }
-
-    Ok(extract_json(&raw))
+    Err(last_err.unwrap_or_else(|| {
+      anyhow::anyhow!("All retry attempts exhausted")
+    }))
   }
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+  matches!(status.as_u16(), 429 | 500 | 502 | 503 | 529)
 }
 
 fn api_endpoint_fqdn(base_url: &str) -> String {
@@ -427,6 +486,7 @@ mod tests {
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
       "claude-sonnet-4-20250514".to_string(),
+      0,
     )
     .with_base_url(server.uri());
 
@@ -461,6 +521,7 @@ mod tests {
     let provider = ClaudeProvider::new(
       "bad-key".to_string(),
       "claude-sonnet-4-20250514".to_string(),
+      0,
     )
     .with_base_url(server.uri());
 
@@ -497,6 +558,7 @@ mod tests {
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
       "claude-sonnet-4-20250514".to_string(),
+      0,
     )
     .with_base_url(server.uri());
 
@@ -553,6 +615,7 @@ mod tests {
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
       "claude-sonnet-4-20250514".to_string(),
+      0,
     )
     .with_base_url(server.uri());
 
@@ -580,6 +643,7 @@ mod tests {
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
       "claude-sonnet-4-20250514".to_string(),
+      0,
     )
     .with_base_url(server.uri());
 
