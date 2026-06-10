@@ -111,6 +111,8 @@ pub struct AiConfig {
   pub skip_files_larger_than_mb: u64,
   #[serde(default = "default_true")]
   pub cache_responses: bool,
+  #[serde(default = "default_max_retries")]
+  pub max_retries: usize,
 }
 
 impl std::fmt::Debug for AiConfig {
@@ -125,6 +127,7 @@ impl std::fmt::Debug for AiConfig {
         &self.skip_files_larger_than_mb,
       )
       .field("cache_responses", &self.cache_responses)
+      .field("max_retries", &self.max_retries)
       .finish()
   }
 }
@@ -154,6 +157,7 @@ impl Default for AiConfig {
       max_files_to_analyze: default_max_files(),
       skip_files_larger_than_mb: default_skip_size(),
       cache_responses: true,
+      max_retries: default_max_retries(),
     }
   }
 }
@@ -193,6 +197,10 @@ fn default_skip_size() -> u64 {
 
 fn default_threshold() -> u32 {
   8
+}
+
+fn default_max_retries() -> usize {
+  3
 }
 
 fn default_true() -> bool {

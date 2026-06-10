@@ -42,7 +42,11 @@ async fn main() -> Result<()> {
     return run_dupes_only(&cli, &config);
   }
 
-  let provider = ClaudeProvider::new("", config.ai.model.clone());
+  let provider = ClaudeProvider::new(
+    "",
+    config.ai.model.clone(),
+    config.ai.max_retries,
+  );
 
   let pipeline_config = PipelineConfig {
     target_dirs: config.general.target_dirs.clone(),
