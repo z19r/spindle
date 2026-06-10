@@ -1,6 +1,5 @@
 /target
 .env
-Cargo.lock
 
 # Tool-specific (personal)
 .aider.conventions.md
