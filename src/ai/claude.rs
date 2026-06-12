@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{ContentDescription, FileSummary, ProposedGroup};
 
-use super::{AiProvider, DescribeContext};
+use super::{
+  AiProvider, DescribeContext, DescribePayload, DescribeRequest,
+};
 
 const LOCAL_API_KEY: &str =
   "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";
@@ -16,7 +18,11 @@ pub struct ClaudeProvider {
   model: String,
   base_url: String,
   max_retries: usize,
+  poll_interval: std::time::Duration,
 }
+
+const DEFAULT_BATCH_POLL_INTERVAL: std::time::Duration =
+  std::time::Duration::from_secs(5);
 
 #[derive(Serialize)]
 struct Message {
@@ -107,6 +113,42 @@ struct ApiResponse {
   stop_reason: Option<String>,
 }
 
+#[derive(Serialize)]
+struct BatchRequestItem {
+  custom_id: String,
+  params: ApiRequest,
+}
+
+#[derive(Serialize)]
+struct BatchSubmitBody {
+  requests: Vec<BatchRequestItem>,
+}
+
+#[derive(Deserialize)]
+struct BatchStatus {
+  id: String,
+  processing_status: String,
+}
+
+#[derive(Deserialize)]
+struct BatchResultLine {
+  custom_id: String,
+  result: BatchResult,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum BatchResult {
+  #[serde(rename = "succeeded")]
+  Succeeded { message: ApiResponse },
+  #[serde(rename = "errored")]
+  Errored { error: serde_json::Value },
+  #[serde(rename = "canceled")]
+  Canceled,
+  #[serde(rename = "expired")]
+  Expired,
+}
+
 #[derive(Deserialize)]
 struct ResponseBlock {
   text: Option<String>,
@@ -130,7 +172,18 @@ impl ClaudeProvider {
       model: model.into(),
       base_url: LOCAL_BASE_URL.to_string(),
       max_retries,
+      poll_interval: DEFAULT_BATCH_POLL_INTERVAL,
     }
+  }
+
+  #[cfg(test)]
+  pub fn with_poll_interval(
+    self,
+    interval: std::time::Duration,
+  ) -> Self {
+    let mut this = self;
+    this.poll_interval = interval;
+    this
   }
 
   pub fn with_base_url(self, url: impl Into<String>) -> Self {
@@ -224,32 +277,235 @@ impl ClaudeProvider {
         .await
         .context("Failed to parse Claude API response")?;
 
-      let truncated =
-        api_response.stop_reason.as_deref() == Some("max_tokens");
-
-      let raw = api_response
-        .content
-        .into_iter()
-        .find_map(|block| block.text)
-        .context("No text content in Claude API response")?;
-
-      if truncated {
-        anyhow::bail!(
-          "Claude response truncated (hit max_tokens limit). \
-           Increase max_tokens or reduce the input size. \
-           Partial response ({} bytes): {}",
-          raw.len(),
-          preview(&raw, 500),
-        );
-      }
-
-      return Ok(extract_json(&raw));
+      return response_text(api_response);
     }
 
     Err(last_err.unwrap_or_else(|| {
       anyhow::anyhow!("All retry attempts exhausted")
     }))
   }
+
+  /// Build the Messages API request for a describe payload — shared
+  /// by the individual and batch paths.
+  fn describe_api_request(
+    &self,
+    payload: &DescribePayload,
+    context: &DescribeContext,
+  ) -> ApiRequest {
+    let system_text = format!(
+      "{task}\n\n{instructions}",
+      task = super::describe_system_prompt(),
+      instructions = super::describe_response_instructions(),
+    );
+
+    let content = match payload {
+      DescribePayload::Image { data, mime_type } => {
+        use base64::Engine;
+        let encoded =
+          base64::engine::general_purpose::STANDARD.encode(data);
+        vec![
+          ContentBlock::Image {
+            source: ImageSource {
+              source_type: "base64",
+              media_type: mime_type.clone(),
+              data: encoded,
+            },
+          },
+          ContentBlock::Text {
+            text: super::describe_user_prompt(context),
+            cache_control: None,
+          },
+        ]
+      }
+      DescribePayload::Text { excerpt } => vec![ContentBlock::Text {
+        text: super::describe_text_user_prompt(context, excerpt),
+        cache_control: None,
+      }],
+    };
+
+    cached_api_request(
+      self.model.clone(),
+      1024,
+      Some(vec![cached_system_block(system_text)]),
+      vec![Message {
+        role: "user",
+        content,
+      }],
+    )
+  }
+
+  /// Submit describe requests as a message batch, poll until it
+  /// ends, and collect per-item results in submission order.
+  async fn run_message_batch(
+    &self,
+    requests: &[DescribeRequest],
+  ) -> Result<Vec<Result<ContentDescription>>> {
+    let items: Vec<BatchRequestItem> = requests
+      .iter()
+      .enumerate()
+      .map(|(i, r)| BatchRequestItem {
+        custom_id: format!("req-{i}"),
+        params: self.describe_api_request(&r.payload, &r.context),
+      })
+      .collect();
+
+    let endpoint = format!("{}/v1/messages/batches", self.base_url);
+    let response = self
+      .client
+      .post(&endpoint)
+      .header("x-api-key", &self.api_key)
+      .header("anthropic-version", "2023-06-01")
+      .header("content-type", "application/json")
+      .json(&BatchSubmitBody { requests: items })
+      .send()
+      .await
+      .context("Failed to submit message batch")?;
+
+    if !response.status().is_success() {
+      let status = response.status();
+      let body = response.text().await.unwrap_or_default();
+      anyhow::bail!(
+        "Batch submission failed ({}): {}",
+        status,
+        preview(&body, 200)
+      );
+    }
+
+    let mut batch: BatchStatus = response
+      .json()
+      .await
+      .context("Failed to parse batch submission response")?;
+
+    tracing::info!(
+      batch_id = %batch.id,
+      requests = requests.len(),
+      "Submitted message batch"
+    );
+
+    let status_endpoint =
+      format!("{}/v1/messages/batches/{}", self.base_url, batch.id);
+
+    while batch.processing_status != "ended" {
+      tokio::time::sleep(self.poll_interval).await;
+      let response = self
+        .client
+        .get(&status_endpoint)
+        .header("x-api-key", &self.api_key)
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await
+        .context("Failed to poll batch status")?;
+
+      if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+          "Batch status poll failed ({}): {}",
+          status,
+          preview(&body, 200)
+        );
+      }
+
+      batch = response
+        .json()
+        .await
+        .context("Failed to parse batch status response")?;
+      tracing::debug!(
+        batch_id = %batch.id,
+        status = %batch.processing_status,
+        "Polled message batch"
+      );
+    }
+
+    let results_endpoint = format!("{status_endpoint}/results");
+    let response = self
+      .client
+      .get(&results_endpoint)
+      .header("x-api-key", &self.api_key)
+      .header("anthropic-version", "2023-06-01")
+      .send()
+      .await
+      .context("Failed to fetch batch results")?;
+
+    if !response.status().is_success() {
+      let status = response.status();
+      let body = response.text().await.unwrap_or_default();
+      anyhow::bail!(
+        "Batch results fetch failed ({}): {}",
+        status,
+        preview(&body, 200)
+      );
+    }
+
+    let body = response
+      .text()
+      .await
+      .context("Failed to read batch results body")?;
+
+    let mut by_id = std::collections::HashMap::new();
+    for line in body.lines().filter(|l| !l.trim().is_empty()) {
+      let parsed: BatchResultLine = serde_json::from_str(line)
+        .with_context(|| {
+          format!(
+            "Failed to parse batch result line: {}",
+            preview(line, 200)
+          )
+        })?;
+
+      let outcome = match parsed.result {
+        BatchResult::Succeeded { message } => response_text(message)
+          .and_then(|text| {
+            serde_json::from_str::<ContentDescription>(&text)
+              .context("Failed to parse description JSON from Claude")
+          }),
+        BatchResult::Errored { error } => {
+          Err(anyhow::anyhow!("Batch item failed: {error}"))
+        }
+        BatchResult::Canceled => {
+          Err(anyhow::anyhow!("Batch item canceled"))
+        }
+        BatchResult::Expired => {
+          Err(anyhow::anyhow!("Batch item expired"))
+        }
+      };
+      by_id.insert(parsed.custom_id, outcome);
+    }
+
+    Ok(
+      (0..requests.len())
+        .map(|i| {
+          by_id.remove(&format!("req-{i}")).unwrap_or_else(|| {
+            Err(anyhow::anyhow!("Missing batch result for req-{i}"))
+          })
+        })
+        .collect(),
+    )
+  }
+}
+
+/// Extract the JSON text payload from a successful API response,
+/// rejecting truncated responses.
+fn response_text(api_response: ApiResponse) -> Result<String> {
+  let truncated =
+    api_response.stop_reason.as_deref() == Some("max_tokens");
+
+  let raw = api_response
+    .content
+    .into_iter()
+    .find_map(|block| block.text)
+    .context("No text content in Claude API response")?;
+
+  if truncated {
+    anyhow::bail!(
+      "Claude response truncated (hit max_tokens limit). \
+       Increase max_tokens or reduce the input size. \
+       Partial response ({} bytes): {}",
+      raw.len(),
+      preview(&raw, 500),
+    );
+  }
+
+  Ok(extract_json(&raw))
 }
 
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
@@ -341,37 +597,11 @@ impl AiProvider for ClaudeProvider {
     mime_type: &str,
     context: &DescribeContext,
   ) -> Result<ContentDescription> {
-    use base64::Engine;
-    let encoded =
-      base64::engine::general_purpose::STANDARD.encode(image_data);
-    let user_text = super::describe_user_prompt(context);
-    let system_text = format!(
-      "{task}\n\n{instructions}",
-      task = super::describe_system_prompt(),
-      instructions = super::describe_response_instructions(),
-    );
-
-    let request = cached_api_request(
-      self.model.clone(),
-      1024,
-      Some(vec![cached_system_block(system_text)]),
-      vec![Message {
-        role: "user",
-        content: vec![
-          ContentBlock::Image {
-            source: ImageSource {
-              source_type: "base64",
-              media_type: mime_type.to_string(),
-              data: encoded,
-            },
-          },
-          ContentBlock::Text {
-            text: user_text,
-            cache_control: None,
-          },
-        ],
-      }],
-    );
+    let payload = DescribePayload::Image {
+      data: image_data.to_vec(),
+      mime_type: mime_type.to_string(),
+    };
+    let request = self.describe_api_request(&payload, context);
 
     let text = self.send_request(request).await?;
     let description: ContentDescription = serde_json::from_str(&text)
@@ -384,31 +614,33 @@ impl AiProvider for ClaudeProvider {
     excerpt: &str,
     context: &DescribeContext,
   ) -> Result<ContentDescription> {
-    let user_text =
-      super::describe_text_user_prompt(context, excerpt);
-    let system_text = format!(
-      "{task}\n\n{instructions}",
-      task = super::describe_system_prompt(),
-      instructions = super::describe_response_instructions(),
-    );
-
-    let request = cached_api_request(
-      self.model.clone(),
-      1024,
-      Some(vec![cached_system_block(system_text)]),
-      vec![Message {
-        role: "user",
-        content: vec![ContentBlock::Text {
-          text: user_text,
-          cache_control: None,
-        }],
-      }],
-    );
+    let payload = DescribePayload::Text {
+      excerpt: excerpt.to_string(),
+    };
+    let request = self.describe_api_request(&payload, context);
 
     let text = self.send_request(request).await?;
     let description: ContentDescription = serde_json::from_str(&text)
       .context("Failed to parse description JSON from Claude")?;
     Ok(description)
+  }
+
+  async fn describe_batch(
+    &self,
+    requests: Vec<DescribeRequest>,
+  ) -> Vec<Result<ContentDescription>> {
+    match self.run_message_batch(&requests).await {
+      Ok(results) => results,
+      Err(err) => {
+        // Batch-level failure (submission/poll/fetch): every item
+        // fails with the shared cause.
+        let msg = format!("{err:#}");
+        requests
+          .iter()
+          .map(|_| Err(anyhow::anyhow!("{msg}")))
+          .collect()
+      }
+    }
   }
 
   async fn propose_groups(
@@ -721,5 +953,245 @@ mod tests {
   fn extract_json_handles_whitespace() {
     let input = "  \n  {\"key\": \"value\"}  \n  ";
     assert_eq!(extract_json(input), r#"{"key": "value"}"#);
+  }
+
+  fn batch_test_requests() -> Vec<DescribeRequest> {
+    vec![
+      DescribeRequest {
+        payload: DescribePayload::Image {
+          data: vec![0xFF, 0xD8],
+          mime_type: "image/jpeg".to_string(),
+        },
+        context: DescribeContext {
+          filename: "a.jpg".to_string(),
+          file_type_label: "JPEG image".to_string(),
+          file_size: 2,
+          metadata_hint: None,
+        },
+      },
+      DescribeRequest {
+        payload: DescribePayload::Text {
+          excerpt: "LEASE AGREEMENT".to_string(),
+        },
+        context: DescribeContext {
+          filename: "lease.txt".to_string(),
+          file_type_label: "TXT document".to_string(),
+          file_size: 15,
+          metadata_hint: None,
+        },
+      },
+    ]
+  }
+
+  fn batch_description_json(summary: &str) -> String {
+    serde_json::json!({
+      "summary": summary,
+      "tags": ["t"],
+      "suggested_category": "other",
+      "confidence": 0.9,
+    })
+    .to_string()
+  }
+
+  fn batch_result_line(custom_id: &str, summary: &str) -> String {
+    serde_json::json!({
+      "custom_id": custom_id,
+      "result": {
+        "type": "succeeded",
+        "message": {
+          "content": [
+            {"type": "text", "text": batch_description_json(summary)}
+          ],
+          "stop_reason": "end_turn",
+        },
+      },
+    })
+    .to_string()
+  }
+
+  #[tokio::test]
+  async fn describe_batch_submits_and_orders_results() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+      .and(path("/v1/messages/batches"))
+      .and(header("x-api-key", "test-key"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(
+        serde_json::json!({
+          "id": "msgbatch_01",
+          "processing_status": "ended",
+        }),
+      ))
+      .mount(&server)
+      .await;
+
+    // Results returned out of submission order on purpose.
+    let results_body = format!(
+      "{}\n{}\n",
+      batch_result_line("req-1", "a lease"),
+      batch_result_line("req-0", "a photo"),
+    );
+    Mock::given(method("GET"))
+      .and(path("/v1/messages/batches/msgbatch_01/results"))
+      .respond_with(
+        ResponseTemplate::new(200).set_body_string(results_body),
+      )
+      .mount(&server)
+      .await;
+
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-fable-5".to_string(),
+      0,
+    )
+    .with_base_url(server.uri());
+
+    let results =
+      provider.describe_batch(batch_test_requests()).await;
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].as_ref().unwrap().summary, "a photo");
+    assert_eq!(results[1].as_ref().unwrap().summary, "a lease");
+  }
+
+  #[tokio::test]
+  async fn describe_batch_polls_until_ended() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+      .and(path("/v1/messages/batches"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(
+        serde_json::json!({
+          "id": "msgbatch_02",
+          "processing_status": "in_progress",
+        }),
+      ))
+      .mount(&server)
+      .await;
+
+    // First poll still in progress, then ended.
+    Mock::given(method("GET"))
+      .and(path("/v1/messages/batches/msgbatch_02"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(
+        serde_json::json!({
+          "id": "msgbatch_02",
+          "processing_status": "in_progress",
+        }),
+      ))
+      .up_to_n_times(1)
+      .mount(&server)
+      .await;
+    Mock::given(method("GET"))
+      .and(path("/v1/messages/batches/msgbatch_02"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(
+        serde_json::json!({
+          "id": "msgbatch_02",
+          "processing_status": "ended",
+        }),
+      ))
+      .mount(&server)
+      .await;
+
+    Mock::given(method("GET"))
+      .and(path("/v1/messages/batches/msgbatch_02/results"))
+      .respond_with(ResponseTemplate::new(200).set_body_string(
+        format!(
+          "{}\n{}\n",
+          batch_result_line("req-0", "a photo"),
+          batch_result_line("req-1", "a lease"),
+        ),
+      ))
+      .mount(&server)
+      .await;
+
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-fable-5".to_string(),
+      0,
+    )
+    .with_base_url(server.uri())
+    .with_poll_interval(std::time::Duration::ZERO);
+
+    let results =
+      provider.describe_batch(batch_test_requests()).await;
+
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|r| r.is_ok()));
+  }
+
+  #[tokio::test]
+  async fn describe_batch_reports_errored_items_individually() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+      .and(path("/v1/messages/batches"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(
+        serde_json::json!({
+          "id": "msgbatch_03",
+          "processing_status": "ended",
+        }),
+      ))
+      .mount(&server)
+      .await;
+
+    let errored = serde_json::json!({
+      "custom_id": "req-1",
+      "result": {
+        "type": "errored",
+        "error": {"type": "invalid_request", "message": "too large"},
+      },
+    })
+    .to_string();
+    Mock::given(method("GET"))
+      .and(path("/v1/messages/batches/msgbatch_03/results"))
+      .respond_with(ResponseTemplate::new(200).set_body_string(
+        format!(
+          "{}\n{}\n",
+          batch_result_line("req-0", "a photo"),
+          errored,
+        ),
+      ))
+      .mount(&server)
+      .await;
+
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-fable-5".to_string(),
+      0,
+    )
+    .with_base_url(server.uri());
+
+    let results =
+      provider.describe_batch(batch_test_requests()).await;
+
+    assert!(results[0].is_ok());
+    let err = results[1].as_ref().unwrap_err().to_string();
+    assert!(err.contains("too large"));
+  }
+
+  #[tokio::test]
+  async fn describe_batch_fails_all_items_on_submission_error() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+      .and(path("/v1/messages/batches"))
+      .respond_with(
+        ResponseTemplate::new(401).set_body_string("bad key"),
+      )
+      .mount(&server)
+      .await;
+
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-fable-5".to_string(),
+      0,
+    )
+    .with_base_url(server.uri());
+
+    let results =
+      provider.describe_batch(batch_test_requests()).await;
+
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|r| r.is_err()));
   }
 }

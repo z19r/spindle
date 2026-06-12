@@ -74,6 +74,7 @@ pub struct PipelineConfig {
   pub max_concurrent: usize,
   pub include_trash: bool,
   pub type_filter: Vec<FileCategory>,
+  pub use_batch_api: bool,
 }
 
 #[derive(Debug)]
@@ -248,6 +249,7 @@ async fn run_ai_pipeline<P: AiProvider>(
   let opts = AnalyzeOptions {
     cache_dir: config.cache_dir.clone(),
     max_concurrent: config.max_concurrent,
+    use_batch_api: config.use_batch_api,
   };
 
   let subset: Vec<_> =
@@ -404,6 +406,7 @@ mod tests {
       max_concurrent: 2,
       include_trash: false,
       type_filter: vec![],
+      use_batch_api: false,
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -453,6 +456,7 @@ mod tests {
       max_concurrent: 2,
       include_trash: false,
       type_filter: vec![],
+      use_batch_api: false,
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -493,6 +497,7 @@ mod tests {
       max_concurrent: 2,
       include_trash: false,
       type_filter: vec![],
+      use_batch_api: false,
     };
 
     let (tx, _rx) = mpsc::channel(64);
@@ -531,6 +536,7 @@ mod tests {
       max_concurrent: 2,
       include_trash: false,
       type_filter: vec![],
+      use_batch_api: false,
     };
 
     let (tx, _rx) = mpsc::channel(64);
@@ -565,6 +571,7 @@ mod tests {
       max_concurrent: 2,
       include_trash: false,
       type_filter: vec![],
+      use_batch_api: false,
     };
 
     let (tx, mut rx) = mpsc::channel(64);
