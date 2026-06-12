@@ -379,6 +379,38 @@ impl AiProvider for ClaudeProvider {
     Ok(description)
   }
 
+  async fn describe_text(
+    &self,
+    excerpt: &str,
+    context: &DescribeContext,
+  ) -> Result<ContentDescription> {
+    let user_text =
+      super::describe_text_user_prompt(context, excerpt);
+    let system_text = format!(
+      "{task}\n\n{instructions}",
+      task = super::describe_system_prompt(),
+      instructions = super::describe_response_instructions(),
+    );
+
+    let request = cached_api_request(
+      self.model.clone(),
+      1024,
+      Some(vec![cached_system_block(system_text)]),
+      vec![Message {
+        role: "user",
+        content: vec![ContentBlock::Text {
+          text: user_text,
+          cache_control: None,
+        }],
+      }],
+    );
+
+    let text = self.send_request(request).await?;
+    let description: ContentDescription = serde_json::from_str(&text)
+      .context("Failed to parse description JSON from Claude")?;
+    Ok(description)
+  }
+
   async fn propose_groups(
     &self,
     files: &[FileSummary],
