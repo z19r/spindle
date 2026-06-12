@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 const BYTES_PER_MB: u64 = 1_000_000;
 use tokio::sync::mpsc;
@@ -52,6 +52,9 @@ pub enum PipelineEvent {
     succeeded: usize,
     failed: usize,
     failed_files: Vec<(String, String)>,
+  },
+  GroupingFailed {
+    error: String,
   },
   GroupingComplete {
     group_count: usize,
@@ -303,10 +306,25 @@ async fn run_ai_pipeline<P: AiProvider>(
     })
     .await;
 
-  provider
-    .propose_groups(&summaries)
-    .await
-    .context("Failed to propose semantic groups")
+  match provider.propose_groups(&summaries).await {
+    Ok(groups) => Ok(groups),
+    Err(err) => {
+      let _ = tx
+        .send(PipelineEvent::GroupingFailed {
+          error: format!("{err:#}"),
+        })
+        .await;
+      Ok(vec![ProposedGroup {
+        label: "All Files".to_string(),
+        rationale: format!(
+          "Semantic grouping failed ({err:#}), \
+           falling back to single group"
+        ),
+        member_indices: (0..summaries.len()).collect(),
+        member_destinations: vec![],
+      }])
+    }
+  }
 }
 
 #[cfg(test)]

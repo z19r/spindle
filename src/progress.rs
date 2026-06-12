@@ -263,6 +263,10 @@ impl PipelineProgress {
           println!("  \u{2717} {} \u{2014} {}", name, err);
         }
       }
+      PipelineEvent::GroupingFailed { error } => {
+        println!("  \u{26a0} Semantic grouping failed: {}", error,);
+        println!("    Falling back to single group");
+      }
       PipelineEvent::GroupingComplete { group_count } => {
         tracing::info!(group_count, "Semantic grouping complete");
       }
