@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
     max_concurrent: config.ai.max_concurrent_requests,
     include_trash: cli.include_trash,
     type_filter: cli.file_types.clone(),
+    use_batch_api: cli.batch,
   };
 
   let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(64);

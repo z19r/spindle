@@ -40,6 +40,11 @@ pub struct CliArgs {
   #[arg(long)]
   pub max_cost: Option<f64>,
 
+  /// Use the Batch API for analysis (50% cheaper, results may take
+  /// minutes to hours)
+  #[arg(long)]
+  pub batch: bool,
+
   /// Anthropic API base URL (for proxies like whetstone)
   #[arg(long, env = "ANTHROPIC_BASE_URL")]
   pub api_base_url: Option<String>,
@@ -280,6 +285,7 @@ mod tests {
       api_key: None,
       max_files: None,
       max_cost: None,
+      batch: false,
       api_base_url: None,
       verbose: 0,
       include_trash: false,
@@ -584,5 +590,17 @@ base_url = "https://from-file.example.com"
     let ai = AiConfig::default();
 
     assert!(ai.base_url.is_none());
+  }
+
+  #[test]
+  fn batch_flag_defaults_off_and_parses() {
+    use clap::Parser;
+
+    let default_args = CliArgs::parse_from(["spindle", "some-dir"]);
+    assert!(!default_args.batch);
+
+    let batch_args =
+      CliArgs::parse_from(["spindle", "--batch", "some-dir"]);
+    assert!(batch_args.batch);
   }
 }

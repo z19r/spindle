@@ -9,6 +9,9 @@ use crate::model::{ContentDescription, FingerprintedFile};
 pub struct AnalyzeOptions {
   pub cache_dir: PathBuf,
   pub max_concurrent: usize,
+  /// Use the Batch API (50% cheaper, async) instead of concurrent
+  /// individual requests.
+  pub use_batch_api: bool,
 }
 
 impl Default for AnalyzeOptions {
@@ -16,6 +19,7 @@ impl Default for AnalyzeOptions {
     Self {
       cache_dir: default_cache_dir(),
       max_concurrent: 5,
+      use_batch_api: false,
     }
   }
 }
@@ -368,6 +372,10 @@ pub async fn analyze_batch(
   files: &[FingerprintedFile],
   options: &AnalyzeOptions,
 ) -> Vec<Result<ContentDescription>> {
+  if options.use_batch_api {
+    return analyze_batch_via_api(provider, files, options).await;
+  }
+
   use futures::stream::{self, StreamExt};
 
   let semaphore =
@@ -387,6 +395,145 @@ pub async fn analyze_batch(
     .buffer_unordered(options.max_concurrent)
     .collect()
     .await
+}
+
+/// What a file contributes to a batch run.
+enum BatchSlot {
+  /// Already resolved locally (cache hit, fallback description, or
+  /// a local error such as an unreadable image).
+  Resolved(Result<ContentDescription>),
+  /// Needs an API call; index into the submitted request list.
+  Submitted(usize),
+}
+
+/// Analyze files through the provider's batch interface. Cache hits
+/// and filename-only fallbacks resolve locally; everything else is
+/// submitted as one batch. Videos go through the regular per-file
+/// path since keyframe extraction is multi-request.
+async fn analyze_batch_via_api(
+  provider: &impl AiProvider,
+  files: &[FingerprintedFile],
+  options: &AnalyzeOptions,
+) -> Vec<Result<ContentDescription>> {
+  use crate::ai::{DescribePayload, DescribeRequest};
+
+  let mut slots = Vec::with_capacity(files.len());
+  let mut requests = Vec::new();
+
+  for file in files {
+    if let Some(cached) =
+      read_cache(&options.cache_dir, &file.blake3_hash).await
+    {
+      slots.push(BatchSlot::Resolved(Ok(cached)));
+      continue;
+    }
+
+    let filename = file
+      .scanned
+      .path
+      .file_name()
+      .unwrap_or_default()
+      .to_string_lossy()
+      .to_string();
+
+    if file.scanned.file_type.is_video() {
+      slots.push(BatchSlot::Resolved(
+        analyze_file(provider, file, options).await,
+      ));
+      continue;
+    }
+
+    if file.scanned.file_type.is_image() {
+      match tokio::fs::read(&file.scanned.path).await {
+        Ok(data) => {
+          requests.push(DescribeRequest {
+            payload: DescribePayload::Image {
+              data,
+              mime_type: file
+                .scanned
+                .file_type
+                .mime_type()
+                .to_string(),
+            },
+            context: DescribeContext {
+              filename,
+              file_type_label: file
+                .scanned
+                .file_type
+                .mime_type()
+                .to_string(),
+              file_size: file.scanned.size,
+              metadata_hint: None,
+            },
+          });
+          slots.push(BatchSlot::Submitted(requests.len() - 1));
+        }
+        Err(e) => {
+          slots.push(BatchSlot::Resolved(Err(anyhow::anyhow!(
+            "Failed to read file {}: {e}",
+            file.scanned.path.display()
+          ))));
+        }
+      }
+      continue;
+    }
+
+    if matches!(
+      file.scanned.file_type,
+      crate::model::FileType::Document(_)
+    ) {
+      match extract_document_text(file).await {
+        Some(text) if !text.trim().is_empty() => {
+          requests.push(DescribeRequest {
+            payload: DescribePayload::Text { excerpt: text },
+            context: DescribeContext {
+              filename,
+              file_type_label: document_type_label(file),
+              file_size: file.scanned.size,
+              metadata_hint: None,
+            },
+          });
+          slots.push(BatchSlot::Submitted(requests.len() - 1));
+        }
+        _ => {
+          slots.push(BatchSlot::Resolved(Ok(describe_by_filename(
+            file, &filename,
+          ))));
+        }
+      }
+      continue;
+    }
+
+    slots.push(BatchSlot::Resolved(Ok(describe_by_filename(
+      file, &filename,
+    ))));
+  }
+
+  let mut batch_results = if requests.is_empty() {
+    Vec::new()
+  } else {
+    provider.describe_batch(requests).await
+  };
+
+  let mut out = Vec::with_capacity(files.len());
+  for (file, slot) in files.iter().zip(slots) {
+    let result = match slot {
+      BatchSlot::Resolved(r) => r,
+      BatchSlot::Submitted(i) => std::mem::replace(
+        &mut batch_results[i],
+        Err(anyhow::anyhow!("Batch result already taken")),
+      ),
+    };
+
+    if let Ok(desc) = &result {
+      let _ =
+        write_cache(&options.cache_dir, &file.blake3_hash, desc)
+          .await;
+    }
+    out.push(result);
+  }
+
+  out
 }
 
 #[cfg(test)]
@@ -514,6 +661,7 @@ mod tests {
     let opts = AnalyzeOptions {
       cache_dir: dir.path().to_path_buf(),
       max_concurrent: 1,
+      use_batch_api: false,
     };
 
     struct PanicProvider;
@@ -550,6 +698,7 @@ mod tests {
     let opts = AnalyzeOptions {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
+      use_batch_api: false,
     };
 
     struct FakeProvider;
@@ -591,6 +740,7 @@ mod tests {
     let opts = AnalyzeOptions {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
+      use_batch_api: false,
     };
 
     struct FakeProvider;
@@ -651,6 +801,7 @@ mod tests {
     let opts = AnalyzeOptions {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
+      use_batch_api: false,
     };
 
     struct UnusedProvider;
@@ -691,6 +842,7 @@ mod tests {
     let opts = AnalyzeOptions {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
+      use_batch_api: false,
     };
 
     struct StubProvider;
@@ -785,6 +937,7 @@ mod tests {
     let opts = AnalyzeOptions {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
+      use_batch_api: false,
     };
 
     let provider = TextCapturingProvider {
@@ -815,6 +968,7 @@ mod tests {
     let opts = AnalyzeOptions {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
+      use_batch_api: false,
     };
 
     let provider = TextCapturingProvider {
@@ -842,6 +996,7 @@ mod tests {
     let opts = AnalyzeOptions {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
+      use_batch_api: false,
     };
 
     let provider = TextCapturingProvider {
@@ -876,5 +1031,171 @@ mod tests {
 
     assert!(truncated.len() <= MAX_TEXT_EXCERPT_BYTES);
     assert!(truncated.is_char_boundary(truncated.len()));
+  }
+
+  /// Provider that only answers through describe_batch and records
+  /// how many requests it received.
+  struct BatchOnlyProvider {
+    batch_sizes: std::sync::Mutex<Vec<usize>>,
+  }
+
+  impl BatchOnlyProvider {
+    fn new() -> Self {
+      Self {
+        batch_sizes: std::sync::Mutex::new(Vec::new()),
+      }
+    }
+  }
+
+  impl AiProvider for BatchOnlyProvider {
+    async fn describe_image(
+      &self,
+      _: &[u8],
+      _: &str,
+      _: &DescribeContext,
+    ) -> Result<ContentDescription> {
+      panic!("individual describe_image used in batch mode");
+    }
+
+    async fn describe_text(
+      &self,
+      _: &str,
+      _: &DescribeContext,
+    ) -> Result<ContentDescription> {
+      panic!("individual describe_text used in batch mode");
+    }
+
+    async fn describe_batch(
+      &self,
+      requests: Vec<crate::ai::DescribeRequest>,
+    ) -> Vec<Result<ContentDescription>> {
+      self.batch_sizes.lock().unwrap().push(requests.len());
+      requests
+        .iter()
+        .map(|r| {
+          Ok(ContentDescription {
+            summary: format!("batched: {}", r.context.filename),
+            tags: vec!["batch".to_string()],
+            suggested_category: "other".to_string(),
+            confidence: 0.9,
+          })
+        })
+        .collect()
+    }
+
+    async fn propose_groups(
+      &self,
+      _: &[crate::model::FileSummary],
+    ) -> Result<Vec<crate::model::ProposedGroup>> {
+      panic!("unused");
+    }
+  }
+
+  #[tokio::test]
+  async fn analyze_batch_uses_batch_api_when_enabled() {
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let image =
+      make_test_file(file_dir.path(), "photo.jpg", b"jpeg bytes");
+    let doc = make_document_file(
+      file_dir.path(),
+      "lease.txt",
+      b"LEASE AGREEMENT terms",
+      crate::model::DocumentFormat::Txt,
+    );
+
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      max_concurrent: 1,
+      use_batch_api: true,
+    };
+
+    let provider = BatchOnlyProvider::new();
+    let results =
+      analyze_batch(&provider, &[image.clone(), doc], &opts).await;
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+      results[0].as_ref().unwrap().summary,
+      "batched: photo.jpg"
+    );
+    assert_eq!(
+      results[1].as_ref().unwrap().summary,
+      "batched: lease.txt"
+    );
+    // One batch containing both requests
+    assert_eq!(*provider.batch_sizes.lock().unwrap(), vec![2]);
+
+    // Results were cached for the next run
+    assert!(read_cache(cache_dir.path(), &image.blake3_hash)
+      .await
+      .is_some());
+  }
+
+  #[tokio::test]
+  async fn analyze_batch_api_skips_cached_files() {
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let cached_file =
+      make_test_file(file_dir.path(), "seen.jpg", b"old bytes");
+    let new_file =
+      make_test_file(file_dir.path(), "new.jpg", b"new bytes");
+
+    write_cache(
+      cache_dir.path(),
+      &cached_file.blake3_hash,
+      &sample_description(),
+    )
+    .await
+    .unwrap();
+
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      max_concurrent: 1,
+      use_batch_api: true,
+    };
+
+    let provider = BatchOnlyProvider::new();
+    let results =
+      analyze_batch(&provider, &[cached_file, new_file], &opts).await;
+
+    assert_eq!(
+      results[0].as_ref().unwrap().summary,
+      "A sunset over the ocean"
+    );
+    assert_eq!(
+      results[1].as_ref().unwrap().summary,
+      "batched: new.jpg"
+    );
+    // Only the uncached file was submitted
+    assert_eq!(*provider.batch_sizes.lock().unwrap(), vec![1]);
+  }
+
+  #[tokio::test]
+  async fn analyze_batch_api_resolves_unbatchable_files_locally() {
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let docx = make_document_file(
+      file_dir.path(),
+      "report.docx",
+      b"PK\x03\x04 binary",
+      crate::model::DocumentFormat::Docx,
+    );
+
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      max_concurrent: 1,
+      use_batch_api: true,
+    };
+
+    let provider = BatchOnlyProvider::new();
+    let results = analyze_batch(&provider, &[docx], &opts).await;
+
+    assert_eq!(
+      results[0].as_ref().unwrap().suggested_category,
+      "document"
+    );
+    // Nothing was submitted to the API
+    assert!(provider.batch_sizes.lock().unwrap().is_empty());
   }
 }
