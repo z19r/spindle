@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::path::Path;
+
 use anyhow::Result;
 use clap::Parser;
 use dotenv::dotenv;
@@ -9,8 +12,10 @@ use spindle::executor::execute_plan;
 use spindle::fingerprint::{
   find_exact_duplicates, fingerprint_files,
 };
+use spindle::ledger::{Ledger, LedgerEntry};
 use spindle::model::{
   ApprovedPlan, ExecutionReport, FileGroup, FileMove,
+  FingerprintedFile,
 };
 use spindle::pipeline::{self, PipelineConfig, PipelineEvent};
 use spindle::progress::{self, PipelineProgress};
@@ -48,6 +53,8 @@ async fn main() -> Result<()> {
     config.ai.max_retries,
   );
 
+  let ledger_path = spindle::config::resolve_ledger_path(&cli);
+
   let pipeline_config = PipelineConfig {
     target_dirs: config.general.target_dirs.clone(),
     output_dir: config.general.output_dir.clone(),
@@ -63,6 +70,7 @@ async fn main() -> Result<()> {
     include_trash: cli.include_trash,
     type_filter: cli.file_types.clone(),
     use_batch_api: cli.batch,
+    ledger_path: ledger_path.clone(),
   };
 
   let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(64);
@@ -88,6 +96,20 @@ async fn main() -> Result<()> {
     plan.stats.duplicates_found,
     format_bytes(plan.stats.space_to_reclaim),
   );
+
+  if !result.organized_duplicates.is_empty() {
+    println!(
+      "\n{} new file(s) are identical to already-organized content:",
+      result.organized_duplicates.len()
+    );
+    for dup in &result.organized_duplicates {
+      println!(
+        "  {} ↔ {}",
+        dup.path.display(),
+        dup.organized_at.display()
+      );
+    }
+  }
 
   if plan.groups.is_empty() {
     println!("Nothing to organize.");
@@ -124,7 +146,13 @@ async fn main() -> Result<()> {
     ReviewAction::Execute => {}
   }
 
-  execute_review(&cli, &config, &review_state)
+  let recording =
+    ledger_path.as_deref().map(|path| LedgerRecording {
+      path,
+      fingerprinted: &result.fingerprinted,
+      groups: &plan.groups,
+    });
+  execute_review(&cli, &config, &review_state, recording)
 }
 
 fn run_undo(cli: &CliArgs, config: &Config) -> Result<()> {
@@ -203,7 +231,8 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
     ReviewAction::Execute => {}
   }
 
-  execute_review(cli, config, &review_state)
+  // Dedup-only runs don't organize into folders, so nothing is recorded.
+  execute_review(cli, config, &review_state, None)
 }
 
 fn dupes_to_groups(
@@ -277,10 +306,71 @@ fn dupes_to_groups(
   (groups, moves, dupe_types)
 }
 
+/// Everything needed to append organized moves to the ledger after a
+/// successful (non-dry-run) organize.
+struct LedgerRecording<'a> {
+  path: &'a Path,
+  fingerprinted: &'a [FingerprintedFile],
+  groups: &'a [FileGroup],
+}
+
+/// Append the completed moves to the persistent ledger so future runs skip
+/// these files. A ledger write failure is logged, never fatal.
+fn record_organized(
+  recording: &LedgerRecording<'_>,
+  moves: &[FileMove],
+) {
+  if moves.is_empty() {
+    return;
+  }
+  let hash_by_path: HashMap<&Path, String> = recording
+    .fingerprinted
+    .iter()
+    .map(|f| {
+      (
+        f.scanned.path.as_path(),
+        spindle::ledger::hash_hex(&f.blake3_hash),
+      )
+    })
+    .collect();
+  let label_by_group: HashMap<usize, &str> = recording
+    .groups
+    .iter()
+    .map(|g| (g.id, g.label.as_str()))
+    .collect();
+
+  let organized_at = chrono::Utc::now().to_rfc3339();
+  let mut ledger = Ledger::load(recording.path);
+  for mv in moves {
+    let Some(hex) = hash_by_path.get(mv.from.as_path()) else {
+      continue;
+    };
+    let label = label_by_group
+      .get(&mv.group_id)
+      .copied()
+      .unwrap_or("ungrouped");
+    ledger.record(LedgerEntry {
+      source_path: mv.from.clone(),
+      dest_path: mv.to.clone(),
+      blake3_hex: hex.clone(),
+      group_label: label.to_string(),
+      organized_at: organized_at.clone(),
+    });
+  }
+  if let Err(err) = ledger.save(recording.path) {
+    tracing::warn!(
+      path = %recording.path.display(),
+      error = %err,
+      "Failed to update organized ledger"
+    );
+  }
+}
+
 fn execute_review(
   cli: &CliArgs,
   config: &Config,
   review_state: &ReviewState,
+  ledger: Option<LedgerRecording<'_>>,
 ) -> Result<()> {
   let undo_log_path =
     config.general.output_dir.join(".spindle_undo.json");
@@ -341,6 +431,10 @@ fn execute_review(
       }
 
       print_undo_info(&report);
+
+      if let Some(recording) = ledger {
+        record_organized(&recording, &report.moves_completed);
+      }
     }
     ReviewMode::Dupes => {
       let deletions = review_state.files_to_delete();

@@ -6,7 +6,7 @@ use super::DescribeContext;
 
 const DESCRIBE_RESPONSE_INSTRUCTIONS: &str = "Focus on the SUBJECT and THEME of the content, not the file format.\nA photo, video, PDF, and spreadsheet about the same topic should get similar tags.\n\nBe SPECIFIC enough that similar files can be told apart later:\n- Photos: say WHO is in the frame (how many people, adults/children, selfie vs posed vs candid), any pets and their species, the setting, and the activity or event. Two photos of the same person must get DIFFERENT descriptions when the companions, pets, location, or activity differ.\n- Documents: identify the document TYPE (contract, court filing, invoice, letter, medical record, ...), the parties or organizations involved, and any case numbers, matter names, account numbers, or dates. Two legal documents from different cases must be distinguishable from their summaries alone.\n- Screenshots: name the app or site shown and what is happening in it.\n\nRespond in JSON:\n{\n  \"summary\": \"1-2 sentence description specific to THIS file's subject\",\n  \"tags\": [\"5-8 tags, most specific first (e.g. 'couple-photo', 'smith-v-jones', 'golden-retriever'), ending with general ones (e.g. 'pets', 'legal')\"],\n  \"suggested_category\": \"travel|nature|food|work|family|pets|sports|entertainment|art|science|tech|finance|health|education|events|vehicles|architecture|legal|other\",\n  \"confidence\": 0.0-1.0\n}";
 
-const GROUP_RESPONSE_INSTRUCTIONS: &str = "Respond in JSON:\n{\n  \"groups\": [\n    {\n      \"label\": \"...\",\n      \"rationale\": \"...\",\n      \"members\": [\n        { \"index\": 0, \"dest_name\": \"image1.jpg\" },\n        { \"index\": 3, \"dest_name\": \"porn/nude.jpg\" }\n      ]\n    }\n  ]\n}\n\nRules:\n- A file can only be in one group\n- Groups should have at least 2 members\n- Prefer SPECIFIC groups over broad catch-alls. \"Alex & Katy\", \"Selfies\", and \"Dog Photos\" are better than one \"Personal Photos\" bucket. \"Smith v. Jones Lawsuit\" and \"Apartment Lease\" are better than one \"Legal Documents\" bucket.\n- Split a broad theme whenever the summaries/tags distinguish sub-subjects: different people pictured, different pets, different cases or matters, different trips or events\n- Use dest_name sub-paths to organize within a group (e.g. \"2023-trip/beach.jpg\") when members share a group but differ in sub-subject\n- Files that don't fit any group can be omitted\n- NEVER group by file type — group by subject, theme, or context\n- A .jpg, .mp4, .pdf, and .csv can all belong in the same group if they share a topic\n- For each member, dest_name is the filename or sub-path to use inside the group folder\n- Preserve source subfolder prefixes in dest_name ONLY when they add meaningful context\n- Drop misleading or redundant subfolder prefixes (e.g. a cat photo in \"porn/\" → just the filename)\n- dest_name must always end with the original file's name and extension\n";
+const GROUP_RESPONSE_INSTRUCTIONS: &str = "Respond in JSON:\n{\n  \"groups\": [\n    {\n      \"label\": \"Work/Acme Corp/Website Redesign\",\n      \"rationale\": \"...\",\n      \"members\": [\n        { \"index\": 0, \"dest_name\": \"contract.pdf\" },\n        { \"index\": 3, \"dest_name\": \"mockups/home.png\" }\n      ]\n    }\n  ]\n}\n\nRules:\n- A file can only be in one group\n- Groups should have at least 2 members\n- The \"label\" CAN be a nested folder path using \"/\" to build a real directory tree, where each \"/\" becomes a subdirectory. Use nesting whenever a natural hierarchy exists (it usually does) — a flat single-level label is also fine when it doesn't. Good nested labels: \"Work/Acme Corp/Website Redesign\", \"Photos/2023/Hawaii Trip\", \"Finance/Taxes/2023\", \"Legal/Smith v. Jones\".\n- When you do nest, go from general to specific: the top level is a broad area (Work, Photos, Finance, Legal, Personal), and deeper levels narrow by client/project, year/event, or matter/case. Use as many levels as the content clearly supports — commonly 2-3. Don't invent hierarchy that isn't there, and don't bury a lone file under deep folders.\n- Prefer SPECIFIC groups over broad catch-alls. \"Alex & Katy\", \"Selfies\", and \"Dog Photos\" are better than one \"Personal Photos\" bucket. \"Smith v. Jones Lawsuit\" and \"Apartment Lease\" are better than one \"Legal Documents\" bucket.\n- Split a broad theme whenever the summaries/tags distinguish sub-subjects: different people pictured, different pets, different cases or matters, different trips or events. Prefer expressing that split as deeper label levels (e.g. \"Photos/Pets/Dogs\" vs \"Photos/Pets/Cats\").\n- Use dest_name sub-paths to organize even further WITHIN a group (e.g. \"raw/beach.jpg\") when members share a group but differ in sub-subject\n- Files that don't fit any group can be omitted\n- NEVER group by file type — group by subject, theme, or context\n- A .jpg, .mp4, .pdf, and .csv can all belong in the same group if they share a topic\n- For each member, dest_name is the filename or sub-path to use inside the group folder\n- Preserve source subfolder prefixes in dest_name ONLY when they add meaningful context\n- Drop misleading or redundant subfolder prefixes (e.g. a cat photo in \"porn/\" → just the filename)\n- dest_name must always end with the original file's name and extension\n";
 
 pub fn describe_system_prompt() -> &'static str {
   "You are helping organize a messy folder. \
@@ -32,7 +32,7 @@ pub fn describe_response_instructions() -> &'static str {
 
 pub fn group_system_prompt() -> String {
   format!(
-    "You are organizing files into logical groups by TOPIC and THEME.\n     File type is IRRELEVANT — a photo, video, PDF, and spreadsheet about the same      subject belong in the same group.\n\n     Group files that share a common topic — for example:\n     - A vacation photo, a hotel receipt PDF, and a trip itinerary spreadsheet → \"Hawaii Trip\"\n     - A movie clip, a fan art image, and a character guide PDF → \"Star Wars\"\n     - A presentation, meeting notes, and a project diagram → \"Q4 Launch\"\n\n     {GROUP_RESPONSE_INSTRUCTIONS}"
+    "You are organizing files into logical groups by TOPIC and THEME.\n     File type is IRRELEVANT — a photo, video, PDF, and spreadsheet about the same      subject belong in the same group.\n\n     Group files that share a common topic. Labels CAN be nested \"/\" paths to build a real folder tree (general → specific), which is usually the most natural fit — for example:\n     - A vacation photo, a hotel receipt PDF, and a trip itinerary spreadsheet → \"Photos/2023/Hawaii Trip\"\n     - A contract, invoices, and mockups for one client's project → \"Work/Acme Corp/Website Redesign\"\n     - A movie clip, a fan art image, and a character guide PDF → \"Entertainment/Star Wars\"\n     - A presentation, meeting notes, and a project diagram → \"Work/Q4 Launch\"\n\n     {GROUP_RESPONSE_INSTRUCTIONS}"
   )
 }
 
@@ -49,6 +49,26 @@ pub fn group_user_prompt(files: &[FileSummary]) -> String {
   }
 
   prompt
+}
+
+/// Hint listing folders previous runs already created. Empty when there is
+/// no prior history. Goes in the user prompt (not the cached system block)
+/// because the set of existing folders changes from run to run.
+pub fn group_existing_groups_note(
+  existing_labels: &[String],
+) -> String {
+  if existing_labels.is_empty() {
+    return String::new();
+  }
+  let mut note = String::from(
+    "\nThese folders already exist from previous runs. If a file clearly \
+     belongs to one, REUSE its exact label as the group \"label\" so the \
+     file joins that folder instead of creating a near-duplicate:\n",
+  );
+  for label in existing_labels {
+    let _ = writeln!(note, "- {label}");
+  }
+  note
 }
 
 pub fn describe_text_user_prompt(
@@ -144,6 +164,23 @@ mod tests {
     assert!(prompt.contains("tags"));
     assert!(prompt.contains("suggested_category"));
     assert!(prompt.contains("confidence"));
+  }
+
+  #[test]
+  fn existing_groups_note_is_empty_without_history() {
+    assert!(group_existing_groups_note(&[]).is_empty());
+  }
+
+  #[test]
+  fn existing_groups_note_lists_labels_and_asks_for_reuse() {
+    let note = group_existing_groups_note(&[
+      "Beach".to_string(),
+      "Dogs".to_string(),
+    ]);
+
+    assert!(note.contains("Beach"));
+    assert!(note.contains("Dogs"));
+    assert!(note.to_lowercase().contains("reuse"));
   }
 
   #[test]

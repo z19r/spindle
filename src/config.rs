@@ -78,6 +78,28 @@ pub struct CliArgs {
     value_parser = parse_file_category,
   )]
   pub file_types: Vec<FileCategory>,
+
+  /// Don't read or update the "already organized" ledger this run.
+  #[arg(long)]
+  pub no_ledger: bool,
+
+  /// Path to the organized ledger (defaults to the global data dir).
+  #[arg(long)]
+  pub ledger: Option<PathBuf>,
+}
+
+/// Resolve the ledger path for this run: `None` when disabled, otherwise the
+/// explicit `--ledger` path or the global default.
+pub fn resolve_ledger_path(cli: &CliArgs) -> Option<PathBuf> {
+  if cli.no_ledger {
+    return None;
+  }
+  Some(
+    cli
+      .ledger
+      .clone()
+      .unwrap_or_else(crate::ledger::default_ledger_path),
+  )
 }
 
 fn parse_file_category(s: &str) -> Result<FileCategory, String> {
@@ -293,6 +315,8 @@ mod tests {
       undo: false,
       undo_log: None,
       file_types: vec![],
+      no_ledger: false,
+      ledger: None,
     }
   }
 

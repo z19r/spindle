@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -111,6 +111,7 @@ pub enum Mode {
   NewGroup { input: String, cursor_pos: usize },
   ConfirmRemove,
   DiffView { compare_idx: usize },
+  Preview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +154,7 @@ struct ModeData {
   group_moves: Vec<Vec<FileMove>>,
   approved: Vec<bool>,
   file_keep: Vec<Vec<bool>>,
+  file_marked: Vec<HashSet<usize>>,
   dupe_types: Vec<DuplicateType>,
 }
 
@@ -172,6 +174,7 @@ pub struct ReviewState {
   preview_path: Option<PathBuf>,
   image_rx: Option<Receiver<(PathBuf, StatefulProtocol)>>,
   file_keep: Vec<Vec<bool>>,
+  file_marked: Vec<HashSet<usize>>,
   review_mode: ReviewMode,
   other_mode_data: Option<ModeData>,
   file_metadata: HashMap<PathBuf, (String, u64)>,
@@ -229,11 +232,14 @@ impl ReviewState {
         let other_approved = vec![true; og.len()];
         let other_file_keep =
           Self::init_file_keep(&other_group_moves, omode);
+        let other_file_marked =
+          vec![HashSet::new(); og.len()];
         ModeData {
           groups: og,
           group_moves: other_group_moves,
           approved: other_approved,
           file_keep: other_file_keep,
+          file_marked: other_file_marked,
           dupe_types: odupe_types,
         }
       });
@@ -254,6 +260,7 @@ impl ReviewState {
       preview_path: None,
       image_rx: None,
       file_keep,
+      file_marked: vec![HashSet::new(); len],
       review_mode: mode,
       other_mode_data,
       file_metadata: HashMap::new(),
@@ -404,6 +411,43 @@ impl ReviewState {
     deletions
   }
 
+  pub fn is_file_marked(&self, group_idx: usize, file_idx: usize) -> bool {
+    self
+      .file_marked
+      .get(group_idx)
+      .map(|s| s.contains(&file_idx))
+      .unwrap_or(false)
+  }
+
+  fn toggle_file_mark(&mut self) {
+    let gi = self.selected;
+    let fi = self.file_selected;
+    if let Some(set) = self.file_marked.get_mut(gi) {
+      if !set.remove(&fi) {
+        set.insert(fi);
+      }
+    }
+  }
+
+  fn marked_file_indices(&self) -> Vec<usize> {
+    self
+      .file_marked
+      .get(self.selected)
+      .filter(|s| !s.is_empty())
+      .map(|s| {
+        let mut v: Vec<usize> = s.iter().copied().collect();
+        v.sort_unstable();
+        v
+      })
+      .unwrap_or_else(|| vec![self.file_selected])
+  }
+
+  fn clear_marks(&mut self) {
+    if let Some(set) = self.file_marked.get_mut(self.selected) {
+      set.clear();
+    }
+  }
+
   fn toggle_file_keep(&mut self) {
     let gi = self.selected;
     let fi = self.file_selected;
@@ -542,6 +586,81 @@ impl ReviewState {
     self.diff_state = None;
   }
 
+  fn enter_preview(&mut self) {
+    let mv = match self.current_file_move() {
+      Some(m) => m,
+      None => return,
+    };
+    let path = mv.from.clone();
+
+    let ft = path
+      .extension()
+      .and_then(|e| e.to_str())
+      .map(FileType::from_extension);
+
+    let is_image = ft.as_ref().map(|f| f.is_image()).unwrap_or(false);
+    let is_text = ft.as_ref().map(|f| f.is_text()).unwrap_or(false);
+
+    if is_image {
+      let mut ds = DiffState {
+        primary_preview: PreviewState::Loading,
+        secondary_preview: PreviewState::None,
+        primary_rx: None,
+        secondary_rx: None,
+        primary_path: Some(path.clone()),
+        secondary_path: None,
+        content: DiffContent::Images,
+        scroll: 0,
+      };
+
+      if let Some(picker) = &self.picker {
+        let pk = picker.clone();
+        let (tx, rx) = mpsc::channel();
+        let p = path;
+        thread::spawn(move || {
+          let decoded = image::ImageReader::open(&p)
+            .and_then(|r| r.with_guessed_format())
+            .ok()
+            .and_then(|r| r.decode().ok());
+          if let Some(img) = decoded {
+            let protocol = pk.new_resize_protocol(img);
+            let _ = tx.send((p, protocol));
+          }
+        });
+        ds.primary_rx = Some(rx);
+      }
+
+      self.diff_state = Some(ds);
+    } else if is_text {
+      let text = std::fs::read_to_string(&path).unwrap_or_default();
+      let lines: Vec<DiffLine> =
+        text.lines().map(|l| DiffLine::Same(l.to_string())).collect();
+      self.diff_state = Some(DiffState {
+        primary_preview: PreviewState::None,
+        secondary_preview: PreviewState::None,
+        primary_rx: None,
+        secondary_rx: None,
+        primary_path: Some(path),
+        secondary_path: None,
+        content: DiffContent::Text(lines),
+        scroll: 0,
+      });
+    } else {
+      self.diff_state = Some(DiffState {
+        primary_preview: PreviewState::None,
+        secondary_preview: PreviewState::None,
+        primary_rx: None,
+        secondary_rx: None,
+        primary_path: Some(path),
+        secondary_path: None,
+        content: DiffContent::Binary,
+        scroll: 0,
+      });
+    }
+
+    self.mode = Mode::Preview;
+  }
+
   fn update_image_preview(&mut self) {
     let path = self.current_file_move().map(|mv| mv.from.clone());
     if path == self.preview_path {
@@ -656,6 +775,7 @@ impl ReviewState {
       Mode::NewGroup { .. } => self.handle_new_group_key(code),
       Mode::ConfirmRemove => self.handle_confirm_remove_key(code),
       Mode::DiffView { .. } => self.handle_diff_view_key(code),
+      Mode::Preview => self.handle_preview_key(code),
     }
     self.update_image_preview();
   }
@@ -671,6 +791,7 @@ impl ReviewState {
 
       KeyCode::Char('j') | KeyCode::Down => match self.focus {
         Pane::Groups if !self.groups.is_empty() => {
+          self.clear_marks();
           self.selected = (self.selected + 1) % self.groups.len();
           self.file_selected = 0;
         }
@@ -685,6 +806,7 @@ impl ReviewState {
 
       KeyCode::Char('k') | KeyCode::Up => match self.focus {
         Pane::Groups if !self.groups.is_empty() => {
+          self.clear_marks();
           self.selected = if self.selected == 0 {
             self.groups.len() - 1
           } else {
@@ -714,8 +836,17 @@ impl ReviewState {
         Pane::Files if self.review_mode == ReviewMode::Dupes => {
           self.toggle_file_keep();
         }
-        _ => {}
+        Pane::Files => {
+          self.enter_preview();
+        }
       },
+
+      KeyCode::Enter
+        if self.focus == Pane::Files
+          && self.review_mode == ReviewMode::Organize =>
+      {
+        self.toggle_file_mark();
+      }
 
       KeyCode::Char('x') => {
         self.action = Some(ReviewAction::Execute);
@@ -725,7 +856,7 @@ impl ReviewState {
         if self.focus == Pane::Files
           && self.review_mode == ReviewMode::Organize =>
       {
-        self.remove_current_file();
+        self.remove_marked_files();
       }
 
       KeyCode::Char('d')
@@ -770,6 +901,10 @@ impl ReviewState {
           file_keep: std::mem::replace(
             &mut self.file_keep,
             cached.file_keep,
+          ),
+          file_marked: std::mem::replace(
+            &mut self.file_marked,
+            cached.file_marked,
           ),
           dupe_types: std::mem::replace(
             &mut self.dupe_types,
@@ -951,17 +1086,44 @@ impl ReviewState {
     }
   }
 
-  fn remove_current_file(&mut self) {
+  fn handle_preview_key(&mut self, code: KeyCode) {
+    match code {
+      KeyCode::Char('[') => {
+        if let Some(ref mut ds) = self.diff_state {
+          ds.scroll = ds.scroll.saturating_sub(3);
+        }
+      }
+      KeyCode::Char(']') => {
+        if let Some(ref mut ds) = self.diff_state {
+          ds.scroll = ds.scroll.saturating_add(3);
+        }
+      }
+      KeyCode::Esc
+      | KeyCode::Char(' ')
+      | KeyCode::Char('q') => {
+        self.mode = Mode::Normal;
+        self.exit_diff_view();
+      }
+      _ => {}
+    }
+  }
+
+  fn remove_marked_files(&mut self) {
     if self.selected >= self.group_moves.len() {
       return;
     }
-    let moves = &self.group_moves[self.selected];
-    if moves.is_empty() {
+    if self.group_moves[self.selected].is_empty() {
       return;
     }
 
-    self.group_moves[self.selected].remove(self.file_selected);
-    self.file_keep[self.selected].remove(self.file_selected);
+    let indices = self.marked_file_indices();
+    for &i in indices.iter().rev() {
+      if i < self.group_moves[self.selected].len() {
+        self.group_moves[self.selected].remove(i);
+        self.file_keep[self.selected].remove(i);
+      }
+    }
+    self.clear_marks();
 
     let count = self.group_moves[self.selected].len();
     if count == 0 {
@@ -980,6 +1142,7 @@ impl ReviewState {
     self.approved.remove(self.selected);
     self.group_moves.remove(self.selected);
     self.file_keep.remove(self.selected);
+    self.file_marked.remove(self.selected);
 
     if self.groups.is_empty() {
       self.selected = 0;
@@ -1009,28 +1172,29 @@ impl ReviewState {
     let dest_group_id = self.groups[dest_idx].id;
     let dest_suggested = self.groups[dest_idx].suggested_path.clone();
 
-    let src_moves = &self.group_moves[self.selected];
-    if self.file_selected >= src_moves.len() {
-      self.mode = Mode::Normal;
-      return;
+    let indices = self.marked_file_indices();
+    for &i in indices.iter().rev() {
+      if i >= self.group_moves[self.selected].len() {
+        continue;
+      }
+      let mut file_move =
+        self.group_moves[self.selected].remove(i);
+      let was_kept = self.file_keep[self.selected].remove(i);
+
+      let filename = file_move
+        .from
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+      file_move.group_id = dest_group_id;
+      file_move.to =
+        self.output_dir.join(&dest_suggested).join(&filename);
+
+      self.group_moves[dest_idx].push(file_move);
+      self.file_keep[dest_idx].push(was_kept);
     }
-    let mut file_move =
-      self.group_moves[self.selected].remove(self.file_selected);
-    let was_kept =
-      self.file_keep[self.selected].remove(self.file_selected);
-
-    let filename = file_move
-      .from
-      .file_name()
-      .map(|n| n.to_string_lossy().to_string())
-      .unwrap_or_else(|| "unknown".to_string());
-
-    file_move.group_id = dest_group_id;
-    file_move.to =
-      self.output_dir.join(&dest_suggested).join(&filename);
-
-    self.group_moves[dest_idx].push(file_move);
-    self.file_keep[dest_idx].push(was_kept);
+    self.clear_marks();
 
     let src_count = self.group_moves[self.selected].len();
     if src_count == 0 {
@@ -1075,29 +1239,31 @@ impl ReviewState {
     self.approved.push(true);
     self.group_moves.push(Vec::new());
     self.file_keep.push(Vec::new());
+    self.file_marked.push(HashSet::new());
 
-    let src_moves = &self.group_moves[self.selected];
-    if self.file_selected >= src_moves.len() {
-      self.mode = Mode::Normal;
-      return;
-    }
-    let mut file_move =
-      self.group_moves[self.selected].remove(self.file_selected);
-    let was_kept =
-      self.file_keep[self.selected].remove(self.file_selected);
-
-    let filename = file_move
-      .from
-      .file_name()
-      .map(|n| n.to_string_lossy().to_string())
-      .unwrap_or_else(|| "unknown".to_string());
-
-    file_move.group_id = new_id;
-    file_move.to = self.output_dir.join(&slug).join(&filename);
-
+    let indices = self.marked_file_indices();
     let new_idx = self.groups.len() - 1;
-    self.group_moves[new_idx].push(file_move);
-    self.file_keep[new_idx].push(was_kept);
+    for &i in indices.iter().rev() {
+      if i >= self.group_moves[self.selected].len() {
+        continue;
+      }
+      let mut file_move =
+        self.group_moves[self.selected].remove(i);
+      let was_kept = self.file_keep[self.selected].remove(i);
+
+      let filename = file_move
+        .from
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+      file_move.group_id = new_id;
+      file_move.to = self.output_dir.join(&slug).join(&filename);
+
+      self.group_moves[new_idx].push(file_move);
+      self.file_keep[new_idx].push(was_kept);
+    }
+    self.clear_marks();
 
     let src_count = self.group_moves[self.selected].len();
     if src_count == 0 {
@@ -1140,8 +1306,14 @@ pub fn render(frame: &mut Frame, state: &mut ReviewState) {
   render_detail(frame, body[2], state);
   render_footer(frame, outer[2], state);
 
-  if let Mode::DiffView { compare_idx } = &state.mode {
-    render_diff_modal(frame, state, *compare_idx);
+  match &state.mode {
+    Mode::DiffView { compare_idx } => {
+      render_diff_modal(frame, state, *compare_idx);
+    }
+    Mode::Preview => {
+      render_preview_modal(frame, state);
+    }
+    _ => {}
   }
 }
 
@@ -1282,7 +1454,118 @@ fn render_middle_panel(
       render_new_group_input(frame, area, state, input, *cursor_pos)
     }
     Mode::ConfirmRemove => render_confirm_remove(frame, area, state),
-    Mode::DiffView { .. } => render_file_list(frame, area, state),
+    Mode::DiffView { .. } | Mode::Preview => {
+      render_file_list(frame, area, state)
+    }
+  }
+}
+
+fn render_preview_modal(
+  frame: &mut Frame,
+  state: &mut ReviewState,
+) {
+  let area = frame.area();
+  let modal_w = (area.width * 75 / 100).max(40).min(area.width - 2);
+  let modal_h = (area.height * 75 / 100).max(10).min(area.height - 2);
+  let x = (area.width.saturating_sub(modal_w)) / 2;
+  let y = (area.height.saturating_sub(modal_h)) / 2;
+  let modal_area = Rect::new(x, y, modal_w, modal_h);
+
+  frame.render_widget(Clear, modal_area);
+
+  let filename = state
+    .diff_state
+    .as_ref()
+    .and_then(|ds| ds.primary_path.as_ref())
+    .and_then(|p| p.file_name())
+    .map(|n| n.to_string_lossy().to_string())
+    .unwrap_or_else(|| "Preview".to_string());
+
+  let bottom_spans = vec![
+    Span::styled("[/]", theme::key_hint()),
+    Span::styled(" scroll  ", theme::dim()),
+    Span::styled("\u{2191}\u{2193}", theme::key_hint()),
+    Span::styled(" navigate  ", theme::dim()),
+    Span::styled("esc", theme::key_hint()),
+    Span::styled(" close", theme::dim()),
+  ];
+
+  let block = Block::default()
+    .borders(ratatui::widgets::Borders::ALL)
+    .border_style(Style::default().fg(theme::PURPLE))
+    .title(Span::styled(
+      format!(" {} ", filename),
+      Style::default()
+        .fg(theme::PURPLE)
+        .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Line::from(bottom_spans));
+  let inner = block.inner(modal_area);
+  frame.render_widget(block, modal_area);
+
+  if let Some(ref mut ds) = state.diff_state {
+    if let Some(rx) = ds.primary_rx.as_ref() {
+      if let Ok((path, protocol)) = rx.try_recv() {
+        if Some(&path) == ds.primary_path.as_ref() {
+          ds.primary_preview = PreviewState::Ready(protocol);
+        }
+        ds.primary_rx = None;
+      }
+    }
+
+    match &mut ds.primary_preview {
+      PreviewState::Ready(protocol) => {
+        let img = ratatui_image::StatefulImage::new();
+        frame.render_stateful_widget(img, inner, protocol);
+      }
+      PreviewState::Loading => {
+        let loading = Paragraph::new(Span::styled(
+          "Loading preview\u{2026}",
+          theme::dim(),
+        ))
+        .alignment(Alignment::Center);
+        frame.render_widget(loading, inner);
+      }
+      PreviewState::None => match &ds.content {
+        DiffContent::Text(lines) => {
+          let visible_h = inner.height as usize;
+          let total = lines.len();
+          let scroll = ds.scroll.min(total.saturating_sub(visible_h));
+          ds.scroll = scroll;
+
+          let styled_lines: Vec<Line> = lines
+            .iter()
+            .skip(scroll)
+            .take(visible_h)
+            .map(|dl| match dl {
+              DiffLine::Same(s) => {
+                Line::from(Span::styled(s.clone(), theme::dim()))
+              }
+              DiffLine::Added(s) => Line::from(Span::styled(
+                s.clone(),
+                Style::default().fg(ratatui::style::Color::Green),
+              )),
+              DiffLine::Removed(s) => Line::from(Span::styled(
+                s.clone(),
+                Style::default().fg(ratatui::style::Color::Red),
+              )),
+            })
+            .collect();
+
+          let text = ratatui::text::Text::from(styled_lines);
+          let para = Paragraph::new(text);
+          frame.render_widget(para, inner);
+        }
+        DiffContent::Binary | DiffContent::Images => {
+          let msg = Paragraph::new(Span::styled(
+            "No preview available",
+            theme::dim(),
+          ))
+          .alignment(Alignment::Center);
+          frame.render_widget(msg, inner);
+        }
+      },
+    }
   }
 }
 
@@ -1756,8 +2039,15 @@ fn render_file_list(
   let focused = state.focus == Pane::Files;
   let moves = state.current_group_moves();
 
+  let marked_count = state
+    .file_marked
+    .get(state.selected)
+    .map(|s| s.len())
+    .unwrap_or(0);
   let title = if moves.is_empty() {
     "Files".to_string()
+  } else if marked_count > 0 {
+    format!("Files ({} selected)", marked_count)
   } else {
     format!("Files ({})", moves.len())
   };
@@ -1820,8 +2110,15 @@ fn render_file_list(
           Span::styled(" \u{2717} ", theme::rejected())
         };
         spans.push(keep_indicator);
+      } else if state.is_file_marked(state.selected, i) {
+        spans.push(Span::styled(
+          " \u{25cf} ",
+          Style::default()
+            .fg(theme::PURPLE)
+            .add_modifier(Modifier::BOLD),
+        ));
       } else {
-        spans.push(Span::styled(" ", theme::dim()));
+        spans.push(Span::styled(" \u{25cb} ", theme::dim()));
       }
       spans.push(Span::styled(filename, name_style));
       spans.push(Span::styled(
@@ -2025,7 +2322,9 @@ fn render_detail(
       render_detail_new_group(state, input)
     }
     Mode::ConfirmRemove => render_detail_group(state),
-    Mode::DiffView { .. } => render_detail_file(state),
+    Mode::DiffView { .. } | Mode::Preview => {
+      render_detail_file(state)
+    }
   };
 
   if show_image || show_loading {
@@ -2547,6 +2846,8 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &ReviewState) {
       (Pane::Files, ReviewMode::Organize) => {
         let mut k = vec![
           ("j/k", "navigate"),
+          ("\u{23ce}", "select"),
+          ("\u{2423}", "preview"),
           ("d", "remove"),
           ("m", "move"),
           ("n", "new group"),
@@ -2584,6 +2885,19 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &ReviewState) {
     }
     Mode::DiffView { .. } => {
       let mut k = vec![("j/k", "cycle files")];
+      let is_text = state
+        .diff_state
+        .as_ref()
+        .map(|ds| matches!(ds.content, DiffContent::Text(_)))
+        .unwrap_or(false);
+      if is_text {
+        k.push(("[/]", "scroll"));
+      }
+      k.push(("esc", "close"));
+      k
+    }
+    Mode::Preview => {
+      let mut k: Vec<(&str, &str)> = Vec::new();
       let is_text = state
         .diff_state
         .as_ref()
@@ -3330,13 +3644,60 @@ mod tests {
   }
 
   #[test]
-  fn space_in_files_noop_in_organize() {
+  fn space_in_files_does_not_toggle_keep_in_organize() {
     let mut state = make_state();
     state.handle_key(KeyCode::Tab);
     state.handle_key(KeyCode::Char('j'));
     assert!(state.is_file_kept(0, 1));
     state.handle_key(KeyCode::Char(' '));
     assert!(state.is_file_kept(0, 1));
+  }
+
+  #[test]
+  fn enter_toggles_file_mark_in_organize() {
+    let mut state = make_state();
+    state.handle_key(KeyCode::Tab);
+    assert!(!state.is_file_marked(0, 0));
+    state.handle_key(KeyCode::Enter);
+    assert!(state.is_file_marked(0, 0));
+    state.handle_key(KeyCode::Enter);
+    assert!(!state.is_file_marked(0, 0));
+  }
+
+  #[test]
+  fn marks_clear_on_group_navigation() {
+    let mut state = make_state();
+    state.handle_key(KeyCode::Tab);
+    state.handle_key(KeyCode::Enter);
+    assert!(state.is_file_marked(0, 0));
+    state.handle_key(KeyCode::Tab);
+    state.handle_key(KeyCode::Char('j'));
+    assert!(!state.is_file_marked(0, 0));
+  }
+
+  #[test]
+  fn remove_marked_files_removes_multiple() {
+    let mut state = make_state();
+    state.handle_key(KeyCode::Tab);
+    state.handle_key(KeyCode::Enter);
+    state.handle_key(KeyCode::Char('j'));
+    state.handle_key(KeyCode::Enter);
+    assert_eq!(state.current_group_moves().len(), 2);
+    state.handle_key(KeyCode::Char('d'));
+    assert_eq!(state.current_group_moves().len(), 0);
+  }
+
+  #[test]
+  fn move_marked_files_to_group() {
+    let mut state = make_state();
+    state.handle_key(KeyCode::Tab);
+    state.handle_key(KeyCode::Enter);
+    state.handle_key(KeyCode::Char('j'));
+    state.handle_key(KeyCode::Enter);
+    assert_eq!(state.current_group_moves().len(), 2);
+    state.handle_key(KeyCode::Char('m'));
+    state.handle_key(KeyCode::Enter);
+    assert_eq!(state.current_group_moves().len(), 0);
   }
 
   #[test]

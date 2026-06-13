@@ -5,6 +5,7 @@ pub mod cost;
 pub mod executor;
 pub mod fingerprint;
 pub mod group;
+pub mod ledger;
 pub mod model;
 pub mod pipeline;
 pub mod plan;

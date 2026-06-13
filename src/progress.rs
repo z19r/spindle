@@ -223,10 +223,19 @@ impl PipelineProgress {
           estimated_usd, file_count,
         );
       }
-      PipelineEvent::AnalysisStarted { file_count } => {
+      PipelineEvent::AnalysisStarted { file_count, cached } => {
         self.total = *file_count;
         self.analyzed = 0;
-        println!("Analyzing {} files with AI...", file_count);
+        if *cached > 0 {
+          println!(
+            "Analyzing {} files with AI ({} from cache, {} sent)...",
+            file_count,
+            cached,
+            file_count.saturating_sub(*cached),
+          );
+        } else {
+          println!("Analyzing {} files with AI...", file_count);
+        }
         let bar = rainbow_bar(0.0, BAR_WIDTH);
         print!("  {} 0/{}\r", bar, self.total);
         let _ = io::stdout().flush();
@@ -366,6 +375,7 @@ mod tests {
     let mut progress = PipelineProgress::new();
     progress.handle_event(&PipelineEvent::AnalysisStarted {
       file_count: 3,
+      cached: 0,
     });
     assert_eq!(progress.analyzed, 0);
     assert_eq!(progress.total, 3);

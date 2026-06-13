@@ -647,6 +647,19 @@ impl AiProvider for ClaudeProvider {
     &self,
     files: &[FileSummary],
   ) -> Result<Vec<ProposedGroup>> {
+    self.propose_groups_with_context(files, &[]).await
+  }
+
+  async fn propose_groups_with_context(
+    &self,
+    files: &[FileSummary],
+    existing_labels: &[String],
+  ) -> Result<Vec<ProposedGroup>> {
+    let user_prompt = format!(
+      "{}{}",
+      super::group_user_prompt(files),
+      super::group_existing_groups_note(existing_labels),
+    );
     let request = cached_api_request(
       self.model.clone(),
       32_768,
@@ -654,7 +667,7 @@ impl AiProvider for ClaudeProvider {
       vec![Message {
         role: "user",
         content: vec![ContentBlock::Text {
-          text: super::group_user_prompt(files),
+          text: user_prompt,
           cache_control: None,
         }],
       }],
