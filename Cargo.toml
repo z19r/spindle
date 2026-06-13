@@ -71,6 +71,7 @@ base64 = "0.22"
 hex = "0.4"
 atty = "0.2"
 dotenv = "0.15.0"
+pdf-extract = "0.10.0"
 
 [dev-dependencies]
 tempfile = "3"

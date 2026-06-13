@@ -26,9 +26,13 @@ fn default_cache_dir() -> PathBuf {
     .unwrap_or_else(|| PathBuf::from(".cache/spindle"))
 }
 
+/// Bump when the describe prompts change materially — old cached
+/// descriptions are too shallow for the new grouping to work with.
+const ANALYSIS_CACHE_VERSION: u32 = 2;
+
 fn cache_path(cache_dir: &Path, blake3_hash: &[u8; 32]) -> PathBuf {
   let hex = hex::encode(blake3_hash);
-  cache_dir.join(format!("{hex}.json"))
+  cache_dir.join(format!("{hex}.v{ANALYSIS_CACHE_VERSION}.json"))
 }
 
 pub async fn read_cache(
@@ -82,6 +86,11 @@ pub async fn analyze_file(
     analyze_video(provider, file, &filename).await?
   } else if file.scanned.file_type.is_image() {
     analyze_image(provider, file, &filename).await?
+  } else if matches!(
+    file.scanned.file_type,
+    crate::model::FileType::Document(_)
+  ) {
+    analyze_document(provider, file, &filename).await?
   } else {
     describe_by_filename(file, &filename)
   };
@@ -117,6 +126,116 @@ fn describe_by_filename(
     suggested_category: category.to_string(),
     confidence: 0.5,
   }
+}
+
+/// Max bytes of extracted text sent to the API per document
+/// (~2k tokens).
+const MAX_TEXT_EXCERPT_BYTES: usize = 8 * 1024;
+
+/// Analyze a document by extracting its text content. Falls back to
+/// a filename-only description when no text can be extracted
+/// (scanned PDFs, binary formats like doc/docx).
+async fn analyze_document(
+  provider: &impl AiProvider,
+  file: &FingerprintedFile,
+  filename: &str,
+) -> Result<ContentDescription> {
+  let excerpt = extract_document_text(file).await;
+
+  let excerpt = match excerpt {
+    Some(text) if !text.trim().is_empty() => text,
+    _ => return Ok(describe_by_filename(file, filename)),
+  };
+
+  let context = DescribeContext {
+    filename: filename.to_string(),
+    file_type_label: document_type_label(file),
+    file_size: file.scanned.size,
+    metadata_hint: None,
+  };
+
+  provider.describe_text(&excerpt, &context).await
+}
+
+fn document_type_label(file: &FingerprintedFile) -> String {
+  let ext = file
+    .scanned
+    .path
+    .extension()
+    .and_then(|e| e.to_str())
+    .unwrap_or("unknown");
+  format!("{} document", ext.to_uppercase())
+}
+
+/// Extract a text excerpt from a document file. Returns None for
+/// formats we can't extract (doc, docx, rtf) or unreadable files.
+async fn extract_document_text(
+  file: &FingerprintedFile,
+) -> Option<String> {
+  use crate::model::DocumentFormat as Df;
+  use crate::model::FileType;
+
+  let format = match file.scanned.file_type {
+    FileType::Document(f) => f,
+    _ => return None,
+  };
+
+  match format {
+    Df::Pdf => extract_pdf_text(&file.scanned.path).await,
+    Df::Txt
+    | Df::Md
+    | Df::Csv
+    | Df::Json
+    | Df::Xml
+    | Df::Html
+    | Df::Yaml
+    | Df::Toml => read_text_excerpt(&file.scanned.path).await,
+    Df::Doc | Df::Docx | Df::Rtf => None,
+  }
+}
+
+async fn read_text_excerpt(path: &std::path::Path) -> Option<String> {
+  use tokio::io::AsyncReadExt;
+
+  let mut f = tokio::fs::File::open(path).await.ok()?;
+  let mut buf = vec![0u8; MAX_TEXT_EXCERPT_BYTES];
+  let mut filled = 0;
+  while filled < buf.len() {
+    match f.read(&mut buf[filled..]).await {
+      Ok(0) => break,
+      Ok(n) => filled += n,
+      Err(_) => return None,
+    }
+  }
+  buf.truncate(filled);
+  Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+async fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
+  let path = path.to_path_buf();
+  // pdf-extract is sync and can panic on malformed PDFs — isolate
+  // it on a blocking thread and treat panics as "no text".
+  let result = tokio::task::spawn_blocking(move || {
+    std::panic::catch_unwind(|| pdf_extract::extract_text(&path))
+  })
+  .await
+  .ok()?;
+
+  match result {
+    Ok(Ok(text)) => Some(truncate_to_excerpt(text)),
+    _ => None,
+  }
+}
+
+fn truncate_to_excerpt(text: String) -> String {
+  if text.len() <= MAX_TEXT_EXCERPT_BYTES {
+    return text;
+  }
+  let mut end = MAX_TEXT_EXCERPT_BYTES;
+  while !text.is_char_boundary(end) {
+    end -= 1;
+  }
+  text[..end].to_string()
 }
 
 async fn analyze_image(
@@ -317,8 +436,9 @@ mod tests {
     assert_eq!(
       path,
       PathBuf::from(format!(
-        "/cache/{}.json",
-        hex::encode([0xAB; 32])
+        "/cache/{}.v{}.json",
+        hex::encode([0xAB; 32]),
+        ANALYSIS_CACHE_VERSION
       ))
     );
   }
@@ -601,5 +721,160 @@ mod tests {
     let cached =
       read_cache(cache_dir.path(), &file.blake3_hash).await;
     assert!(cached.is_some());
+  }
+
+  fn make_document_file(
+    dir: &Path,
+    name: &str,
+    content: &[u8],
+    format: crate::model::DocumentFormat,
+  ) -> FingerprintedFile {
+    let mut file = make_test_file(dir, name, content);
+    file.scanned.file_type = FileType::Document(format);
+    file
+  }
+
+  /// Provider that records the excerpt passed to describe_text.
+  struct TextCapturingProvider {
+    captured: std::sync::Mutex<Option<String>>,
+  }
+
+  impl AiProvider for TextCapturingProvider {
+    async fn describe_image(
+      &self,
+      _: &[u8],
+      _: &str,
+      _: &DescribeContext,
+    ) -> Result<ContentDescription> {
+      panic!("describe_image should not be called for documents");
+    }
+
+    async fn describe_text(
+      &self,
+      excerpt: &str,
+      _: &DescribeContext,
+    ) -> Result<ContentDescription> {
+      *self.captured.lock().unwrap() = Some(excerpt.to_string());
+      Ok(ContentDescription {
+        summary: "Lease agreement for 123 Main St".to_string(),
+        tags: vec!["lease".to_string(), "legal".to_string()],
+        suggested_category: "legal".to_string(),
+        confidence: 0.9,
+      })
+    }
+
+    async fn propose_groups(
+      &self,
+      _: &[crate::model::FileSummary],
+    ) -> Result<Vec<crate::model::ProposedGroup>> {
+      panic!("unused");
+    }
+  }
+
+  #[tokio::test]
+  async fn analyze_file_sends_text_content_for_documents() {
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let file = make_document_file(
+      file_dir.path(),
+      "lease.txt",
+      b"RESIDENTIAL LEASE AGREEMENT between Alice and Bob",
+      crate::model::DocumentFormat::Txt,
+    );
+
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      max_concurrent: 1,
+    };
+
+    let provider = TextCapturingProvider {
+      captured: std::sync::Mutex::new(None),
+    };
+
+    let result = analyze_file(&provider, &file, &opts).await.unwrap();
+
+    let captured = provider.captured.lock().unwrap();
+    assert!(captured
+      .as_deref()
+      .unwrap()
+      .contains("RESIDENTIAL LEASE AGREEMENT"));
+    assert_eq!(result.suggested_category, "legal");
+  }
+
+  #[tokio::test]
+  async fn analyze_file_falls_back_to_filename_for_docx() {
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let file = make_document_file(
+      file_dir.path(),
+      "report.docx",
+      b"PK\x03\x04 binary docx bytes",
+      crate::model::DocumentFormat::Docx,
+    );
+
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      max_concurrent: 1,
+    };
+
+    let provider = TextCapturingProvider {
+      captured: std::sync::Mutex::new(None),
+    };
+
+    let result = analyze_file(&provider, &file, &opts).await.unwrap();
+
+    assert!(provider.captured.lock().unwrap().is_none());
+    assert_eq!(result.suggested_category, "document");
+    assert!(result.summary.contains("report.docx"));
+  }
+
+  #[tokio::test]
+  async fn analyze_file_falls_back_when_document_is_empty() {
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let file = make_document_file(
+      file_dir.path(),
+      "empty.txt",
+      b"   \n\t ",
+      crate::model::DocumentFormat::Txt,
+    );
+
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      max_concurrent: 1,
+    };
+
+    let provider = TextCapturingProvider {
+      captured: std::sync::Mutex::new(None),
+    };
+
+    let result = analyze_file(&provider, &file, &opts).await.unwrap();
+
+    assert!(provider.captured.lock().unwrap().is_none());
+    assert_eq!(result.suggested_category, "document");
+  }
+
+  #[tokio::test]
+  async fn read_text_excerpt_caps_at_limit() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("big.txt");
+    std::fs::write(&path, "x".repeat(MAX_TEXT_EXCERPT_BYTES * 3))
+      .unwrap();
+
+    let excerpt = read_text_excerpt(&path).await.unwrap();
+
+    assert_eq!(excerpt.len(), MAX_TEXT_EXCERPT_BYTES);
+  }
+
+  #[test]
+  fn truncate_to_excerpt_respects_char_boundaries() {
+    let mut text = "a".repeat(MAX_TEXT_EXCERPT_BYTES - 1);
+    text.push('é');
+    text.push_str("trailing");
+
+    let truncated = truncate_to_excerpt(text);
+
+    assert!(truncated.len() <= MAX_TEXT_EXCERPT_BYTES);
+    assert!(truncated.is_char_boundary(truncated.len()));
   }
 }

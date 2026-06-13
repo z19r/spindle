@@ -23,6 +23,19 @@ pub trait AiProvider: Send + Sync {
     context: &DescribeContext,
   ) -> impl std::future::Future<Output = Result<ContentDescription>> + Send;
 
+  /// Describe a file from an excerpt of its text content.
+  fn describe_text(
+    &self,
+    excerpt: &str,
+    context: &DescribeContext,
+  ) -> impl std::future::Future<Output = Result<ContentDescription>> + Send
+  {
+    let _ = (excerpt, context);
+    async {
+      anyhow::bail!("text analysis not supported by this provider")
+    }
+  }
+
   fn propose_groups(
     &self,
     files: &[FileSummary],

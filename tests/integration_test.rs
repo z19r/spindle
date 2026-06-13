@@ -285,7 +285,7 @@ async fn analyze_caches_and_reuses_results() {
 
   let cache_file = cache_dir
     .path()
-    .join(format!("{}.json", hex::encode(file.blake3_hash)));
+    .join(format!("{}.v2.json", hex::encode(file.blake3_hash)));
   assert!(cache_file.exists());
 
   let result2 =
