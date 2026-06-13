@@ -1041,7 +1041,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
-      "claude-fable-5".to_string(),
+      "claude-opus-4-8".to_string(),
       0,
     )
     .with_base_url(server.uri());
@@ -1106,7 +1106,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
-      "claude-fable-5".to_string(),
+      "claude-opus-4-8".to_string(),
       0,
     )
     .with_base_url(server.uri())
@@ -1156,7 +1156,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
-      "claude-fable-5".to_string(),
+      "claude-opus-4-8".to_string(),
       0,
     )
     .with_base_url(server.uri());
@@ -1183,7 +1183,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
-      "claude-fable-5".to_string(),
+      "claude-opus-4-8".to_string(),
       0,
     )
     .with_base_url(server.uri());
