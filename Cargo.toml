@@ -19,7 +19,16 @@ clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client (for Claude API)
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+# rustls-tls instead of default native-tls so cross-compiling (e.g.
+# aarch64 in the release workflow) needs no system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "multipart",
+  "rustls-tls",
+  "charset",
+  "http2",
+  "system-proxy",
+] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
