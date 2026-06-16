@@ -67,6 +67,18 @@ pub trait AiProvider: Send + Sync {
     self.propose_groups(files)
   }
 
+  /// Group files with both label names and rich content descriptions
+  /// from the organized pool. Falls back to label-only context.
+  fn propose_groups_with_organized_context(
+    &self,
+    files: &[FileSummary],
+    existing_labels: &[String],
+    _organized_context: &[(String, Vec<ContentDescription>)],
+  ) -> impl std::future::Future<Output = Result<Vec<ProposedGroup>>> + Send
+  {
+    self.propose_groups_with_context(files, existing_labels)
+  }
+
   /// Describe many files in one operation. The default falls back to
   /// sequential individual calls; providers with a native batch API
   /// (50% discount) should override this.

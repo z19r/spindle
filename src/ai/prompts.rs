@@ -71,6 +71,42 @@ pub fn group_existing_groups_note(
   note
 }
 
+/// Rich context about existing groups: includes sample file
+/// summaries/tags from each group so the model can match new files
+/// against the actual content of the organized pool.
+pub fn group_organized_context(
+  groups: &[(String, Vec<crate::model::ContentDescription>)],
+) -> String {
+  if groups.is_empty() {
+    return String::new();
+  }
+  let mut note = String::from(
+    "\nThese folders already exist with the following contents. \
+     Route new files into an existing group when the content clearly \
+     fits — reuse its exact label:\n",
+  );
+  for (label, descriptions) in groups {
+    note.push_str(&format!("\n## {label}\n"));
+    for desc in descriptions.iter().take(5) {
+      let tags = desc.tags.join(", ");
+      let _ = std::fmt::Write::write_fmt(
+        &mut note,
+        format_args!("- {} (tags: {})\n", desc.summary, tags),
+      );
+    }
+    if descriptions.len() > 5 {
+      let _ = std::fmt::Write::write_fmt(
+        &mut note,
+        format_args!(
+          "  ... and {} more files\n",
+          descriptions.len() - 5
+        ),
+      );
+    }
+  }
+  note
+}
+
 pub fn describe_text_user_prompt(
   context: &DescribeContext,
   excerpt: &str,
@@ -376,5 +412,59 @@ mod tests {
 
     assert!(prompt.contains("SPECIFIC groups"));
     assert!(!prompt.contains("Prefer fewer, larger groups"));
+  }
+
+  #[test]
+  fn organized_context_is_empty_without_groups() {
+    assert!(group_organized_context(&[]).is_empty());
+  }
+
+  #[test]
+  fn organized_context_includes_summaries_and_tags() {
+    let groups = vec![(
+      "Beach Photos".to_string(),
+      vec![
+        ContentDescription {
+          summary: "Sandy beach at sunset".to_string(),
+          tags: vec!["beach".to_string(), "sunset".to_string()],
+          suggested_category: "travel".to_string(),
+          confidence: 0.9,
+        },
+        ContentDescription {
+          summary: "Ocean waves crashing".to_string(),
+          tags: vec!["ocean".to_string(), "waves".to_string()],
+          suggested_category: "nature".to_string(),
+          confidence: 0.85,
+        },
+      ],
+    )];
+
+    let context = group_organized_context(&groups);
+
+    assert!(context.contains("Beach Photos"));
+    assert!(context.contains("Sandy beach at sunset"));
+    assert!(context.contains("Ocean waves crashing"));
+    assert!(context.contains("beach, sunset"));
+    assert!(context.to_lowercase().contains("reuse"));
+  }
+
+  #[test]
+  fn organized_context_truncates_beyond_five() {
+    let descriptions: Vec<ContentDescription> = (0..8)
+      .map(|i| ContentDescription {
+        summary: format!("File {i}"),
+        tags: vec![],
+        suggested_category: "other".to_string(),
+        confidence: 0.5,
+      })
+      .collect();
+    let groups = vec![("Big Group".to_string(), descriptions)];
+
+    let context = group_organized_context(&groups);
+
+    assert!(context.contains("File 0"));
+    assert!(context.contains("File 4"));
+    assert!(!context.contains("File 5"));
+    assert!(context.contains("3 more"));
   }
 }

@@ -26,15 +26,17 @@ fn decode_image(path: &Path) -> Option<image::DynamicImage> {
   {
     Ok(reader) => match reader.decode() {
       Ok(img) => return Some(img),
-      Err(e) => tracing::debug!(?path, %e, "image crate failed, trying magick"),
+      Err(e) => {
+        tracing::debug!(?path, %e, "image crate failed, trying magick")
+      }
     },
-    Err(e) => tracing::debug!(?path, %e, "image crate failed, trying magick"),
+    Err(e) => {
+      tracing::debug!(?path, %e, "image crate failed, trying magick")
+    }
   }
 
-  let tmp = std::env::temp_dir().join(format!(
-    "spindle-preview-{}.png",
-    std::process::id()
-  ));
+  let tmp = std::env::temp_dir()
+    .join(format!("spindle-preview-{}.png", std::process::id()));
   let ok = std::process::Command::new("magick")
     .arg("convert")
     .arg(path)
@@ -267,8 +269,7 @@ impl ReviewState {
         let other_approved = vec![true; og.len()];
         let other_file_keep =
           Self::init_file_keep(&other_group_moves, omode);
-        let other_file_marked =
-          vec![HashSet::new(); og.len()];
+        let other_file_marked = vec![HashSet::new(); og.len()];
         ModeData {
           groups: og,
           group_moves: other_group_moves,
@@ -446,7 +447,11 @@ impl ReviewState {
     deletions
   }
 
-  pub fn is_file_marked(&self, group_idx: usize, file_idx: usize) -> bool {
+  pub fn is_file_marked(
+    &self,
+    group_idx: usize,
+    file_idx: usize,
+  ) -> bool {
     self
       .file_marked
       .get(group_idx)
@@ -658,8 +663,10 @@ impl ReviewState {
       self.diff_state = Some(ds);
     } else if is_text {
       let text = std::fs::read_to_string(&path).unwrap_or_default();
-      let lines: Vec<DiffLine> =
-        text.lines().map(|l| DiffLine::Same(l.to_string())).collect();
+      let lines: Vec<DiffLine> = text
+        .lines()
+        .map(|l| DiffLine::Same(l.to_string()))
+        .collect();
       self.diff_state = Some(DiffState {
         primary_preview: PreviewState::None,
         secondary_preview: PreviewState::None,
@@ -1119,9 +1126,7 @@ impl ReviewState {
           ds.scroll = ds.scroll.saturating_add(3);
         }
       }
-      KeyCode::Esc
-      | KeyCode::Char(' ')
-      | KeyCode::Char('q') => {
+      KeyCode::Esc | KeyCode::Char(' ') | KeyCode::Char('q') => {
         self.mode = Mode::Normal;
         self.exit_diff_view();
       }
@@ -1198,8 +1203,7 @@ impl ReviewState {
       if i >= self.group_moves[self.selected].len() {
         continue;
       }
-      let mut file_move =
-        self.group_moves[self.selected].remove(i);
+      let mut file_move = self.group_moves[self.selected].remove(i);
       let was_kept = self.file_keep[self.selected].remove(i);
 
       let filename = file_move
@@ -1268,8 +1272,7 @@ impl ReviewState {
       if i >= self.group_moves[self.selected].len() {
         continue;
       }
-      let mut file_move =
-        self.group_moves[self.selected].remove(i);
+      let mut file_move = self.group_moves[self.selected].remove(i);
       let was_kept = self.file_keep[self.selected].remove(i);
 
       let filename = file_move
@@ -1481,10 +1484,7 @@ fn render_middle_panel(
   }
 }
 
-fn render_preview_modal(
-  frame: &mut Frame,
-  state: &mut ReviewState,
-) {
+fn render_preview_modal(frame: &mut Frame, state: &mut ReviewState) {
   let area = frame.area();
   let modal_w = (area.width * 75 / 100).max(40).min(area.width - 2);
   let modal_h = (area.height * 75 / 100).max(10).min(area.height - 2);

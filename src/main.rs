@@ -70,6 +70,12 @@ async fn main() -> Result<()> {
     include_trash: cli.include_trash,
     type_filter: cli.file_types.clone(),
     use_batch_api: cli.batch,
+    introspect_archives: config.matching.introspect_archives,
+    max_archive_files: config.matching.max_archive_files,
+    max_archive_file_size_mb: config
+      .matching
+      .max_archive_file_size_mb,
+    use_organized_context: config.matching.use_organized_context,
     ledger_path: ledger_path.clone(),
   };
 

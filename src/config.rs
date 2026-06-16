@@ -86,6 +86,14 @@ pub struct CliArgs {
   /// Path to the organized ledger (defaults to the global data dir).
   #[arg(long)]
   pub ledger: Option<PathBuf>,
+
+  /// Disable using organized-folder contents as context for grouping.
+  #[arg(long)]
+  pub no_organized_context: bool,
+
+  /// Disable introspecting archive contents (zip, tar, gz).
+  #[arg(long)]
+  pub no_introspect_archives: bool,
 }
 
 /// Resolve the ledger path for this run: `None` when disabled, otherwise the
@@ -114,6 +122,8 @@ pub struct Config {
   pub ai: AiConfig,
   #[serde(default)]
   pub duplicates: DuplicateConfig,
+  #[serde(default)]
+  pub matching: MatchingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +173,37 @@ impl std::fmt::Debug for AiConfig {
 pub struct DuplicateConfig {
   #[serde(default = "default_threshold")]
   pub near_duplicate_threshold: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatchingConfig {
+  #[serde(default = "default_true")]
+  pub use_organized_context: bool,
+  #[serde(default = "default_true")]
+  pub introspect_archives: bool,
+  #[serde(default = "default_max_archive_files")]
+  pub max_archive_files: usize,
+  #[serde(default = "default_max_archive_file_size_mb")]
+  pub max_archive_file_size_mb: u64,
+}
+
+impl Default for MatchingConfig {
+  fn default() -> Self {
+    Self {
+      use_organized_context: true,
+      introspect_archives: true,
+      max_archive_files: 20,
+      max_archive_file_size_mb: 50,
+    }
+  }
+}
+
+fn default_max_archive_files() -> usize {
+  20
+}
+
+fn default_max_archive_file_size_mb() -> u64 {
+  50
 }
 
 impl Default for GeneralConfig {
@@ -261,6 +302,7 @@ impl Config {
         general: GeneralConfig::default(),
         ai: AiConfig::default(),
         duplicates: DuplicateConfig::default(),
+        matching: MatchingConfig::default(),
       }
     };
 
@@ -278,6 +320,12 @@ impl Config {
     }
     if let Some(ref url) = cli.api_base_url {
       config.ai.base_url = Some(url.clone());
+    }
+    if cli.no_organized_context {
+      config.matching.use_organized_context = false;
+    }
+    if cli.no_introspect_archives {
+      config.matching.introspect_archives = false;
     }
 
     Ok(config)
@@ -317,6 +365,8 @@ mod tests {
       file_types: vec![],
       no_ledger: false,
       ledger: None,
+      no_organized_context: false,
+      no_introspect_archives: false,
     }
   }
 
@@ -432,6 +482,7 @@ near_duplicate_threshold = 12
       general: GeneralConfig::default(),
       ai: AiConfig::default(),
       duplicates: DuplicateConfig::default(),
+      matching: MatchingConfig::default(),
     };
 
     let result = config.api_key();
@@ -446,6 +497,7 @@ near_duplicate_threshold = 12
       general: GeneralConfig::default(),
       ai: AiConfig::default(),
       duplicates: DuplicateConfig::default(),
+      matching: MatchingConfig::default(),
     };
     config.ai.api_key = Some("sk-my-key".to_string());
 
@@ -626,5 +678,95 @@ base_url = "https://from-file.example.com"
     let batch_args =
       CliArgs::parse_from(["spindle", "--batch", "some-dir"]);
     assert!(batch_args.batch);
+  }
+
+  #[test]
+  fn matching_config_defaults_are_sane() {
+    let matching = MatchingConfig::default();
+
+    assert!(matching.use_organized_context);
+    assert!(matching.introspect_archives);
+    assert_eq!(matching.max_archive_files, 20);
+    assert_eq!(matching.max_archive_file_size_mb, 50);
+  }
+
+  #[test]
+  fn matching_config_deserializes_with_defaults() {
+    let config: Config =
+      toml::from_str("[ai]\nmodel = \"test\"").unwrap();
+
+    assert!(config.matching.use_organized_context);
+    assert!(config.matching.introspect_archives);
+  }
+
+  #[test]
+  fn matching_config_overrides_from_toml() {
+    let dir = TempDir::new().unwrap();
+    let toml_path = dir.path().join("config.toml");
+    fs::write(
+      &toml_path,
+      r#"
+[matching]
+use_organized_context = false
+introspect_archives = false
+max_archive_files = 5
+max_archive_file_size_mb = 10
+"#,
+    )
+    .unwrap();
+
+    let cli = CliArgs {
+      config: Some(toml_path),
+      ..empty_cli()
+    };
+
+    let config = Config::load(&cli).unwrap();
+
+    assert!(!config.matching.use_organized_context);
+    assert!(!config.matching.introspect_archives);
+    assert_eq!(config.matching.max_archive_files, 5);
+    assert_eq!(config.matching.max_archive_file_size_mb, 10);
+  }
+
+  #[test]
+  fn cli_no_organized_context_overrides_config() {
+    let dir = TempDir::new().unwrap();
+    let cli = CliArgs {
+      config: Some(dir.path().join("nonexistent.toml")),
+      no_organized_context: true,
+      ..empty_cli()
+    };
+
+    let config = Config::load(&cli).unwrap();
+
+    assert!(!config.matching.use_organized_context);
+  }
+
+  #[test]
+  fn cli_no_introspect_archives_overrides_config() {
+    let dir = TempDir::new().unwrap();
+    let cli = CliArgs {
+      config: Some(dir.path().join("nonexistent.toml")),
+      no_introspect_archives: true,
+      ..empty_cli()
+    };
+
+    let config = Config::load(&cli).unwrap();
+
+    assert!(!config.matching.introspect_archives);
+  }
+
+  #[test]
+  fn cli_matching_flags_parse() {
+    use clap::Parser;
+
+    let args = CliArgs::parse_from([
+      "spindle",
+      "--no-organized-context",
+      "--no-introspect-archives",
+      "some-dir",
+    ]);
+    assert!(args.no_organized_context);
+    assert!(args.no_introspect_archives);
   }
 }

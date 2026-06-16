@@ -19,8 +19,8 @@ use crate::group::build_groups;
 use crate::ledger::{Ledger, OrganizedDuplicate};
 use crate::model::FileCategory;
 use crate::model::{
-  DuplicateSet, FileSummary, FingerprintedFile, ProposedGroup,
-  ReorgPlan,
+  ContentDescription, DuplicateSet, FileSummary, FingerprintedFile,
+  ProposedGroup, ReorgPlan,
 };
 use crate::plan::propose_plan;
 use crate::scanner::{scan_directories_filtered, ScanOptions};
@@ -81,6 +81,10 @@ pub struct PipelineConfig {
   pub include_trash: bool,
   pub type_filter: Vec<FileCategory>,
   pub use_batch_api: bool,
+  pub introspect_archives: bool,
+  pub max_archive_files: usize,
+  pub max_archive_file_size_mb: u64,
+  pub use_organized_context: bool,
   /// Path to the persistent "already organized" ledger. `None` disables
   /// both candidate exclusion and recording.
   pub ledger_path: Option<PathBuf>,
@@ -215,10 +219,21 @@ pub async fn run<P: AiProvider>(
           .collect()
       })
       .unwrap_or_default();
+    let organized_context = if config.use_organized_context {
+      load_organized_context(
+        ledger.as_ref(),
+        &config.output_dir,
+        &config.cache_dir,
+      )
+      .await
+    } else {
+      Vec::new()
+    };
     run_ai_pipeline(
       provider,
       &fingerprinted,
       &existing_labels,
+      &organized_context,
       config,
       &tx,
     )
@@ -285,10 +300,38 @@ fn apply_ledger_exclusion(
   duplicates
 }
 
+async fn load_organized_context(
+  ledger: Option<&Ledger>,
+  output_dir: &std::path::Path,
+  cache_dir: &std::path::Path,
+) -> Vec<(String, Vec<ContentDescription>)> {
+  let Some(ledger) = ledger else {
+    return Vec::new();
+  };
+  let group_hashes = ledger.group_content_hashes(output_dir, 5);
+  let mut context = Vec::with_capacity(group_hashes.len());
+  for (label, hashes) in group_hashes {
+    let mut descriptions = Vec::new();
+    for hex in &hashes {
+      let mut hash_bytes = [0u8; 32];
+      if hex::decode_to_slice(hex, &mut hash_bytes).is_ok() {
+        if let Some(desc) = read_cache(cache_dir, &hash_bytes).await {
+          descriptions.push(desc);
+        }
+      }
+    }
+    if !descriptions.is_empty() {
+      context.push((label, descriptions));
+    }
+  }
+  context
+}
+
 async fn run_ai_pipeline<P: AiProvider>(
   provider: &P,
   fingerprinted: &[FingerprintedFile],
   existing_labels: &[String],
+  organized_context: &[(String, Vec<ContentDescription>)],
   config: &PipelineConfig,
   tx: &mpsc::Sender<PipelineEvent>,
 ) -> Result<Vec<ProposedGroup>> {
@@ -347,6 +390,9 @@ async fn run_ai_pipeline<P: AiProvider>(
     cache_dir: config.cache_dir.clone(),
     max_concurrent: config.max_concurrent,
     use_batch_api: config.use_batch_api,
+    introspect_archives: config.introspect_archives,
+    max_archive_files: config.max_archive_files,
+    max_archive_file_size_mb: config.max_archive_file_size_mb,
   };
 
   let subset: Vec<_> =
@@ -434,10 +480,19 @@ async fn run_ai_pipeline<P: AiProvider>(
     return Ok(groups);
   }
 
-  match provider
-    .propose_groups_with_context(&summaries, existing_labels)
-    .await
-  {
+  match if organized_context.is_empty() {
+    provider
+      .propose_groups_with_context(&summaries, existing_labels)
+      .await
+  } else {
+    provider
+      .propose_groups_with_organized_context(
+        &summaries,
+        existing_labels,
+        organized_context,
+      )
+      .await
+  } {
     Ok(groups) => {
       let _ = write_cached_grouping(
         &config.cache_dir,
@@ -557,6 +612,10 @@ mod tests {
       include_trash: false,
       type_filter: vec![],
       use_batch_api: false,
+      introspect_archives: false,
+      max_archive_files: 20,
+      max_archive_file_size_mb: 50,
+      use_organized_context: false,
       ledger_path: None,
     };
 
@@ -601,6 +660,10 @@ mod tests {
       include_trash: false,
       type_filter: vec![],
       use_batch_api: false,
+      introspect_archives: false,
+      max_archive_files: 20,
+      max_archive_file_size_mb: 50,
+      use_organized_context: false,
       ledger_path,
     }
   }
@@ -793,6 +856,10 @@ mod tests {
       include_trash: false,
       type_filter: vec![],
       use_batch_api: false,
+      introspect_archives: false,
+      max_archive_files: 20,
+      max_archive_file_size_mb: 50,
+      use_organized_context: false,
       ledger_path: None,
     };
 
@@ -844,6 +911,10 @@ mod tests {
       include_trash: false,
       type_filter: vec![],
       use_batch_api: false,
+      introspect_archives: false,
+      max_archive_files: 20,
+      max_archive_file_size_mb: 50,
+      use_organized_context: false,
       ledger_path: None,
     };
 
@@ -886,6 +957,10 @@ mod tests {
       include_trash: false,
       type_filter: vec![],
       use_batch_api: false,
+      introspect_archives: false,
+      max_archive_files: 20,
+      max_archive_file_size_mb: 50,
+      use_organized_context: false,
       ledger_path: None,
     };
 
@@ -926,6 +1001,10 @@ mod tests {
       include_trash: false,
       type_filter: vec![],
       use_batch_api: false,
+      introspect_archives: false,
+      max_archive_files: 20,
+      max_archive_file_size_mb: 50,
+      use_organized_context: false,
       ledger_path: None,
     };
 
@@ -962,6 +1041,10 @@ mod tests {
       include_trash: false,
       type_filter: vec![],
       use_batch_api: false,
+      introspect_archives: false,
+      max_archive_files: 20,
+      max_archive_file_size_mb: 50,
+      use_organized_context: false,
       ledger_path: None,
     };
 
