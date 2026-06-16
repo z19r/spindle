@@ -144,6 +144,29 @@ impl Ledger {
     self.entries.iter().find(|e| e.blake3_hex == blake3_hex)
   }
 
+  /// Content hashes of files in each existing group, keyed by label.
+  /// Returns at most `max_per_group` hashes per group so callers can
+  /// load cached descriptions without pulling the whole ledger into memory.
+  pub fn group_content_hashes(
+    &self,
+    output_dir: &Path,
+    max_per_group: usize,
+  ) -> Vec<(String, Vec<String>)> {
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+      std::collections::BTreeMap::new();
+    for entry in &self.entries {
+      if !entry.dest_path.starts_with(output_dir) {
+        continue;
+      }
+      let hashes =
+        groups.entry(entry.group_label.clone()).or_default();
+      if hashes.len() < max_per_group {
+        hashes.push(entry.blake3_hex.clone());
+      }
+    }
+    groups.into_iter().collect()
+  }
+
   /// Distinct group folders previously created under `output_dir`, so new
   /// files can be routed into them rather than into fresh near-duplicates.
   pub fn existing_groups_under(
@@ -362,5 +385,65 @@ mod tests {
     bytes[0] = 0xde;
     bytes[1] = 0xad;
     assert!(hash_hex(&bytes).starts_with("dead"));
+  }
+
+  #[test]
+  fn group_content_hashes_returns_hashes_per_group() {
+    let mut ledger = Ledger::default();
+    ledger.record(entry(
+      "/src/a.jpg",
+      "/out/beach/a.jpg",
+      "h1",
+      "Beach",
+    ));
+    ledger.record(entry(
+      "/src/b.jpg",
+      "/out/beach/b.jpg",
+      "h2",
+      "Beach",
+    ));
+    ledger.record(entry(
+      "/src/c.jpg",
+      "/out/beach/c.jpg",
+      "h3",
+      "Beach",
+    ));
+    ledger.record(entry(
+      "/src/d.jpg",
+      "/out/dogs/d.jpg",
+      "h4",
+      "Dogs",
+    ));
+
+    let groups = ledger.group_content_hashes(Path::new("/out"), 2);
+
+    assert_eq!(groups.len(), 2);
+    let beach = groups.iter().find(|(l, _)| l == "Beach").unwrap();
+    assert_eq!(beach.1.len(), 2);
+    let dogs = groups.iter().find(|(l, _)| l == "Dogs").unwrap();
+    assert_eq!(dogs.1.len(), 1);
+    assert_eq!(dogs.1[0], "h4");
+  }
+
+  #[test]
+  fn group_content_hashes_filters_by_output_dir() {
+    let mut ledger = Ledger::default();
+    ledger.record(entry(
+      "/src/a.jpg",
+      "/out/beach/a.jpg",
+      "h1",
+      "Beach",
+    ));
+    ledger.record(entry(
+      "/src/b.jpg",
+      "/elsewhere/cats/b.jpg",
+      "h2",
+      "Cats",
+    ));
+
+    let groups = ledger.group_content_hashes(Path::new("/out"), 5);
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].0, "Beach");
   }
 }

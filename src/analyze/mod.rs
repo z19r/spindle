@@ -17,6 +17,9 @@ pub struct AnalyzeOptions {
   /// Use the Batch API (50% cheaper, async) instead of concurrent
   /// individual requests.
   pub use_batch_api: bool,
+  pub introspect_archives: bool,
+  pub max_archive_files: usize,
+  pub max_archive_file_size_mb: u64,
 }
 
 impl Default for AnalyzeOptions {
@@ -25,6 +28,9 @@ impl Default for AnalyzeOptions {
       cache_dir: default_cache_dir(),
       max_concurrent: 5,
       use_batch_api: false,
+      introspect_archives: true,
+      max_archive_files: 20,
+      max_archive_file_size_mb: 50,
     }
   }
 }
@@ -245,6 +251,12 @@ pub async fn analyze_file(
     crate::model::FileType::Document(_)
   ) {
     analyze_document(provider, file, &filename).await?
+  } else if matches!(
+    file.scanned.file_type,
+    crate::model::FileType::Archive(_)
+  ) && options.introspect_archives
+  {
+    analyze_archive(provider, file, &filename, options).await?
   } else {
     describe_by_filename(file, &filename)
   };
@@ -280,6 +292,223 @@ fn describe_by_filename(
     suggested_category: category.to_string(),
     confidence: 0.5,
   }
+}
+
+const BYTES_PER_MB: u64 = 1_000_000;
+
+/// Analyze an archive by extracting its contents to a temp dir,
+/// running each inner file through the normal analysis pipeline, and
+/// synthesizing a single description.
+async fn analyze_archive(
+  provider: &impl AiProvider,
+  file: &FingerprintedFile,
+  filename: &str,
+  options: &AnalyzeOptions,
+) -> Result<ContentDescription> {
+  let inner_descriptions =
+    extract_and_analyze_archive(provider, file, options).await;
+
+  if inner_descriptions.is_empty() {
+    return Ok(describe_by_filename(file, filename));
+  }
+
+  let mut all_tags = Vec::new();
+  let mut summaries = Vec::new();
+  let mut categories: HashMap<String, usize> = HashMap::new();
+
+  for (inner_name, desc) in &inner_descriptions {
+    summaries.push(format!("{inner_name}: {}", desc.summary));
+    all_tags.extend(desc.tags.clone());
+    *categories
+      .entry(desc.suggested_category.clone())
+      .or_default() += 1;
+  }
+
+  all_tags.sort();
+  all_tags.dedup();
+
+  let top_category = categories
+    .into_iter()
+    .max_by_key(|(_, count)| *count)
+    .map(|(cat, _)| cat)
+    .unwrap_or_else(|| "other".to_string());
+
+  let items_summary = if summaries.len() <= 5 {
+    summaries.join("; ")
+  } else {
+    let first_five = summaries[..5].join("; ");
+    format!("{}; ... and {} more", first_five, summaries.len() - 5)
+  };
+
+  Ok(ContentDescription {
+    summary: format!(
+      "Archive ({} files): {}",
+      inner_descriptions.len(),
+      items_summary,
+    ),
+    tags: all_tags,
+    suggested_category: top_category,
+    confidence: 0.8,
+  })
+}
+
+async fn extract_and_analyze_archive(
+  provider: &impl AiProvider,
+  file: &FingerprintedFile,
+  options: &AnalyzeOptions,
+) -> Vec<(String, ContentDescription)> {
+  use crate::model::ArchiveFormat;
+
+  let format = match file.scanned.file_type {
+    crate::model::FileType::Archive(f) => f,
+    _ => return Vec::new(),
+  };
+
+  let tmp = match tempfile::TempDir::new() {
+    Ok(t) => t,
+    Err(e) => {
+      tracing::warn!(error = %e, "Failed to create temp dir for archive introspection");
+      return Vec::new();
+    }
+  };
+
+  let extracted = match format {
+    ArchiveFormat::Zip => {
+      extract_zip(&file.scanned.path, tmp.path(), options)
+    }
+    _ => {
+      tracing::debug!(
+        format = ?format,
+        "Archive format not yet supported for introspection"
+      );
+      return Vec::new();
+    }
+  };
+
+  let extracted = match extracted {
+    Ok(files) => files,
+    Err(e) => {
+      tracing::warn!(
+        path = %file.scanned.path.display(),
+        error = %e,
+        "Failed to extract archive"
+      );
+      return Vec::new();
+    }
+  };
+
+  let inner_opts = AnalyzeOptions {
+    cache_dir: options.cache_dir.clone(),
+    max_concurrent: options.max_concurrent,
+    use_batch_api: false,
+    introspect_archives: false,
+    max_archive_files: 0,
+    max_archive_file_size_mb: 0,
+  };
+
+  let mut results = Vec::new();
+  for inner_file in &extracted {
+    let inner_name = inner_file
+      .scanned
+      .path
+      .file_name()
+      .unwrap_or_default()
+      .to_string_lossy()
+      .to_string();
+    match Box::pin(analyze_file(provider, inner_file, &inner_opts))
+      .await
+    {
+      Ok(desc) => results.push((inner_name, desc)),
+      Err(e) => {
+        tracing::debug!(
+          file = %inner_name,
+          error = %e,
+          "Failed to analyze inner archive file"
+        );
+      }
+    }
+  }
+  results
+}
+
+fn extract_zip(
+  archive_path: &std::path::Path,
+  dest: &std::path::Path,
+  options: &AnalyzeOptions,
+) -> Result<Vec<FingerprintedFile>> {
+  use crate::scanner::scan_directory;
+
+  let file = std::fs::File::open(archive_path)
+    .with_context(|| format!("Opening {}", archive_path.display()))?;
+  let mut archive =
+    zip::ZipArchive::new(file).with_context(|| {
+      format!("Reading ZIP {}", archive_path.display())
+    })?;
+
+  let max_size = options.max_archive_file_size_mb * BYTES_PER_MB;
+  let mut extracted_count = 0;
+
+  for i in 0..archive.len() {
+    if extracted_count >= options.max_archive_files {
+      break;
+    }
+
+    let mut entry = match archive.by_index(i) {
+      Ok(e) => e,
+      Err(_) => continue,
+    };
+
+    if entry.is_dir() {
+      continue;
+    }
+
+    if entry.size() > max_size {
+      continue;
+    }
+
+    let entry_name = match entry.enclosed_name() {
+      Some(name) => name.to_path_buf(),
+      None => continue,
+    };
+
+    if entry_name
+      .components()
+      .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    {
+      continue;
+    }
+
+    let inner_ext = entry_name
+      .extension()
+      .and_then(|e| e.to_str())
+      .unwrap_or("");
+    let inner_type =
+      crate::model::FileType::from_extension(inner_ext);
+    if matches!(inner_type, crate::model::FileType::Archive(_))
+      || matches!(inner_type, crate::model::FileType::Other)
+    {
+      continue;
+    }
+
+    let dest_path = dest
+      .join(entry_name.file_name().unwrap_or(entry_name.as_os_str()));
+
+    let mut out = match std::fs::File::create(&dest_path) {
+      Ok(f) => f,
+      Err(_) => continue,
+    };
+    if std::io::copy(&mut entry, &mut out).is_err() {
+      continue;
+    }
+
+    extracted_count += 1;
+  }
+
+  let scanned = scan_directory(dest).unwrap_or_default();
+  Ok(
+    crate::fingerprint::fingerprint_files(scanned)
+      .unwrap_or_default(),
+  )
 }
 
 /// Max bytes of extracted text sent to the API per document
@@ -906,6 +1135,7 @@ mod tests {
       cache_dir: dir.path().to_path_buf(),
       max_concurrent: 1,
       use_batch_api: false,
+      ..Default::default()
     };
 
     struct PanicProvider;
@@ -943,6 +1173,7 @@ mod tests {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
       use_batch_api: false,
+      ..Default::default()
     };
 
     struct FakeProvider;
@@ -985,6 +1216,7 @@ mod tests {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
       use_batch_api: false,
+      ..Default::default()
     };
 
     struct FakeProvider;
@@ -1046,6 +1278,7 @@ mod tests {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
       use_batch_api: false,
+      ..Default::default()
     };
 
     struct UnusedProvider;
@@ -1087,6 +1320,7 @@ mod tests {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
       use_batch_api: false,
+      ..Default::default()
     };
 
     struct StubProvider;
@@ -1182,6 +1416,7 @@ mod tests {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
       use_batch_api: false,
+      ..Default::default()
     };
 
     let provider = TextCapturingProvider {
@@ -1213,6 +1448,7 @@ mod tests {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
       use_batch_api: false,
+      ..Default::default()
     };
 
     let provider = TextCapturingProvider {
@@ -1241,6 +1477,7 @@ mod tests {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
       use_batch_api: false,
+      ..Default::default()
     };
 
     let provider = TextCapturingProvider {
@@ -1352,6 +1589,7 @@ mod tests {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
       use_batch_api: true,
+      ..Default::default()
     };
 
     let provider = BatchOnlyProvider::new();
@@ -1397,6 +1635,7 @@ mod tests {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
       use_batch_api: true,
+      ..Default::default()
     };
 
     let provider = BatchOnlyProvider::new();
@@ -1430,6 +1669,7 @@ mod tests {
       cache_dir: cache_dir.path().to_path_buf(),
       max_concurrent: 1,
       use_batch_api: true,
+      ..Default::default()
     };
 
     let provider = BatchOnlyProvider::new();
@@ -1441,5 +1681,90 @@ mod tests {
     );
     // Nothing was submitted to the API
     assert!(provider.batch_sizes.lock().unwrap().is_empty());
+  }
+
+  #[test]
+  fn extract_zip_extracts_supported_files() {
+    let dir = TempDir::new().unwrap();
+    let zip_path = dir.path().join("test.zip");
+
+    let file = std::fs::File::create(&zip_path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+      .compression_method(zip::CompressionMethod::Stored);
+    writer.start_file("hello.txt", options).unwrap();
+    std::io::Write::write_all(&mut writer, b"Hello world").unwrap();
+    writer.start_file("photo.jpg", options).unwrap();
+    std::io::Write::write_all(&mut writer, b"\xFF\xD8\xFF\xE0fake")
+      .unwrap();
+    writer.finish().unwrap();
+
+    let dest = dir.path().join("extracted");
+    std::fs::create_dir(&dest).unwrap();
+
+    let opts = AnalyzeOptions {
+      max_archive_files: 10,
+      max_archive_file_size_mb: 50,
+      ..Default::default()
+    };
+    let files = extract_zip(&zip_path, &dest, &opts).unwrap();
+
+    assert_eq!(files.len(), 2);
+  }
+
+  #[test]
+  fn extract_zip_skips_hidden_and_nested_archives() {
+    let dir = TempDir::new().unwrap();
+    let zip_path = dir.path().join("test.zip");
+
+    let file = std::fs::File::create(&zip_path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+      .compression_method(zip::CompressionMethod::Stored);
+    writer.start_file("visible.txt", options).unwrap();
+    std::io::Write::write_all(&mut writer, b"ok").unwrap();
+    writer.start_file(".hidden/secret.txt", options).unwrap();
+    std::io::Write::write_all(&mut writer, b"nope").unwrap();
+    writer.start_file("inner.zip", options).unwrap();
+    std::io::Write::write_all(&mut writer, b"nested").unwrap();
+    writer.finish().unwrap();
+
+    let dest = dir.path().join("extracted");
+    std::fs::create_dir(&dest).unwrap();
+
+    let opts = AnalyzeOptions::default();
+    let files = extract_zip(&zip_path, &dest, &opts).unwrap();
+
+    assert_eq!(files.len(), 1);
+    let name =
+      files[0].scanned.path.file_name().unwrap().to_string_lossy();
+    assert_eq!(name, "visible.txt");
+  }
+
+  #[test]
+  fn extract_zip_respects_max_files_limit() {
+    let dir = TempDir::new().unwrap();
+    let zip_path = dir.path().join("test.zip");
+
+    let file = std::fs::File::create(&zip_path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+      .compression_method(zip::CompressionMethod::Stored);
+    for i in 0..10 {
+      writer.start_file(format!("file{i}.txt"), options).unwrap();
+      std::io::Write::write_all(&mut writer, b"data").unwrap();
+    }
+    writer.finish().unwrap();
+
+    let dest = dir.path().join("extracted");
+    std::fs::create_dir(&dest).unwrap();
+
+    let opts = AnalyzeOptions {
+      max_archive_files: 3,
+      ..Default::default()
+    };
+    let files = extract_zip(&zip_path, &dest, &opts).unwrap();
+
+    assert_eq!(files.len(), 3);
   }
 }

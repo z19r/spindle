@@ -709,6 +709,81 @@ impl AiProvider for ClaudeProvider {
 
     Ok(groups)
   }
+
+  async fn propose_groups_with_organized_context(
+    &self,
+    files: &[FileSummary],
+    existing_labels: &[String],
+    organized_context: &[(
+      String,
+      Vec<crate::model::ContentDescription>,
+    )],
+  ) -> Result<Vec<ProposedGroup>> {
+    if organized_context.is_empty() {
+      return self
+        .propose_groups_with_context(files, existing_labels)
+        .await;
+    }
+
+    let user_prompt = format!(
+      "{}{}{}",
+      super::group_user_prompt(files),
+      super::group_organized_context(organized_context),
+      super::group_existing_groups_note(existing_labels),
+    );
+    let request = cached_api_request(
+      self.model.clone(),
+      32_768,
+      Some(vec![cached_system_block(super::group_system_prompt())]),
+      vec![Message {
+        role: "user",
+        content: vec![ContentBlock::Text {
+          text: user_prompt,
+          cache_control: None,
+        }],
+      }],
+    );
+
+    let text = self.send_request(request).await?;
+
+    #[derive(Deserialize)]
+    struct GroupResponse {
+      groups: Vec<ProposedGroup>,
+    }
+
+    let response: GroupResponse = serde_json::from_str(&text)
+      .with_context(|| {
+        let preview = if text.len() > 500 {
+          format!(
+            "{}...(truncated, {} bytes total)",
+            &text[..500],
+            text.len()
+          )
+        } else {
+          text.clone()
+        };
+        format!(
+          "Failed to parse groups JSON from Claude. Raw response:\n{}",
+          preview
+        )
+      })?;
+
+    let groups = response
+      .groups
+      .into_iter()
+      .map(|mut g| {
+        if !g.member_destinations.is_empty()
+          && g.member_indices.is_empty()
+        {
+          g.member_indices =
+            g.member_destinations.iter().map(|m| m.index).collect();
+        }
+        g
+      })
+      .collect();
+
+    Ok(groups)
+  }
 }
 
 #[cfg(test)]

@@ -277,6 +277,7 @@ async fn analyze_caches_and_reuses_results() {
     cache_dir: cache_dir.path().to_path_buf(),
     max_concurrent: 2,
     use_batch_api: false,
+    ..Default::default()
   };
 
   let result1 =
@@ -323,6 +324,7 @@ async fn analyze_batch_processes_multiple_files() {
     cache_dir: cache_dir.path().to_path_buf(),
     max_concurrent: 2,
     use_batch_api: false,
+    ..Default::default()
   };
 
   let results = analyze_batch(&FakeAiProvider, &files, &opts).await;
@@ -363,6 +365,7 @@ async fn full_pipeline_end_to_end() {
     cache_dir: cache_dir.path().to_path_buf(),
     max_concurrent: 2,
     use_batch_api: false,
+    ..Default::default()
   };
   let descriptions =
     analyze_batch(&FakeAiProvider, &fingerprinted, &opts).await;
