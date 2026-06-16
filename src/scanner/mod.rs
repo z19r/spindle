@@ -37,6 +37,11 @@ pub fn scan_directory_opts(
   for entry in walkdir::WalkDir::new(path)
     .into_iter()
     .filter_entry(|e| {
+      if e.file_type().is_dir()
+        && e.path().join(".spindel-ignore").exists()
+      {
+        return false;
+      }
       if include_trash {
         return true;
       }
@@ -367,6 +372,49 @@ mod tests {
     assert!(!is_trash_path(&PathBuf::from(
       "/home/user/Trash/not_hidden.jpg"
     )));
+  }
+
+  #[test]
+  fn spindel_ignore_excludes_directory() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("keep.jpg"), b"data").unwrap();
+    let ignored = dir.path().join("ignored_folder");
+    fs::create_dir_all(&ignored).unwrap();
+    fs::write(ignored.join(".spindel-ignore"), b"").unwrap();
+    fs::write(ignored.join("hidden.jpg"), b"hidden").unwrap();
+
+    let results = scan_directory(dir.path()).unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert!(results[0].path.ends_with("keep.jpg"));
+  }
+
+  #[test]
+  fn spindel_ignore_excludes_nested_children() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("keep.jpg"), b"data").unwrap();
+    let ignored = dir.path().join("parent");
+    fs::create_dir_all(&ignored).unwrap();
+    fs::write(ignored.join(".spindel-ignore"), b"").unwrap();
+    let child = ignored.join("child");
+    fs::create_dir_all(&child).unwrap();
+    fs::write(child.join("nested.png"), b"deep").unwrap();
+
+    let results = scan_directory(dir.path()).unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert!(results[0].path.ends_with("keep.jpg"));
+  }
+
+  #[test]
+  fn spindel_ignore_at_root_excludes_everything() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join(".spindel-ignore"), b"").unwrap();
+    fs::write(dir.path().join("file.jpg"), b"data").unwrap();
+
+    let results = scan_directory(dir.path()).unwrap();
+
+    assert_eq!(results.len(), 0);
   }
 
   #[test]

@@ -21,11 +21,35 @@ pub fn build_groups(
     .collect()
 }
 
+/// Turn a (possibly hierarchical) group label into a relative folder path.
+/// `/` and `\` delimit nested directories: each segment is sanitized
+/// independently and rejoined with `/`, so "Work/Acme Corp/Website Redesign"
+/// becomes "work/acme_corp/website_redesign" — a real directory tree.
+/// Empty segments and traversal (".", "..") are dropped, so the result can
+/// never escape the output directory.
 fn sanitize_folder_name(label: &str) -> String {
-  let mut result = String::with_capacity(label.len());
+  let segments: Vec<String> = label
+    .replace('\\', "/")
+    .split('/')
+    .map(sanitize_segment)
+    .filter(|s| !s.is_empty())
+    .collect();
+
+  if segments.is_empty() {
+    "ungrouped".to_string()
+  } else {
+    segments.join("/")
+  }
+}
+
+/// Sanitize a single path segment: lowercase alphanumerics, keep hyphens,
+/// collapse everything else (including `.`) to single underscores. Returns
+/// an empty string for segments with no usable characters (e.g. "." or "..").
+fn sanitize_segment(segment: &str) -> String {
+  let mut result = String::with_capacity(segment.len());
   let mut last_was_separator = true;
 
-  for c in label.chars() {
+  for c in segment.chars() {
     if c.is_alphanumeric() {
       result.push(c.to_ascii_lowercase());
       last_was_separator = false;
@@ -38,12 +62,7 @@ fn sanitize_folder_name(label: &str) -> String {
     }
   }
 
-  let trimmed = result.trim_matches('_').to_string();
-  if trimmed.is_empty() {
-    "ungrouped".to_string()
-  } else {
-    trimmed
-  }
+  result.trim_matches('_').to_string()
 }
 
 #[cfg(test)]
@@ -176,5 +195,44 @@ mod tests {
     let result = sanitize_folder_name("my-photos");
 
     assert_eq!(result, "my-photos");
+  }
+
+  #[test]
+  fn sanitize_builds_nested_path_from_hierarchical_label() {
+    let result =
+      sanitize_folder_name("Work/Acme Corp/Website Redesign");
+
+    assert_eq!(result, "work/acme_corp/website_redesign");
+  }
+
+  #[test]
+  fn build_groups_creates_nested_suggested_path() {
+    let proposed =
+      vec![make_proposed("Photos/2023/Hawaii Trip", vec![0, 1])];
+    let output = Path::new("/organized");
+
+    let groups = build_groups(&proposed, output);
+
+    assert_eq!(
+      groups[0].suggested_path,
+      PathBuf::from("/organized/photos/2023/hawaii_trip")
+    );
+  }
+
+  #[test]
+  fn sanitize_drops_empty_segments_and_traversal() {
+    // Leading/duplicate slashes and "." / ".." must not escape or
+    // produce empty directory levels.
+    assert_eq!(sanitize_folder_name("/Work//Acme/"), "work/acme");
+    assert_eq!(
+      sanitize_folder_name("../../etc/passwd"),
+      "etc/passwd"
+    );
+    assert_eq!(sanitize_folder_name("a\\b\\c"), "a/b/c");
+  }
+
+  #[test]
+  fn sanitize_all_traversal_becomes_ungrouped() {
+    assert_eq!(sanitize_folder_name("../.."), "ungrouped");
   }
 }

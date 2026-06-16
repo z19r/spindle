@@ -53,6 +53,20 @@ pub trait AiProvider: Send + Sync {
     files: &[FileSummary],
   ) -> impl std::future::Future<Output = Result<Vec<ProposedGroup>>> + Send;
 
+  /// Group files while aware of folders previous runs already created.
+  /// New files can then be routed into an existing group instead of a
+  /// fresh near-duplicate. The default ignores `existing_labels`;
+  /// providers that drive the prompt should override this.
+  fn propose_groups_with_context(
+    &self,
+    files: &[FileSummary],
+    existing_labels: &[String],
+  ) -> impl std::future::Future<Output = Result<Vec<ProposedGroup>>> + Send
+  {
+    let _ = existing_labels;
+    self.propose_groups(files)
+  }
+
   /// Describe many files in one operation. The default falls back to
   /// sequential individual calls; providers with a native batch API
   /// (50% discount) should override this.

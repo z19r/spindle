@@ -1,10 +1,15 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::ai::{AiProvider, DescribeContext};
-use crate::model::{ContentDescription, FingerprintedFile};
+use crate::model::{
+  ContentDescription, FingerprintedFile, MemberDestination,
+  ProposedGroup,
+};
 
 pub struct AnalyzeOptions {
   pub cache_dir: PathBuf,
@@ -63,6 +68,151 @@ pub async fn write_cache(
     .context("Failed to serialize description")?;
   tokio::fs::write(&path, json).await.with_context(|| {
     format!("Failed to write cache: {}", path.display())
+  })?;
+  Ok(())
+}
+
+/// Bump when the grouping prompt changes materially.
+/// v3: nested folder-path labels are offered as an option, not mandated.
+const GROUP_CACHE_VERSION: u32 = 3;
+
+/// Cached grouping, addressed by content hash rather than positional index
+/// so it can be replayed across runs even if scan order differs.
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedGroupMember {
+  blake3_hex: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  dest_name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedGroup {
+  label: String,
+  rationale: String,
+  members: Vec<CachedGroupMember>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedGrouping {
+  version: u32,
+  groups: Vec<CachedGroup>,
+}
+
+/// Stable key for a grouping request: the SET of file content hashes plus
+/// the existing folder labels. Order-independent — any add/remove/relabel
+/// changes the key and forces a fresh grouping.
+pub fn group_cache_key(
+  hashes: &[[u8; 32]],
+  existing_labels: &[String],
+) -> String {
+  let mut hexes: Vec<String> =
+    hashes.iter().map(hex::encode).collect();
+  hexes.sort();
+  let mut labels: Vec<&String> = existing_labels.iter().collect();
+  labels.sort();
+
+  let mut hasher = blake3::Hasher::new();
+  for h in &hexes {
+    hasher.update(h.as_bytes());
+    hasher.update(b"\n");
+  }
+  hasher.update(b"--labels--\n");
+  for l in labels {
+    hasher.update(l.as_bytes());
+    hasher.update(b"\n");
+  }
+  hex::encode(hasher.finalize().as_bytes())
+}
+
+fn group_cache_path(cache_dir: &Path, key: &str) -> PathBuf {
+  cache_dir.join(format!("groups.{key}.v{GROUP_CACHE_VERSION}.json"))
+}
+
+/// Read a cached grouping and remap it onto the current run's indices via
+/// `hash_to_index`. Returns `None` on miss, version mismatch, corruption,
+/// or if any cached member is absent from the current file set.
+pub async fn read_cached_grouping(
+  cache_dir: &Path,
+  key: &str,
+  hash_to_index: &HashMap<String, usize>,
+) -> Option<Vec<ProposedGroup>> {
+  let path = group_cache_path(cache_dir, key);
+  let content = tokio::fs::read_to_string(&path).await.ok()?;
+  let cached: CachedGrouping = serde_json::from_str(&content).ok()?;
+  if cached.version != GROUP_CACHE_VERSION {
+    return None;
+  }
+
+  let mut groups = Vec::with_capacity(cached.groups.len());
+  for group in cached.groups {
+    let mut member_indices = Vec::new();
+    let mut member_destinations = Vec::new();
+    for member in group.members {
+      let index = *hash_to_index.get(&member.blake3_hex)?;
+      member_indices.push(index);
+      if let Some(dest_name) = member.dest_name {
+        member_destinations
+          .push(MemberDestination { index, dest_name });
+      }
+    }
+    groups.push(ProposedGroup {
+      label: group.label,
+      rationale: group.rationale,
+      member_indices,
+      member_destinations,
+    });
+  }
+  Some(groups)
+}
+
+/// Persist a grouping in content-addressed form for future runs.
+pub async fn write_cached_grouping(
+  cache_dir: &Path,
+  key: &str,
+  groups: &[ProposedGroup],
+  index_to_hash: &HashMap<usize, String>,
+) -> Result<()> {
+  let cached = CachedGrouping {
+    version: GROUP_CACHE_VERSION,
+    groups: groups
+      .iter()
+      .map(|g| {
+        let dest_by_index: HashMap<usize, &str> = g
+          .member_destinations
+          .iter()
+          .map(|d| (d.index, d.dest_name.as_str()))
+          .collect();
+        let members = g
+          .member_indices
+          .iter()
+          .filter_map(|idx| {
+            index_to_hash.get(idx).map(|hex| CachedGroupMember {
+              blake3_hex: hex.clone(),
+              dest_name: dest_by_index
+                .get(idx)
+                .map(|s| s.to_string()),
+            })
+          })
+          .collect();
+        CachedGroup {
+          label: g.label.clone(),
+          rationale: g.rationale.clone(),
+          members,
+        }
+      })
+      .collect(),
+  };
+
+  tokio::fs::create_dir_all(cache_dir)
+    .await
+    .with_context(|| {
+      format!("Failed to create cache dir: {}", cache_dir.display())
+    })?;
+  let path = group_cache_path(cache_dir, key);
+  let json = serde_json::to_string_pretty(&cached)
+    .context("Failed to serialize grouping")?;
+  tokio::fs::write(&path, json).await.with_context(|| {
+    format!("Failed to write grouping cache: {}", path.display())
   })?;
   Ok(())
 }
@@ -644,6 +794,100 @@ mod tests {
     let opts = AnalyzeOptions::default();
 
     assert_eq!(opts.max_concurrent, 5);
+  }
+
+  #[test]
+  fn group_cache_key_is_order_independent() {
+    let a = [1u8; 32];
+    let b = [2u8; 32];
+
+    assert_eq!(
+      group_cache_key(&[a, b], &[]),
+      group_cache_key(&[b, a], &[])
+    );
+  }
+
+  #[test]
+  fn group_cache_key_changes_with_files_and_labels() {
+    let a = [1u8; 32];
+    let b = [2u8; 32];
+
+    assert_ne!(
+      group_cache_key(&[a], &[]),
+      group_cache_key(&[a, b], &[])
+    );
+    assert_ne!(
+      group_cache_key(&[a], &[]),
+      group_cache_key(&[a], &["Beach".to_string()])
+    );
+  }
+
+  #[tokio::test]
+  async fn group_cache_roundtrips_and_remaps_by_hash() {
+    let dir = TempDir::new().unwrap();
+    let h0 = [1u8; 32];
+    let h1 = [2u8; 32];
+    let hex0 = hex::encode(h0);
+    let hex1 = hex::encode(h1);
+
+    let groups = vec![ProposedGroup {
+      label: "Beach".to_string(),
+      rationale: "sandy".to_string(),
+      member_indices: vec![0, 1],
+      member_destinations: vec![MemberDestination {
+        index: 0,
+        dest_name: "a.jpg".to_string(),
+      }],
+    }];
+    let key = group_cache_key(&[h0, h1], &[]);
+    let index_to_hash =
+      HashMap::from([(0, hex0.clone()), (1, hex1.clone())]);
+
+    write_cached_grouping(dir.path(), &key, &groups, &index_to_hash)
+      .await
+      .unwrap();
+
+    // Replay with DIFFERENT indices (e.g. a different scan order).
+    let hash_to_index =
+      HashMap::from([(hex0, 7usize), (hex1, 3usize)]);
+    let loaded =
+      read_cached_grouping(dir.path(), &key, &hash_to_index)
+        .await
+        .unwrap();
+
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].label, "Beach");
+    assert_eq!(loaded[0].member_indices, vec![7, 3]);
+    assert_eq!(loaded[0].member_destinations[0].index, 7);
+    assert_eq!(loaded[0].member_destinations[0].dest_name, "a.jpg");
+  }
+
+  #[tokio::test]
+  async fn group_cache_misses_when_member_not_in_current_set() {
+    let dir = TempDir::new().unwrap();
+    let h0 = [1u8; 32];
+    let h1 = [2u8; 32];
+    let hex0 = hex::encode(h0);
+
+    let groups = vec![ProposedGroup {
+      label: "Beach".to_string(),
+      rationale: "sandy".to_string(),
+      member_indices: vec![0, 1],
+      member_destinations: vec![],
+    }];
+    let key = group_cache_key(&[h0, h1], &[]);
+    let index_to_hash =
+      HashMap::from([(0, hex0.clone()), (1, hex::encode(h1))]);
+    write_cached_grouping(dir.path(), &key, &groups, &index_to_hash)
+      .await
+      .unwrap();
+
+    // Current set is missing h1 — the cached grouping can't be remapped.
+    let hash_to_index = HashMap::from([(hex0, 0usize)]);
+    let loaded =
+      read_cached_grouping(dir.path(), &key, &hash_to_index).await;
+
+    assert!(loaded.is_none());
   }
 
   #[tokio::test]
