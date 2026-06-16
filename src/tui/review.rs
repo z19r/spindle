@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
@@ -19,6 +19,41 @@ use ratatui_image::protocol::StatefulProtocol;
 use crate::model::{
   DuplicateType, FileGroup, FileMove, FileType, FingerprintedFile,
 };
+
+fn decode_image(path: &Path) -> Option<image::DynamicImage> {
+  match image::ImageReader::open(path)
+    .and_then(|r| r.with_guessed_format())
+  {
+    Ok(reader) => match reader.decode() {
+      Ok(img) => return Some(img),
+      Err(e) => tracing::debug!(?path, %e, "image crate failed, trying magick"),
+    },
+    Err(e) => tracing::debug!(?path, %e, "image crate failed, trying magick"),
+  }
+
+  let tmp = std::env::temp_dir().join(format!(
+    "spindle-preview-{}.png",
+    std::process::id()
+  ));
+  let ok = std::process::Command::new("magick")
+    .arg("convert")
+    .arg(path)
+    .arg("-resize")
+    .arg("1200x1200>")
+    .arg(&tmp)
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false);
+  if !ok {
+    tracing::warn!(?path, "magick convert also failed");
+    return None;
+  }
+  let result = image::open(&tmp).ok();
+  let _ = std::fs::remove_file(&tmp);
+  result
+}
 
 mod theme {
   use ratatui::style::{Color, Modifier, Style};
@@ -509,11 +544,7 @@ impl ReviewState {
         let (tx1, rx1) = mpsc::channel();
         let p1 = primary_path.clone();
         thread::spawn(move || {
-          let decoded = image::ImageReader::open(&p1)
-            .and_then(|r| r.with_guessed_format())
-            .ok()
-            .and_then(|r| r.decode().ok());
-          if let Some(img) = decoded {
+          if let Some(img) = decode_image(&p1) {
             let protocol = pk1.new_resize_protocol(img);
             let _ = tx1.send((p1, protocol));
           }
@@ -524,11 +555,7 @@ impl ReviewState {
         let (tx2, rx2) = mpsc::channel();
         let p2 = secondary_path.clone();
         thread::spawn(move || {
-          let decoded = image::ImageReader::open(&p2)
-            .and_then(|r| r.with_guessed_format())
-            .ok()
-            .and_then(|r| r.decode().ok());
-          if let Some(img) = decoded {
+          if let Some(img) = decode_image(&p2) {
             let protocol = pk2.new_resize_protocol(img);
             let _ = tx2.send((p2, protocol));
           }
@@ -618,16 +645,14 @@ impl ReviewState {
         let (tx, rx) = mpsc::channel();
         let p = path;
         thread::spawn(move || {
-          let decoded = image::ImageReader::open(&p)
-            .and_then(|r| r.with_guessed_format())
-            .ok()
-            .and_then(|r| r.decode().ok());
-          if let Some(img) = decoded {
+          if let Some(img) = decode_image(&p) {
             let protocol = pk.new_resize_protocol(img);
             let _ = tx.send((p, protocol));
           }
         });
         ds.primary_rx = Some(rx);
+      } else {
+        ds.primary_preview = PreviewState::None;
       }
 
       self.diff_state = Some(ds);
@@ -691,11 +716,7 @@ impl ReviewState {
     self.image_rx = Some(rx);
 
     thread::spawn(move || {
-      let decoded = image::ImageReader::open(&path)
-        .and_then(|r| r.with_guessed_format())
-        .ok()
-        .and_then(|r| r.decode().ok());
-      if let Some(img) = decoded {
+      if let Some(img) = decode_image(&path) {
         let protocol = picker_clone.new_resize_protocol(img);
         let _ = tx.send((path, protocol));
       }

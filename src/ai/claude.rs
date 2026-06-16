@@ -718,7 +718,7 @@ mod tests {
   #[test]
   fn api_request_serializes_prompt_caching_fields() {
     let request = cached_api_request(
-      "claude-sonnet-4-20250514".to_string(),
+      "claude-sonnet-4-6".to_string(),
       1024,
       Some(vec![cached_system_block("static instructions")]),
       vec![Message {
@@ -762,7 +762,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
-      "claude-sonnet-4-20250514".to_string(),
+      "claude-sonnet-4-6".to_string(),
       0,
     )
     .with_base_url(server.uri());
@@ -797,7 +797,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "bad-key".to_string(),
-      "claude-sonnet-4-20250514".to_string(),
+      "claude-sonnet-4-6".to_string(),
       0,
     )
     .with_base_url(server.uri());
@@ -834,7 +834,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
-      "claude-sonnet-4-20250514".to_string(),
+      "claude-sonnet-4-6".to_string(),
       0,
     )
     .with_base_url(server.uri());
@@ -891,7 +891,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
-      "claude-sonnet-4-20250514".to_string(),
+      "claude-sonnet-4-6".to_string(),
       0,
     )
     .with_base_url(server.uri());
@@ -919,7 +919,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
-      "claude-sonnet-4-20250514".to_string(),
+      "claude-sonnet-4-6".to_string(),
       0,
     )
     .with_base_url(server.uri());
