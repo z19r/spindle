@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -6,12 +7,16 @@ const BYTES_PER_MB: u64 = 1_000_000;
 use tokio::sync::mpsc;
 
 use crate::ai::AiProvider;
-use crate::analyze::{analyze_batch, AnalyzeOptions};
+use crate::analyze::{
+  analyze_batch, group_cache_key, read_cache, read_cached_grouping,
+  write_cached_grouping, AnalyzeOptions,
+};
 use crate::cost::estimate_cost;
 use crate::fingerprint::{
   find_exact_duplicates, find_near_duplicates, fingerprint_files,
 };
 use crate::group::build_groups;
+use crate::ledger::{Ledger, OrganizedDuplicate};
 use crate::model::FileCategory;
 use crate::model::{
   DuplicateSet, FileSummary, FingerprintedFile, ProposedGroup,
@@ -44,6 +49,7 @@ pub enum PipelineEvent {
   },
   AnalysisStarted {
     file_count: usize,
+    cached: usize,
   },
   FileAnalyzed {
     filename: String,
@@ -75,6 +81,9 @@ pub struct PipelineConfig {
   pub include_trash: bool,
   pub type_filter: Vec<FileCategory>,
   pub use_batch_api: bool,
+  /// Path to the persistent "already organized" ledger. `None` disables
+  /// both candidate exclusion and recording.
+  pub ledger_path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -82,6 +91,8 @@ pub struct PipelineResult {
   pub plan: ReorgPlan,
   pub fingerprinted: Vec<FingerprintedFile>,
   pub all_dupes: Vec<DuplicateSet>,
+  /// New candidates that are byte-identical to already-organized files.
+  pub organized_duplicates: Vec<OrganizedDuplicate>,
 }
 
 pub async fn run<P: AiProvider>(
@@ -105,7 +116,28 @@ pub async fn run<P: AiProvider>(
     })
     .await;
 
-  let fingerprinted = fingerprint_files(scanned)?;
+  let mut fingerprinted = fingerprint_files(scanned)?;
+
+  // Drop files a previous run already organized (matched by path + content
+  // hash); collect any brand-new files that are byte-identical to
+  // already-organized content so they can be surfaced as duplicates.
+  let ledger = config.ledger_path.as_ref().map(|p| Ledger::load(p));
+  let organized_duplicates =
+    apply_ledger_exclusion(&mut fingerprinted, ledger.as_ref());
+  if fingerprinted.is_empty() {
+    // Everything scanned was already organized. That's success, not an
+    // error — return an empty plan so the caller reports "nothing to do"
+    // (and still surfaces any identical-to-organized duplicates).
+    let plan = propose_plan(&config.output_dir, &[], &[], &[]);
+    let _ = tx.send(PipelineEvent::PlanReady).await;
+    return Ok(PipelineResult {
+      plan,
+      fingerprinted: vec![],
+      all_dupes: vec![],
+      organized_duplicates,
+    });
+  }
+
   let exact_dupes = find_exact_duplicates(&fingerprinted);
   let near_dupes = find_near_duplicates(
     &fingerprinted,
@@ -174,7 +206,23 @@ pub async fn run<P: AiProvider>(
       member_destinations: vec![],
     }]
   } else {
-    run_ai_pipeline(provider, &fingerprinted, config, &tx).await?
+    let existing_labels: Vec<String> = ledger
+      .as_ref()
+      .map(|l| {
+        l.existing_groups_under(&config.output_dir)
+          .into_iter()
+          .map(|g| g.label)
+          .collect()
+      })
+      .unwrap_or_default();
+    run_ai_pipeline(
+      provider,
+      &fingerprinted,
+      &existing_labels,
+      config,
+      &tx,
+    )
+    .await?
   };
 
   let all_dupes: Vec<DuplicateSet> =
@@ -201,12 +249,46 @@ pub async fn run<P: AiProvider>(
     plan,
     fingerprinted,
     all_dupes,
+    organized_duplicates,
   })
+}
+
+/// Remove already-organized files from the candidate set and return new
+/// files that are byte-identical to organized content. With no ledger,
+/// nothing is excluded.
+fn apply_ledger_exclusion(
+  fingerprinted: &mut Vec<FingerprintedFile>,
+  ledger: Option<&Ledger>,
+) -> Vec<OrganizedDuplicate> {
+  let Some(ledger) = ledger else {
+    return Vec::new();
+  };
+  let before = fingerprinted.len();
+  let mut duplicates = Vec::new();
+  fingerprinted.retain(|f| {
+    let hex = crate::ledger::hash_hex(&f.blake3_hash);
+    if ledger.is_organized(&f.scanned.path, &hex) {
+      return false;
+    }
+    if let Some(entry) = ledger.duplicate_of(&hex) {
+      duplicates.push(OrganizedDuplicate {
+        path: f.scanned.path.clone(),
+        organized_at: entry.dest_path.clone(),
+      });
+    }
+    true
+  });
+  let skipped = before - fingerprinted.len();
+  if skipped > 0 {
+    tracing::info!(skipped, "Excluded already-organized files");
+  }
+  duplicates
 }
 
 async fn run_ai_pipeline<P: AiProvider>(
   provider: &P,
   fingerprinted: &[FingerprintedFile],
+  existing_labels: &[String],
   config: &PipelineConfig,
   tx: &mpsc::Sender<PipelineEvent>,
 ) -> Result<Vec<ProposedGroup>> {
@@ -220,12 +302,26 @@ async fn run_ai_pipeline<P: AiProvider>(
     .collect();
 
   let analyze_count = files_to_analyze.len();
-  let cost_est = estimate_cost(analyze_count);
+
+  // Files whose description is already cached cost nothing — only the
+  // uncached ones are actually sent to Claude, so estimate and report
+  // against that count.
+  let mut cached = 0;
+  for (_, f) in &files_to_analyze {
+    if read_cache(&config.cache_dir, &f.blake3_hash)
+      .await
+      .is_some()
+    {
+      cached += 1;
+    }
+  }
+  let to_send = analyze_count - cached;
+  let cost_est = estimate_cost(to_send);
 
   let _ = tx
     .send(PipelineEvent::CostEstimated {
       estimated_usd: cost_est.estimated_cost_usd,
-      file_count: analyze_count,
+      file_count: to_send,
     })
     .await;
 
@@ -243,6 +339,7 @@ async fn run_ai_pipeline<P: AiProvider>(
   let _ = tx
     .send(PipelineEvent::AnalysisStarted {
       file_count: analyze_count,
+      cached,
     })
     .await;
 
@@ -308,8 +405,49 @@ async fn run_ai_pipeline<P: AiProvider>(
     })
     .await;
 
-  match provider.propose_groups(&summaries).await {
-    Ok(groups) => Ok(groups),
+  // Grouping is the one Claude call left on an otherwise-cached run. Key it
+  // by the exact set of file hashes + existing folder labels so an unchanged
+  // run replays the cached grouping and sends zero tokens.
+  let by_index: HashMap<usize, &FingerprintedFile> =
+    files_to_analyze.iter().map(|(idx, f)| (*idx, *f)).collect();
+  let mut index_to_hash = HashMap::new();
+  let mut hash_to_index = HashMap::new();
+  let mut summary_hashes = Vec::with_capacity(summaries.len());
+  for summary in &summaries {
+    if let Some(f) = by_index.get(&summary.index) {
+      let hex = crate::ledger::hash_hex(&f.blake3_hash);
+      summary_hashes.push(f.blake3_hash);
+      index_to_hash.insert(summary.index, hex.clone());
+      hash_to_index.insert(hex, summary.index);
+    }
+  }
+
+  let cache_key = group_cache_key(&summary_hashes, existing_labels);
+  if let Some(groups) = read_cached_grouping(
+    &config.cache_dir,
+    &cache_key,
+    &hash_to_index,
+  )
+  .await
+  {
+    tracing::info!("Reused cached grouping (no Claude call)");
+    return Ok(groups);
+  }
+
+  match provider
+    .propose_groups_with_context(&summaries, existing_labels)
+    .await
+  {
+    Ok(groups) => {
+      let _ = write_cached_grouping(
+        &config.cache_dir,
+        &cache_key,
+        &groups,
+        &index_to_hash,
+      )
+      .await;
+      Ok(groups)
+    }
     Err(err) => {
       let _ = tx
         .send(PipelineEvent::GroupingFailed {
@@ -367,6 +505,73 @@ mod tests {
     }
   }
 
+  /// Panics if any Claude method is called — used to prove a fully-cached
+  /// run sends zero tokens.
+  struct PanicProvider;
+
+  impl AiProvider for PanicProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      _context: &DescribeContext,
+    ) -> anyhow::Result<ContentDescription> {
+      panic!("describe_image called despite cached descriptions");
+    }
+
+    async fn propose_groups(
+      &self,
+      _files: &[FileSummary],
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      panic!("propose_groups called despite cached grouping");
+    }
+  }
+
+  #[tokio::test]
+  async fn second_run_makes_no_claude_calls_when_unchanged() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+
+    fs::write(
+      source.path().join("a.png"),
+      create_test_png(255, 0, 0),
+    )
+    .unwrap();
+    fs::write(
+      source.path().join("b.png"),
+      create_test_png(0, 255, 0),
+    )
+    .unwrap();
+
+    let mk = || PipelineConfig {
+      target_dirs: vec![source.path().to_path_buf()],
+      output_dir: output.path().to_path_buf(),
+      no_ai: false,
+      max_files: 500,
+      max_file_size_mb: 100,
+      max_cost: None,
+      near_duplicate_threshold: 8,
+      cache_dir: cache.path().to_path_buf(),
+      max_concurrent: 2,
+      include_trash: false,
+      type_filter: vec![],
+      use_batch_api: false,
+      ledger_path: None,
+    };
+
+    // First run populates both the description and grouping caches.
+    let (tx1, _rx1) = mpsc::channel(64);
+    let first = run(&FakeProvider, &mk(), tx1).await.unwrap();
+    assert!(!first.plan.groups.is_empty());
+
+    // Second run over the unchanged set must not call Claude at all.
+    let (tx2, _rx2) = mpsc::channel(64);
+    let second = run(&PanicProvider, &mk(), tx2).await.unwrap();
+
+    assert_eq!(second.plan.groups.len(), first.plan.groups.len());
+  }
+
   fn create_test_png(r: u8, g: u8, b: u8) -> Vec<u8> {
     use image::{ImageBuffer, RgbaImage};
     let img: RgbaImage =
@@ -375,6 +580,187 @@ mod tests {
     let mut cursor = std::io::Cursor::new(&mut buf);
     img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
     buf
+  }
+
+  fn ledger_test_config(
+    source: &std::path::Path,
+    output: &std::path::Path,
+    cache: &std::path::Path,
+    ledger_path: Option<PathBuf>,
+  ) -> PipelineConfig {
+    PipelineConfig {
+      target_dirs: vec![source.to_path_buf()],
+      output_dir: output.to_path_buf(),
+      no_ai: true,
+      max_files: 500,
+      max_file_size_mb: 100,
+      max_cost: None,
+      near_duplicate_threshold: 8,
+      cache_dir: cache.to_path_buf(),
+      max_concurrent: 2,
+      include_trash: false,
+      type_filter: vec![],
+      use_batch_api: false,
+      ledger_path,
+    }
+  }
+
+  #[tokio::test]
+  async fn pipeline_excludes_already_organized_files() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    let ledger_path = output.path().join("ledger.json");
+
+    fs::write(
+      source.path().join("a.png"),
+      create_test_png(255, 0, 0),
+    )
+    .unwrap();
+    fs::write(
+      source.path().join("b.png"),
+      create_test_png(0, 255, 0),
+    )
+    .unwrap();
+
+    // First pass with no ledger to learn the exact scanned path + hash.
+    let cfg1 = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    let (tx1, _rx1) = mpsc::channel(64);
+    let first = run(&FakeProvider, &cfg1, tx1).await.unwrap();
+    let a = first
+      .fingerprinted
+      .iter()
+      .find(|f| f.scanned.path.ends_with("a.png"))
+      .unwrap();
+
+    // Record a.png as already organized, then run again with the ledger.
+    let mut ledger = Ledger::default();
+    ledger.record(crate::ledger::LedgerEntry {
+      source_path: a.scanned.path.clone(),
+      dest_path: output.path().join("old/a.png"),
+      blake3_hex: crate::ledger::hash_hex(&a.blake3_hash),
+      group_label: "Old".to_string(),
+      organized_at: "2026-01-01T00:00:00Z".to_string(),
+    });
+    ledger.save(&ledger_path).unwrap();
+
+    let cfg2 = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      Some(ledger_path),
+    );
+    let (tx2, _rx2) = mpsc::channel(64);
+    let second = run(&FakeProvider, &cfg2, tx2).await.unwrap();
+
+    assert_eq!(second.fingerprinted.len(), 1);
+    assert!(second.fingerprinted[0].scanned.path.ends_with("b.png"));
+    assert!(second.organized_duplicates.is_empty());
+  }
+
+  #[tokio::test]
+  async fn pipeline_returns_empty_plan_when_all_organized() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    let ledger_path = output.path().join("ledger.json");
+
+    fs::write(
+      source.path().join("a.png"),
+      create_test_png(255, 0, 0),
+    )
+    .unwrap();
+
+    let cfg1 = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    let (tx1, _rx1) = mpsc::channel(64);
+    let first = run(&FakeProvider, &cfg1, tx1).await.unwrap();
+
+    let mut ledger = Ledger::default();
+    for f in &first.fingerprinted {
+      ledger.record(crate::ledger::LedgerEntry {
+        source_path: f.scanned.path.clone(),
+        dest_path: output.path().join("old/x.png"),
+        blake3_hex: crate::ledger::hash_hex(&f.blake3_hash),
+        group_label: "Old".to_string(),
+        organized_at: "2026-01-01T00:00:00Z".to_string(),
+      });
+    }
+    ledger.save(&ledger_path).unwrap();
+
+    let cfg2 = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      Some(ledger_path),
+    );
+    let (tx2, _rx2) = mpsc::channel(64);
+    // Must be Ok with an empty plan — "nothing to do" is success, not error.
+    let second = run(&FakeProvider, &cfg2, tx2).await.unwrap();
+
+    assert!(second.fingerprinted.is_empty());
+    assert!(second.plan.groups.is_empty());
+    assert!(second.plan.moves.is_empty());
+  }
+
+  #[tokio::test]
+  async fn pipeline_flags_new_file_identical_to_organized() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    let ledger_path = output.path().join("ledger.json");
+
+    fs::write(
+      source.path().join("a.png"),
+      create_test_png(255, 0, 0),
+    )
+    .unwrap();
+
+    let cfg1 = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    let (tx1, _rx1) = mpsc::channel(64);
+    let first = run(&FakeProvider, &cfg1, tx1).await.unwrap();
+    let a = &first.fingerprinted[0];
+
+    // Same content, but organized under a DIFFERENT source path: it is not
+    // excluded (path differs) but must be flagged as a duplicate.
+    let mut ledger = Ledger::default();
+    ledger.record(crate::ledger::LedgerEntry {
+      source_path: PathBuf::from("/somewhere/else/original.png"),
+      dest_path: output.path().join("old/original.png"),
+      blake3_hex: crate::ledger::hash_hex(&a.blake3_hash),
+      group_label: "Old".to_string(),
+      organized_at: "2026-01-01T00:00:00Z".to_string(),
+    });
+    ledger.save(&ledger_path).unwrap();
+
+    let cfg2 = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      Some(ledger_path),
+    );
+    let (tx2, _rx2) = mpsc::channel(64);
+    let second = run(&FakeProvider, &cfg2, tx2).await.unwrap();
+
+    assert_eq!(second.fingerprinted.len(), 1);
+    assert_eq!(second.organized_duplicates.len(), 1);
+    assert!(second.organized_duplicates[0]
+      .organized_at
+      .ends_with("old/original.png"));
   }
 
   #[tokio::test]
@@ -407,6 +793,7 @@ mod tests {
       include_trash: false,
       type_filter: vec![],
       use_batch_api: false,
+      ledger_path: None,
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -457,6 +844,7 @@ mod tests {
       include_trash: false,
       type_filter: vec![],
       use_batch_api: false,
+      ledger_path: None,
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -498,6 +886,7 @@ mod tests {
       include_trash: false,
       type_filter: vec![],
       use_batch_api: false,
+      ledger_path: None,
     };
 
     let (tx, _rx) = mpsc::channel(64);
@@ -537,6 +926,7 @@ mod tests {
       include_trash: false,
       type_filter: vec![],
       use_batch_api: false,
+      ledger_path: None,
     };
 
     let (tx, _rx) = mpsc::channel(64);
@@ -572,6 +962,7 @@ mod tests {
       include_trash: false,
       type_filter: vec![],
       use_batch_api: false,
+      ledger_path: None,
     };
 
     let (tx, mut rx) = mpsc::channel(64);

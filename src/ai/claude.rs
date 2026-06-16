@@ -647,6 +647,19 @@ impl AiProvider for ClaudeProvider {
     &self,
     files: &[FileSummary],
   ) -> Result<Vec<ProposedGroup>> {
+    self.propose_groups_with_context(files, &[]).await
+  }
+
+  async fn propose_groups_with_context(
+    &self,
+    files: &[FileSummary],
+    existing_labels: &[String],
+  ) -> Result<Vec<ProposedGroup>> {
+    let user_prompt = format!(
+      "{}{}",
+      super::group_user_prompt(files),
+      super::group_existing_groups_note(existing_labels),
+    );
     let request = cached_api_request(
       self.model.clone(),
       32_768,
@@ -654,7 +667,7 @@ impl AiProvider for ClaudeProvider {
       vec![Message {
         role: "user",
         content: vec![ContentBlock::Text {
-          text: super::group_user_prompt(files),
+          text: user_prompt,
           cache_control: None,
         }],
       }],
@@ -705,7 +718,7 @@ mod tests {
   #[test]
   fn api_request_serializes_prompt_caching_fields() {
     let request = cached_api_request(
-      "claude-sonnet-4-20250514".to_string(),
+      "claude-sonnet-4-6".to_string(),
       1024,
       Some(vec![cached_system_block("static instructions")]),
       vec![Message {
@@ -749,7 +762,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
-      "claude-sonnet-4-20250514".to_string(),
+      "claude-sonnet-4-6".to_string(),
       0,
     )
     .with_base_url(server.uri());
@@ -784,7 +797,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "bad-key".to_string(),
-      "claude-sonnet-4-20250514".to_string(),
+      "claude-sonnet-4-6".to_string(),
       0,
     )
     .with_base_url(server.uri());
@@ -821,7 +834,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
-      "claude-sonnet-4-20250514".to_string(),
+      "claude-sonnet-4-6".to_string(),
       0,
     )
     .with_base_url(server.uri());
@@ -878,7 +891,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
-      "claude-sonnet-4-20250514".to_string(),
+      "claude-sonnet-4-6".to_string(),
       0,
     )
     .with_base_url(server.uri());
@@ -906,7 +919,7 @@ mod tests {
 
     let provider = ClaudeProvider::new(
       "test-key".to_string(),
-      "claude-sonnet-4-20250514".to_string(),
+      "claude-sonnet-4-6".to_string(),
       0,
     )
     .with_base_url(server.uri());
