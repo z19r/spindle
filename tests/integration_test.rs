@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 use spindle::ai::{AiProvider, DescribeContext};
 use spindle::analyze::{analyze_batch, analyze_file, AnalyzeOptions};
-use spindle::executor::{execute_plan, undo};
+use spindle::executor::{execute_plan, undo_run, ExecutorPaths};
 use spindle::fingerprint::{
   compute_blake3, find_exact_duplicates, find_near_duplicates,
   fingerprint_files,
@@ -164,7 +164,8 @@ fn execute_and_undo_full_cycle() {
   fs::write(src_dir.path().join("photo1.jpg"), b"image1").unwrap();
   fs::write(src_dir.path().join("photo2.jpg"), b"image2").unwrap();
 
-  let undo_path = dest_dir.path().join("undo.json");
+  let state_dir = TempDir::new().unwrap();
+  let paths = ExecutorPaths::under(state_dir.path());
 
   let plan = ApprovedPlan {
     moves: vec![
@@ -183,7 +184,7 @@ fn execute_and_undo_full_cycle() {
     skipped_files: vec![],
   };
 
-  let report = execute_plan(&plan, &undo_path, dest_dir.path());
+  let report = execute_plan(&plan, &paths, dest_dir.path());
 
   assert_eq!(report.moves_completed.len(), 2);
   assert!(report.moves_failed.is_empty());
@@ -192,8 +193,10 @@ fn execute_and_undo_full_cycle() {
   assert!(!src_dir.path().join("photo1.jpg").exists());
   assert!(!src_dir.path().join("photo2.jpg").exists());
 
-  let restored = undo(&undo_path).unwrap();
+  let undone = undo_run(&paths, Some(&report.run_id)).unwrap();
+  let restored = undone.restored;
 
+  assert!(undone.failed.is_empty());
   assert_eq!(restored.len(), 2);
   assert!(src_dir.path().join("photo1.jpg").exists());
   assert!(src_dir.path().join("photo2.jpg").exists());
@@ -206,7 +209,8 @@ fn execute_with_deletions() {
   let dir = TempDir::new().unwrap();
   let dupe = dir.path().join("dupe.jpg");
   fs::write(&dupe, b"duplicate content").unwrap();
-  let undo_path = dir.path().join("undo.json");
+  let state_dir = TempDir::new().unwrap();
+  let paths = ExecutorPaths::under(state_dir.path());
 
   let plan = ApprovedPlan {
     moves: vec![],
@@ -214,10 +218,16 @@ fn execute_with_deletions() {
     skipped_files: vec![],
   };
 
-  let report = execute_plan(&plan, &undo_path, dir.path());
+  let report = execute_plan(&plan, &paths, dir.path());
 
-  assert_eq!(report.deletions_completed.len(), 1);
+  assert_eq!(report.deletions_staged.len(), 1);
+  assert_eq!(report.bytes_staged, 17);
   assert!(!dupe.exists());
+
+  // The staged copy survives inside the trash until purged.
+  let undone = undo_run(&paths, Some(&report.run_id)).unwrap();
+  assert!(undone.failed.is_empty());
+  assert!(dupe.exists());
 }
 
 // --- Analyze with cache ---
@@ -401,15 +411,17 @@ async fn full_pipeline_end_to_end() {
     skipped_files: vec![],
   };
 
-  let undo_path = output_dir.path().join("undo.json");
-  let report = execute_plan(&approved, &undo_path, output_dir.path());
+  let state_dir = TempDir::new().unwrap();
+  let paths = ExecutorPaths::under(state_dir.path());
+  let report = execute_plan(&approved, &paths, output_dir.path());
 
   assert_eq!(report.moves_completed.len(), 4);
   assert!(report.moves_failed.is_empty());
 
-  let restored = undo(&undo_path).unwrap();
-  assert_eq!(restored.len(), 4);
-  for path in &restored {
+  let undone = undo_run(&paths, None).unwrap();
+  assert!(undone.failed.is_empty());
+  assert_eq!(undone.restored.len(), 4);
+  for path in &undone.restored {
     assert!(path.exists());
   }
 }

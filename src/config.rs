@@ -61,11 +61,27 @@ pub struct CliArgs {
   #[arg(long)]
   pub include_trash: bool,
 
-  /// Undo the last operation (reads undo log from output directory)
+  /// Undo the most recent run (moves back, deletions restored from trash)
   #[arg(long)]
   pub undo: bool,
 
-  /// Path to undo log file (defaults to <output>/.spindle_undo.json)
+  /// Undo a specific run by id (see --list-undo)
+  #[arg(long, value_name = "RUN_ID")]
+  pub undo_run: Option<String>,
+
+  /// List undoable runs from the journal
+  #[arg(long)]
+  pub list_undo: bool,
+
+  /// Permanently delete staged trash to reclaim disk space
+  #[arg(long)]
+  pub purge: bool,
+
+  /// With --purge: only purge trash older than this many days
+  #[arg(long, value_name = "DAYS")]
+  pub older_than: Option<u64>,
+
+  /// Path to a legacy undo log written by pre-journal versions
   #[arg(long)]
   pub undo_log: Option<PathBuf>,
 
@@ -361,6 +377,10 @@ mod tests {
       include_trash: false,
       dupes_only: false,
       undo: false,
+      undo_run: None,
+      list_undo: false,
+      purge: false,
+      older_than: None,
       undo_log: None,
       file_types: vec![],
       no_ledger: false,

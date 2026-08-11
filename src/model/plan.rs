@@ -36,9 +36,15 @@ pub struct ApprovedPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionReport {
+  /// Journal run id — the handle for `spindle --undo-run <id>`.
+  pub run_id: String,
   pub moves_completed: Vec<FileMove>,
   pub moves_failed: Vec<(FileMove, String)>,
-  pub deletions_completed: Vec<PathBuf>,
-  pub undo_log_path: PathBuf,
-  pub undo_log_error: Option<String>,
+  /// Originals that were staged into the trash (not deleted yet).
+  pub deletions_staged: Vec<PathBuf>,
+  /// Total size of staged deletions, reclaimable via purge.
+  pub bytes_staged: u64,
+  /// `None` when the run did nothing (nothing to undo).
+  pub journal_path: Option<PathBuf>,
+  pub journal_error: Option<String>,
 }
