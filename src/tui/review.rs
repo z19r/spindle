@@ -2800,7 +2800,7 @@ fn render_detail_group(state: &ReviewState) -> Vec<Line<'static>> {
   let mut lines = vec![
     Line::from(vec![
       Span::styled(
-        format!(" {} ", &group.label),
+        format!(" {} ", group.label),
         Style::default()
           .fg(theme::WHITE)
           .add_modifier(Modifier::BOLD),
