@@ -152,9 +152,7 @@ pub async fn run<P: AiProvider>(
     config.near_duplicate_threshold,
   );
   near_dupes.extend(
-    crate::fingerprint::archive::find_archive_matches(
-      &fingerprinted,
-    ),
+    crate::fingerprint::archive::find_archive_matches(&fingerprinted),
   );
   near_dupes.extend(crate::fingerprint::text::find_similar_text(
     &fingerprinted,
@@ -814,19 +812,14 @@ mod tests {
       }
     }
 
-    let summaries: Vec<FileSummary> =
-      (0..MAX_GROUPING_BATCH * 2 + 5)
-        .map(|i| summary(i, 0.9))
-        .collect();
+    let summaries: Vec<FileSummary> = (0..MAX_GROUPING_BATCH * 2 + 5)
+      .map(|i| summary(i, 0.9))
+      .collect();
 
-    let groups = propose_groups_batched(
-      &OneLabelProvider,
-      &summaries,
-      &[],
-      &[],
-    )
-    .await
-    .unwrap();
+    let groups =
+      propose_groups_batched(&OneLabelProvider, &summaries, &[], &[])
+        .await
+        .unwrap();
 
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].member_indices.len(), summaries.len());

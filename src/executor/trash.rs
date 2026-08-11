@@ -19,7 +19,8 @@ pub fn trash_path_for(
       Component::Normal(part) => dest.push(part),
       Component::Prefix(prefix) => {
         // Windows drive prefix — keep it as a plain directory name.
-        dest.push(prefix.as_os_str().to_string_lossy().replace(':', ""))
+        dest
+          .push(prefix.as_os_str().to_string_lossy().replace(':', ""))
       }
       _ => {}
     }

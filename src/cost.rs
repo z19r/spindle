@@ -116,10 +116,13 @@ mod tests {
 
   #[test]
   fn pricing_varies_by_model_family() {
-    let haiku = estimate_cost(100, "claude-haiku-4-5", "claude-haiku-4-5");
-    let sonnet = estimate_cost(100, "claude-sonnet-5", "claude-sonnet-5");
+    let haiku =
+      estimate_cost(100, "claude-haiku-4-5", "claude-haiku-4-5");
+    let sonnet =
+      estimate_cost(100, "claude-sonnet-5", "claude-sonnet-5");
     let opus = estimate_cost(100, OPUS, OPUS);
-    let fable = estimate_cost(100, "claude-fable-5", "claude-fable-5");
+    let fable =
+      estimate_cost(100, "claude-fable-5", "claude-fable-5");
 
     assert!(haiku.estimated_cost_usd < sonnet.estimated_cost_usd);
     assert!(sonnet.estimated_cost_usd < opus.estimated_cost_usd);
@@ -128,7 +131,8 @@ mod tests {
 
   #[test]
   fn unknown_model_uses_opus_pricing() {
-    let unknown = estimate_cost(10, "some-future-model", "some-future-model");
+    let unknown =
+      estimate_cost(10, "some-future-model", "some-future-model");
     let opus = estimate_cost(10, OPUS, OPUS);
 
     assert_eq!(

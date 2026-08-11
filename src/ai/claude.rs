@@ -245,10 +245,7 @@ impl ClaudeProvider {
 
   /// Use a different (usually cheaper) model for per-file
   /// descriptions than for grouping.
-  pub fn with_describe_model(
-    self,
-    model: impl Into<String>,
-  ) -> Self {
+  pub fn with_describe_model(self, model: impl Into<String>) -> Self {
     let mut this = self;
     this.describe_model = model.into();
     this
@@ -878,7 +875,6 @@ mod tests {
           cache_control: None,
         }],
       }],
-    
       None,
     );
 

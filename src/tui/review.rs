@@ -147,8 +147,10 @@ pub enum Mode {
   MoveToGroup { cursor: usize },
   NewGroup { input: String, cursor_pos: usize },
   ConfirmRemove,
+  ConfirmExecute,
   DiffView { compare_idx: usize },
   Preview,
+  Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -802,10 +804,25 @@ impl ReviewState {
       Mode::MoveToGroup { .. } => self.handle_move_to_group_key(code),
       Mode::NewGroup { .. } => self.handle_new_group_key(code),
       Mode::ConfirmRemove => self.handle_confirm_remove_key(code),
+      Mode::ConfirmExecute => self.handle_confirm_execute_key(code),
       Mode::DiffView { .. } => self.handle_diff_view_key(code),
       Mode::Preview => self.handle_preview_key(code),
+      Mode::Help => self.mode = Mode::Normal,
     }
     self.update_image_preview();
+  }
+
+  fn handle_confirm_execute_key(&mut self, code: KeyCode) {
+    match code {
+      KeyCode::Enter | KeyCode::Char('y') => {
+        self.action = Some(ReviewAction::Execute);
+        self.mode = Mode::Normal;
+      }
+      KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
+        self.mode = Mode::Normal;
+      }
+      _ => {}
+    }
   }
 
   fn handle_normal_key(&mut self, code: KeyCode) {
@@ -877,7 +894,11 @@ impl ReviewState {
       }
 
       KeyCode::Char('x') => {
-        self.action = Some(ReviewAction::Execute);
+        self.mode = Mode::ConfirmExecute;
+      }
+
+      KeyCode::Char('?') => {
+        self.mode = Mode::Help;
       }
 
       KeyCode::Char('d')
@@ -1337,8 +1358,194 @@ pub fn render(frame: &mut Frame, state: &mut ReviewState) {
     Mode::Preview => {
       render_preview_modal(frame, state);
     }
+    Mode::ConfirmExecute => {
+      render_confirm_execute_modal(frame, state);
+    }
+    Mode::Help => {
+      render_help_modal(frame, state);
+    }
     _ => {}
   }
+}
+
+/// A centered, cleared modal area sized as a fraction of the screen.
+fn centered_modal(frame: &Frame, pct_w: u16, pct_h: u16) -> Rect {
+  let area = frame.area();
+  let w = (area.width * pct_w / 100)
+    .max(30)
+    .min(area.width.saturating_sub(2));
+  let h = (area.height * pct_h / 100)
+    .max(8)
+    .min(area.height.saturating_sub(2));
+  let x = (area.width.saturating_sub(w)) / 2;
+  let y = (area.height.saturating_sub(h)) / 2;
+  Rect::new(x, y, w, h)
+}
+
+fn render_confirm_execute_modal(
+  frame: &mut Frame,
+  state: &ReviewState,
+) {
+  let modal_area = centered_modal(frame, 55, 45);
+  frame.render_widget(Clear, modal_area);
+
+  let mut lines: Vec<Line<'static>> = vec![Line::from("")];
+  match state.review_mode {
+    ReviewMode::Organize => {
+      let groups = state.approved_groups();
+      let moves = state.approved_moves();
+      lines.push(Line::from(vec![
+        Span::styled("  Move ", theme::normal()),
+        Span::styled(
+          format!("{}", moves.len()),
+          Style::default()
+            .fg(theme::BRIGHT_GREEN)
+            .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" files into ", theme::normal()),
+        Span::styled(
+          format!("{}", groups.len()),
+          Style::default()
+            .fg(theme::BRIGHT_GREEN)
+            .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" folders:", theme::normal()),
+      ]));
+      lines.push(Line::from(""));
+      for group in groups.iter().take(6) {
+        lines.push(Line::from(vec![
+          Span::styled("    ", Style::default()),
+          Span::styled(group.label.clone(), theme::value()),
+          Span::styled(
+            format!("  ({} files)", group.members.len()),
+            theme::dim(),
+          ),
+        ]));
+      }
+      if groups.len() > 6 {
+        lines.push(Line::from(Span::styled(
+          format!("    … and {} more", groups.len() - 6),
+          theme::dim(),
+        )));
+      }
+    }
+    ReviewMode::Dupes => {
+      let deletions = state.files_to_delete();
+      let bytes: u64 = deletions
+        .iter()
+        .filter_map(|p| state.file_metadata.get(p))
+        .map(|(_, size)| *size)
+        .sum();
+      lines.push(Line::from(vec![
+        Span::styled("  Stage ", theme::normal()),
+        Span::styled(
+          format!("{}", deletions.len()),
+          Style::default()
+            .fg(theme::BRIGHT_YELLOW)
+            .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" duplicates to trash (", theme::normal()),
+        Span::styled(format_size(bytes), theme::value()),
+        Span::styled(")", theme::normal()),
+      ]));
+      lines.push(Line::from(""));
+      lines.push(Line::from(Span::styled(
+        "  Nothing is deleted permanently — undo with",
+        theme::dim(),
+      )));
+      lines.push(Line::from(Span::styled(
+        "  'spindle --undo', reclaim with 'spindle --purge'.",
+        theme::dim(),
+      )));
+    }
+  }
+  lines.push(Line::from(""));
+  lines.push(Line::from(vec![
+    Span::styled("  \u{23ce}/y", theme::key_hint()),
+    Span::styled(" go ahead    ", theme::dim()),
+    Span::styled("esc/n", theme::key_hint()),
+    Span::styled(" back to review", theme::dim()),
+  ]));
+
+  let block = Block::bordered()
+    .border_type(BorderType::Rounded)
+    .title_top(Line::from(Span::styled(
+      " Ready to execute? ",
+      theme::title_badge(),
+    )))
+    .border_style(Style::default().fg(theme::BORDER_PURPLE));
+  frame.render_widget(Paragraph::new(lines).block(block), modal_area);
+}
+
+fn render_help_modal(frame: &mut Frame, state: &ReviewState) {
+  let modal_area = centered_modal(frame, 60, 75);
+  frame.render_widget(Clear, modal_area);
+
+  let mut lines: Vec<Line<'static>> = vec![Line::from("")];
+  let section = |title: &str,
+                 keys: &[(&str, &str)],
+                 lines: &mut Vec<Line<'static>>| {
+    lines.push(Line::from(Span::styled(
+      format!("  {title}"),
+      theme::label(),
+    )));
+    for (key, desc) in keys {
+      lines.push(Line::from(vec![
+        Span::styled(format!("    {key:<8}"), theme::key_hint()),
+        Span::styled((*desc).to_string(), theme::normal()),
+      ]));
+    }
+    lines.push(Line::from(""));
+  };
+
+  section(
+    "NAVIGATE",
+    &[
+      ("j/k \u{2191}\u{2193}", "move up/down"),
+      ("tab", "switch pane (groups \u{2194} files)"),
+      ("s", "switch organize \u{2194} dupes mode"),
+    ],
+    &mut lines,
+  );
+  match state.review_mode {
+    ReviewMode::Organize => section(
+      "ORGANIZE",
+      &[
+        ("space", "toggle group approval / preview file"),
+        ("enter", "mark file (multi-select)"),
+        ("m", "move file(s) to another group"),
+        ("n", "move file(s) to a new group"),
+        ("d", "remove file(s) from the plan"),
+      ],
+      &mut lines,
+    ),
+    ReviewMode::Dupes => section(
+      "DUPES",
+      &[
+        ("space", "toggle keep/delete on a file"),
+        ("d", "side-by-side diff of the set"),
+      ],
+      &mut lines,
+    ),
+  }
+  section(
+    "ACT",
+    &[
+      ("x", "execute (with confirmation)"),
+      ("q", "quit without changes"),
+      ("?", "this help"),
+    ],
+    &mut lines,
+  );
+
+  let block = Block::bordered()
+    .border_type(BorderType::Rounded)
+    .title_top(Line::from(Span::styled(
+      " Keys ",
+      theme::title_badge(),
+    )))
+    .border_style(Style::default().fg(theme::BORDER_PURPLE));
+  frame.render_widget(Paragraph::new(lines).block(block), modal_area);
 }
 
 fn panel_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
@@ -1478,9 +1685,10 @@ fn render_middle_panel(
       render_new_group_input(frame, area, state, input, *cursor_pos)
     }
     Mode::ConfirmRemove => render_confirm_remove(frame, area, state),
-    Mode::DiffView { .. } | Mode::Preview => {
-      render_file_list(frame, area, state)
-    }
+    Mode::DiffView { .. }
+    | Mode::Preview
+    | Mode::ConfirmExecute
+    | Mode::Help => render_file_list(frame, area, state),
   }
 }
 
@@ -2343,7 +2551,9 @@ fn render_detail(
     Mode::NewGroup { input, .. } => {
       render_detail_new_group(state, input)
     }
-    Mode::ConfirmRemove => render_detail_group(state),
+    Mode::ConfirmRemove | Mode::ConfirmExecute | Mode::Help => {
+      render_detail_group(state)
+    }
     Mode::DiffView { .. } | Mode::Preview => {
       render_detail_file(state)
     }
@@ -2917,7 +3127,12 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &ReviewState) {
         if state.review_mode == ReviewMode::Dupes {
           k.push(("d", "diff"));
         }
-        k.extend([("tab", "pane"), ("x", "execute"), ("q", "quit")]);
+        k.extend([
+          ("tab", "pane"),
+          ("x", "execute"),
+          ("?", "help"),
+          ("q", "quit"),
+        ]);
         k
       }
       (Pane::Files, ReviewMode::Organize) => {
@@ -2960,6 +3175,10 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &ReviewState) {
     Mode::ConfirmRemove => {
       vec![("y", "delete group"), ("n", "keep"), ("esc", "cancel")]
     }
+    Mode::ConfirmExecute => {
+      vec![("\u{23ce}/y", "confirm"), ("esc/n", "cancel")]
+    }
+    Mode::Help => vec![("any key", "close")],
     Mode::DiffView { .. } => {
       let mut k = vec![("j/k", "cycle files")];
       let is_text = state
@@ -3227,10 +3446,34 @@ mod tests {
   }
 
   #[test]
-  fn x_triggers_execute() {
+  fn x_opens_confirmation_then_enter_executes() {
     let mut state = make_state();
     state.handle_key(KeyCode::Char('x'));
+    assert_eq!(*state.mode(), Mode::ConfirmExecute);
+    assert_eq!(state.pending_action(), None);
+
+    state.handle_key(KeyCode::Enter);
     assert_eq!(state.pending_action(), Some(ReviewAction::Execute));
+    assert_eq!(*state.mode(), Mode::Normal);
+  }
+
+  #[test]
+  fn confirm_execute_can_be_cancelled() {
+    let mut state = make_state();
+    state.handle_key(KeyCode::Char('x'));
+    state.handle_key(KeyCode::Esc);
+    assert_eq!(state.pending_action(), None);
+    assert_eq!(*state.mode(), Mode::Normal);
+  }
+
+  #[test]
+  fn question_mark_opens_help_any_key_closes() {
+    let mut state = make_state();
+    state.handle_key(KeyCode::Char('?'));
+    assert_eq!(*state.mode(), Mode::Help);
+
+    state.handle_key(KeyCode::Char('j'));
+    assert_eq!(*state.mode(), Mode::Normal);
   }
 
   #[test]

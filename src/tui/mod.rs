@@ -1,7 +1,7 @@
 mod progress;
 mod review;
 
-pub use progress::{ProgressState, Stage};
+pub use progress::{PipelineTuiState, ProgressState, Stage};
 pub use review::{Mode, ReviewAction, ReviewMode, ReviewState};
 
 use anyhow::Result;
@@ -126,6 +126,62 @@ pub fn run_progress(
             && key.modifiers.contains(KeyModifiers::CONTROL))
         {
           break;
+        }
+      }
+    }
+  }
+
+  disable_raw_mode()?;
+  io::stdout().execute(LeaveAlternateScreen)?;
+  Ok(())
+}
+
+/// Drive the pipeline phase inside the TUI: a stage checklist with
+/// spinner, live analysis gauge, and cost estimate, fed by
+/// `PipelineEvent`s until the plan is ready (or the sender drops).
+/// Ctrl-C aborts the whole process.
+pub fn run_pipeline_progress(
+  mut rx: tokio::sync::mpsc::Receiver<crate::pipeline::PipelineEvent>,
+) -> Result<()> {
+  enable_raw_mode()?;
+  io::stdout().execute(EnterAlternateScreen)?;
+
+  let backend = CrosstermBackend::new(io::stdout());
+  let mut terminal = Terminal::new(backend)?;
+  let mut state = PipelineTuiState::default();
+  let mut disconnected = false;
+
+  loop {
+    state.tick();
+    terminal
+      .draw(|frame| progress::render_pipeline(frame, &state))?;
+
+    loop {
+      match rx.try_recv() {
+        Ok(event) => state.handle_event(&event),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+          disconnected = true;
+          break;
+        }
+      }
+    }
+
+    if state.is_done() || disconnected {
+      // One last frame so the final ✓ is visible for a beat.
+      terminal
+        .draw(|frame| progress::render_pipeline(frame, &state))?;
+      break;
+    }
+
+    if event::poll(std::time::Duration::from_millis(80))? {
+      if let Event::Key(key) = event::read()? {
+        if key.code == KeyCode::Char('c')
+          && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+          disable_raw_mode()?;
+          io::stdout().execute(LeaveAlternateScreen)?;
+          std::process::exit(130);
         }
       }
     }
@@ -317,11 +373,13 @@ mod tests {
   }
 
   #[test]
-  fn review_x_triggers_execute() {
+  fn review_x_confirms_then_executes() {
     let mut state = make_review_state();
 
     state.handle_key(KeyCode::Char('x'));
+    assert_eq!(state.pending_action(), None);
 
+    state.handle_key(KeyCode::Enter);
     assert_eq!(state.pending_action(), Some(ReviewAction::Execute));
   }
 

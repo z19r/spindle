@@ -87,9 +87,8 @@ pub fn load(journal_dir: &Path, run_id: &str) -> Result<RunJournal> {
     std::fs::read_to_string(&path).with_context(|| {
       format!("No journal for run {run_id} at {}", path.display())
     })?;
-  serde_json::from_str(&content).with_context(|| {
-    format!("Corrupt journal: {}", path.display())
-  })
+  serde_json::from_str(&content)
+    .with_context(|| format!("Corrupt journal: {}", path.display()))
 }
 
 /// Run ids of journals that have not been undone, newest first.

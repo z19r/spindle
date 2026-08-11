@@ -586,9 +586,7 @@ async fn extract_document_text(
 }
 
 /// docx is a zip: the body text lives in `word/document.xml`.
-async fn extract_docx_text(
-  path: &std::path::Path,
-) -> Option<String> {
+async fn extract_docx_text(path: &std::path::Path) -> Option<String> {
   let path = path.to_path_buf();
   tokio::task::spawn_blocking(move || {
     let file = std::fs::File::open(&path).ok()?;
@@ -638,9 +636,7 @@ fn strip_docx_xml(xml: &str) -> String {
 }
 
 /// RTF: drop control words and groups, keep plain text.
-async fn extract_rtf_text(
-  path: &std::path::Path,
-) -> Option<String> {
+async fn extract_rtf_text(path: &std::path::Path) -> Option<String> {
   let raw = read_text_excerpt(path).await?;
   let text = strip_rtf(&raw);
   (!text.trim().is_empty()).then_some(text)
