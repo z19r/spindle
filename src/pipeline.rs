@@ -88,6 +88,8 @@ pub struct PipelineConfig {
   /// Path to the persistent "already organized" ledger. `None` disables
   /// both candidate exclusion and recording.
   pub ledger_path: Option<PathBuf>,
+  /// Model id used for AI analysis — drives cost estimation.
+  pub model: String,
 }
 
 #[derive(Debug)]
@@ -359,7 +361,7 @@ async fn run_ai_pipeline<P: AiProvider>(
     }
   }
   let to_send = analyze_count - cached;
-  let cost_est = estimate_cost(to_send);
+  let cost_est = estimate_cost(to_send, &config.model);
 
   let _ = tx
     .send(PipelineEvent::CostEstimated {
@@ -617,6 +619,7 @@ mod tests {
       max_archive_file_size_mb: 50,
       use_organized_context: false,
       ledger_path: None,
+      model: "claude-opus-5".to_string(),
     };
 
     // First run populates both the description and grouping caches.
@@ -665,6 +668,7 @@ mod tests {
       max_archive_file_size_mb: 50,
       use_organized_context: false,
       ledger_path,
+      model: "claude-opus-5".to_string(),
     }
   }
 
@@ -861,6 +865,7 @@ mod tests {
       max_archive_file_size_mb: 50,
       use_organized_context: false,
       ledger_path: None,
+      model: "claude-opus-5".to_string(),
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -916,6 +921,7 @@ mod tests {
       max_archive_file_size_mb: 50,
       use_organized_context: false,
       ledger_path: None,
+      model: "claude-opus-5".to_string(),
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -962,6 +968,7 @@ mod tests {
       max_archive_file_size_mb: 50,
       use_organized_context: false,
       ledger_path: None,
+      model: "claude-opus-5".to_string(),
     };
 
     let (tx, _rx) = mpsc::channel(64);
@@ -1006,6 +1013,7 @@ mod tests {
       max_archive_file_size_mb: 50,
       use_organized_context: false,
       ledger_path: None,
+      model: "claude-opus-5".to_string(),
     };
 
     let (tx, _rx) = mpsc::channel(64);
@@ -1046,6 +1054,7 @@ mod tests {
       max_archive_file_size_mb: 50,
       use_organized_context: false,
       ledger_path: None,
+      model: "claude-opus-5".to_string(),
     };
 
     let (tx, mut rx) = mpsc::channel(64);

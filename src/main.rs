@@ -47,11 +47,20 @@ async fn main() -> Result<()> {
     return run_dupes_only(&cli, &config);
   }
 
-  let provider = ClaudeProvider::new(
-    "",
+  // The API key is only needed when the AI pipeline will actually run.
+  let api_key = if cli.no_ai {
+    String::new()
+  } else {
+    config.api_key()?.to_string()
+  };
+  let mut provider = ClaudeProvider::new(
+    api_key,
     config.ai.model.clone(),
     config.ai.max_retries,
   );
+  if let Some(base_url) = &config.ai.base_url {
+    provider = provider.with_base_url(base_url.clone());
+  }
 
   let ledger_path = spindle::config::resolve_ledger_path(&cli);
 
@@ -77,6 +86,7 @@ async fn main() -> Result<()> {
       .max_archive_file_size_mb,
     use_organized_context: config.matching.use_organized_context,
     ledger_path: ledger_path.clone(),
+    model: config.ai.model.clone(),
   };
 
   let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(64);

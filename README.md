@@ -25,9 +25,6 @@ spindle /path/to/messy/folder
 # Find duplicates only
 spindle --dupes-only /path/to/folder
 
-# Describe files without grouping
-spindle --describe-only /path/to/folder
-
 # Verbose output
 spindle -v /path/to/folder
 
@@ -40,11 +37,23 @@ spindle --ledger ./my-ledger.json /path/to/folder
 
 ## Configuration
 
-Copy `.env.example` to `.env` and set your Anthropic API key:
+Spindle needs an Anthropic API key for content analysis (skip with `--no-ai`
+or `--dupes-only`). Provide it any of these ways (first match wins):
 
 ```bash
-cp .env.example .env
+# 1. CLI flag
+spindle --api-key sk-ant-... /path/to/folder
+
+# 2. Environment variable (or a .env file in the working directory)
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# 3. Config file (~/.config/spindle/config.toml)
+# [ai]
+# api_key = "sk-ant-..."
 ```
+
+To route through a proxy, set `ANTHROPIC_BASE_URL`, pass `--api-base-url`,
+or set `base_url` under `[ai]` in the config file.
 
 ## Development
 
