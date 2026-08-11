@@ -145,10 +145,21 @@ pub async fn run<P: AiProvider>(
   }
 
   let exact_dupes = find_exact_duplicates(&fingerprinted);
-  let near_dupes = find_near_duplicates(
+  let mut near_dupes = find_near_duplicates(
     &fingerprinted,
     config.near_duplicate_threshold,
   );
+  near_dupes.extend(
+    crate::fingerprint::archive::find_archive_matches(
+      &fingerprinted,
+    ),
+  );
+  near_dupes.extend(crate::fingerprint::text::find_similar_text(
+    &fingerprinted,
+  ));
+  near_dupes.extend(crate::fingerprint::audio::find_similar_audio(
+    &fingerprinted,
+  ));
 
   let resolve_name = |idx: usize| -> String {
     fingerprinted
@@ -181,7 +192,16 @@ pub async fn run<P: AiProvider>(
       crate::model::DuplicateType::NearDuplicate { distance } => {
         format!("near({})", distance)
       }
-      _ => "near".to_string(),
+      crate::model::DuplicateType::ArchiveMatch => {
+        "archive≡folder".to_string()
+      }
+      crate::model::DuplicateType::SimilarText { distance } => {
+        format!("text({})", distance)
+      }
+      crate::model::DuplicateType::SimilarAudio { score } => {
+        format!("audio({}%)", score)
+      }
+      crate::model::DuplicateType::Exact => "exact".to_string(),
     };
     for &dup_idx in &set.duplicates {
       duplicate_details.push(DuplicateDetail {

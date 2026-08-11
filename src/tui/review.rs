@@ -2037,6 +2037,7 @@ fn render_diff_modal_metadata(
         theme::normal(),
       )));
     }
+    Some(other) => push_similarity_verdict(&mut lines, other),
     None => {
       lines
         .push(Line::from(Span::styled("  VERDICT", theme::label())));
@@ -2563,6 +2564,7 @@ fn render_detail_file(state: &ReviewState) -> Vec<Line<'static>> {
             theme::normal(),
           )));
         }
+        Some(other) => push_similarity_verdict(&mut lines, other),
         None => {}
       }
     }
@@ -2722,6 +2724,7 @@ fn render_dupe_reason(
       )));
       lines.push(Line::from(""));
     }
+    Some(other) => push_similarity_verdict(lines, other),
     None => {
       lines.push(Line::from(Span::styled("  WHY", theme::label())));
       lines.push(Line::from(Span::styled(
@@ -2731,6 +2734,59 @@ fn render_dupe_reason(
       lines.push(Line::from(""));
     }
   }
+}
+
+/// MATCH TYPE + WHY lines for the non-perceptual similarity kinds
+/// (archive≡folder, near-identical text, acoustic audio match).
+fn push_similarity_verdict(
+  lines: &mut Vec<Line<'static>>,
+  dupe_type: DuplicateType,
+) {
+  let (label, why): (&str, Vec<String>) = match dupe_type {
+    DuplicateType::ArchiveMatch => (
+      "Archive ≡ extracted folder",
+      vec![
+        "  Every archive entry exists on".to_string(),
+        "  disk with identical content.".to_string(),
+        "  The archive is redundant.".to_string(),
+      ],
+    ),
+    DuplicateType::SimilarText { distance } => (
+      "Near-identical text",
+      vec![
+        format!("  Simhash distance: {distance}"),
+        "  Same document, lightly edited.".to_string(),
+      ],
+    ),
+    DuplicateType::SimilarAudio { score } => (
+      "Same recording",
+      vec![
+        format!("  Acoustic match: {score}%"),
+        "  Same audio, different encode.".to_string(),
+      ],
+    ),
+    DuplicateType::Exact | DuplicateType::NearDuplicate { .. } => {
+      return
+    }
+  };
+
+  lines
+    .push(Line::from(Span::styled("  MATCH TYPE", theme::label())));
+  lines.push(Line::from(vec![
+    Span::styled("  ", Style::default()),
+    Span::styled(
+      label.to_string(),
+      Style::default()
+        .fg(theme::BRIGHT_YELLOW)
+        .add_modifier(Modifier::BOLD),
+    ),
+  ]));
+  lines.push(Line::from(""));
+  lines.push(Line::from(Span::styled("  WHY", theme::label())));
+  for line in why {
+    lines.push(Line::from(Span::styled(line, theme::normal())));
+  }
+  lines.push(Line::from(""));
 }
 
 fn render_detail_move_target(

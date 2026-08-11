@@ -1,3 +1,8 @@
+pub mod archive;
+pub mod audio;
+pub mod text;
+mod video_frame;
+
 use std::path::Path;
 
 use anyhow::Result;
@@ -29,6 +34,10 @@ pub fn fingerprint_files(
       let blake3_hash = compute_blake3(&scanned.path)?;
       let perceptual_hash = if scanned.file_type.is_image() {
         compute_perceptual_hash(&scanned.path).ok()
+      } else if scanned.file_type.is_video() {
+        // Keyframe phash (when ffmpeg is available) lets videos join
+        // the same near-duplicate pool as images.
+        video_frame::keyframe_phash(&scanned.path)
       } else {
         None
       };
@@ -69,6 +78,12 @@ pub fn find_near_duplicates(
   files: &[FingerprintedFile],
   threshold: u32,
 ) -> Vec<DuplicateSet> {
+  // Banding (pigeonhole): split each hash into threshold+1 bands.
+  // Two hashes within `threshold` bit-flips must share at least one
+  // identical band, so candidates come from shared band buckets
+  // instead of an O(n²) sweep. Same results, near-linear time.
+  let candidates = banded_candidates(files, threshold);
+
   let mut results = Vec::new();
   let mut paired = std::collections::HashSet::new();
 
@@ -83,15 +98,26 @@ pub fn find_near_duplicates(
     let mut group = Vec::new();
     let mut min_distance = u32::MAX;
 
-    for (j, file) in files.iter().enumerate().skip(i + 1) {
-      if paired.contains(&j) {
-        continue;
-      }
-      let Some(ref hash_b) = file.perceptual_hash else {
+    let Some(neighbors) = candidates.get(&i) else {
+      continue;
+    };
+    let mut neighbors: Vec<usize> = neighbors
+      .iter()
+      .copied()
+      .filter(|&j| j > i && !paired.contains(&j))
+      .collect();
+    neighbors.sort_unstable();
+    neighbors.dedup();
+
+    for j in neighbors {
+      let Some(ref hash_b) = files[j].perceptual_hash else {
         continue;
       };
-
-      let distance = hamming_distance(hash_a, hash_b);
+      // Length mismatch (different hash kinds) is "not comparable",
+      // never "distance 0".
+      let Some(distance) = hamming_distance(hash_a, hash_b) else {
+        continue;
+      };
       if distance <= threshold {
         group.push(j);
         min_distance = min_distance.min(distance);
@@ -112,6 +138,58 @@ pub fn find_near_duplicates(
   }
 
   results
+}
+
+/// For each file index, the indices sharing at least one identical
+/// hash band. Hashes of different lengths land in different band
+/// keyspaces, so they never become candidates of each other.
+fn banded_candidates(
+  files: &[FingerprintedFile],
+  threshold: u32,
+) -> std::collections::HashMap<usize, Vec<usize>> {
+  use std::collections::HashMap;
+
+  let bands = threshold as usize + 1;
+  // bucket key: (hash_len, band_index, band_bits) → file indices
+  let mut buckets: HashMap<(usize, usize, Vec<bool>), Vec<usize>> =
+    HashMap::new();
+
+  for (idx, file) in files.iter().enumerate() {
+    let Some(ref hash) = file.perceptual_hash else {
+      continue;
+    };
+    let bits: Vec<bool> = hash
+      .iter()
+      .flat_map(|byte| (0..8).map(move |b| byte >> b & 1 == 1))
+      .collect();
+    let total = bits.len();
+    if total == 0 {
+      continue;
+    }
+    for band in 0..bands.min(total) {
+      let start = band * total / bands;
+      let end = ((band + 1) * total / bands).max(start + 1);
+      buckets
+        .entry((total, band, bits[start..end.min(total)].to_vec()))
+        .or_default()
+        .push(idx);
+    }
+  }
+
+  let mut candidates: HashMap<usize, Vec<usize>> = HashMap::new();
+  for indices in buckets.into_values() {
+    if indices.len() < 2 {
+      continue;
+    }
+    for &a in &indices {
+      for &b in &indices {
+        if a != b {
+          candidates.entry(a).or_default().push(b);
+        }
+      }
+    }
+  }
+  candidates
 }
 
 fn compute_perceptual_hash(path: &Path) -> Result<Vec<u8>> {
@@ -152,16 +230,18 @@ fn decode_via_magick(path: &Path) -> Result<image::DynamicImage> {
   Ok(img)
 }
 
-fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
-  debug_assert_eq!(
-    a.len(),
-    b.len(),
-    "perceptual hashes must be same length"
-  );
-  a.iter()
-    .zip(b.iter())
-    .map(|(x, y)| (x ^ y).count_ones())
-    .sum()
+/// `None` when the hashes have different lengths — they come from
+/// different hashers and comparing prefixes would fabricate distances.
+pub(crate) fn hamming_distance(a: &[u8], b: &[u8]) -> Option<u32> {
+  if a.len() != b.len() {
+    return None;
+  }
+  Some(
+    a.iter()
+      .zip(b.iter())
+      .map(|(x, y)| (x ^ y).count_ones())
+      .sum(),
+  )
 }
 
 #[cfg(test)]
@@ -385,6 +465,40 @@ mod tests {
     let dupes = find_near_duplicates(&files, 5);
 
     assert!(dupes.is_empty());
+  }
+
+  #[test]
+  fn mismatched_hash_lengths_never_compare() {
+    // An 8-byte image phash vs. a 1-byte hash must be "not
+    // comparable", not "distance over the shared prefix".
+    let files = vec![
+      make_fingerprinted("a.jpg", [1u8; 32], Some(vec![0u8; 8])),
+      make_fingerprinted("b.jpg", [2u8; 32], Some(vec![0u8; 1])),
+    ];
+
+    let dupes = find_near_duplicates(&files, 64);
+
+    assert!(dupes.is_empty());
+  }
+
+  #[test]
+  fn banding_matches_bruteforce_on_8_byte_hashes() {
+    // Three files: two within distance 2, one far away.
+    let mut near = vec![0u8; 8];
+    near[0] = 0b0000_0011;
+    let far = vec![0xFFu8; 8];
+
+    let files = vec![
+      make_fingerprinted("a.jpg", [1u8; 32], Some(vec![0u8; 8])),
+      make_fingerprinted("b.jpg", [2u8; 32], Some(near)),
+      make_fingerprinted("c.jpg", [3u8; 32], Some(far)),
+    ];
+
+    let dupes = find_near_duplicates(&files, 5);
+
+    assert_eq!(dupes.len(), 1);
+    assert_eq!(dupes[0].canonical, 0);
+    assert_eq!(dupes[0].duplicates, vec![1]);
   }
 
   #[test]
