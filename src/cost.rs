@@ -28,8 +28,15 @@ pub struct CostEstimate {
   pub estimated_cost_usd: f64,
 }
 
-pub fn estimate_cost(file_count: usize, model: &str) -> CostEstimate {
-  let (input_per_mtok, output_per_mtok) = pricing_per_mtok(model);
+/// Per-file description and grouping may run on different models
+/// (cheap vision model for describe, big model for grouping).
+pub fn estimate_cost(
+  file_count: usize,
+  describe_model: &str,
+  group_model: &str,
+) -> CostEstimate {
+  let (describe_in, describe_out) = pricing_per_mtok(describe_model);
+  let (group_in, group_out) = pricing_per_mtok(group_model);
 
   let describe_input = file_count as u64
     * (AVG_IMAGE_INPUT_TOKENS + AVG_TEXT_INPUT_TOKENS);
@@ -39,17 +46,16 @@ pub fn estimate_cost(file_count: usize, model: &str) -> CostEstimate {
     + AVG_TEXT_INPUT_TOKENS;
   let group_output = GROUP_OUTPUT_TOKENS;
 
-  let total_input = describe_input + group_input;
-  let total_output = describe_output + group_output;
-
-  let cost = (total_input as f64 / 1_000_000.0) * input_per_mtok
-    + (total_output as f64 / 1_000_000.0) * output_per_mtok;
+  let cost = (describe_input as f64 / 1_000_000.0) * describe_in
+    + (describe_output as f64 / 1_000_000.0) * describe_out
+    + (group_input as f64 / 1_000_000.0) * group_in
+    + (group_output as f64 / 1_000_000.0) * group_out;
 
   CostEstimate {
     describe_calls: file_count,
     group_calls: 1,
-    estimated_input_tokens: total_input,
-    estimated_output_tokens: total_output,
+    estimated_input_tokens: describe_input + group_input,
+    estimated_output_tokens: describe_output + group_output,
     estimated_cost_usd: cost,
   }
 }
@@ -76,7 +82,7 @@ mod tests {
 
   #[test]
   fn zero_files_minimal_cost() {
-    let est = estimate_cost(0, OPUS);
+    let est = estimate_cost(0, OPUS, OPUS);
 
     assert_eq!(est.describe_calls, 0);
     assert_eq!(est.group_calls, 1);
@@ -85,8 +91,8 @@ mod tests {
 
   #[test]
   fn cost_scales_with_file_count() {
-    let est_10 = estimate_cost(10, OPUS);
-    let est_100 = estimate_cost(100, OPUS);
+    let est_10 = estimate_cost(10, OPUS, OPUS);
+    let est_100 = estimate_cost(100, OPUS, OPUS);
 
     assert!(
       est_100.estimated_cost_usd > est_10.estimated_cost_usd * 5.0
@@ -95,7 +101,7 @@ mod tests {
 
   #[test]
   fn single_file_reasonable_cost() {
-    let est = estimate_cost(1, OPUS);
+    let est = estimate_cost(1, OPUS, OPUS);
 
     assert!(est.estimated_cost_usd > 0.0001);
     assert!(est.estimated_cost_usd < 0.10);
@@ -103,17 +109,17 @@ mod tests {
 
   #[test]
   fn hundred_files_bounded_cost() {
-    let est = estimate_cost(100, OPUS);
+    let est = estimate_cost(100, OPUS, OPUS);
 
     assert!(est.estimated_cost_usd < 2.0);
   }
 
   #[test]
   fn pricing_varies_by_model_family() {
-    let haiku = estimate_cost(100, "claude-haiku-4-5");
-    let sonnet = estimate_cost(100, "claude-sonnet-5");
-    let opus = estimate_cost(100, OPUS);
-    let fable = estimate_cost(100, "claude-fable-5");
+    let haiku = estimate_cost(100, "claude-haiku-4-5", "claude-haiku-4-5");
+    let sonnet = estimate_cost(100, "claude-sonnet-5", "claude-sonnet-5");
+    let opus = estimate_cost(100, OPUS, OPUS);
+    let fable = estimate_cost(100, "claude-fable-5", "claude-fable-5");
 
     assert!(haiku.estimated_cost_usd < sonnet.estimated_cost_usd);
     assert!(sonnet.estimated_cost_usd < opus.estimated_cost_usd);
@@ -122,8 +128,8 @@ mod tests {
 
   #[test]
   fn unknown_model_uses_opus_pricing() {
-    let unknown = estimate_cost(10, "some-future-model");
-    let opus = estimate_cost(10, OPUS);
+    let unknown = estimate_cost(10, "some-future-model", "some-future-model");
+    let opus = estimate_cost(10, OPUS, OPUS);
 
     assert_eq!(
       unknown.estimated_cost_usd.to_bits(),
@@ -132,8 +138,19 @@ mod tests {
   }
 
   #[test]
+  fn split_models_price_each_stage_separately() {
+    let split = estimate_cost(100, "claude-haiku-4-5", OPUS);
+    let all_opus = estimate_cost(100, OPUS, OPUS);
+    let all_haiku =
+      estimate_cost(100, "claude-haiku-4-5", "claude-haiku-4-5");
+
+    assert!(split.estimated_cost_usd < all_opus.estimated_cost_usd);
+    assert!(split.estimated_cost_usd > all_haiku.estimated_cost_usd);
+  }
+
+  #[test]
   fn display_format_includes_dollar_sign() {
-    let est = estimate_cost(5, OPUS);
+    let est = estimate_cost(5, OPUS, OPUS);
     let display = format!("{}", est);
 
     assert!(display.starts_with("Estimated cost: $"));

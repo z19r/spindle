@@ -13,7 +13,10 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub struct ClaudeProvider {
   client: Client,
   api_key: String,
+  /// Model for the grouping call (the hard reasoning step).
   model: String,
+  /// Model for per-file descriptions (high volume, mostly vision).
+  describe_model: String,
   base_url: String,
   max_retries: usize,
   poll_interval: std::time::Duration,
@@ -80,6 +83,74 @@ struct ApiRequest {
   #[serde(skip_serializing_if = "Option::is_none")]
   system: Option<Vec<SystemBlock>>,
   messages: Vec<Message>,
+  /// Structured-output constraint: the response must validate
+  /// against a JSON schema. `extract_json` remains as a fallback for
+  /// proxies/models that ignore it.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  output_config: Option<serde_json::Value>,
+}
+
+/// `output_config.format` payload constraining the response to
+/// `ContentDescription`.
+fn describe_output_config() -> serde_json::Value {
+  serde_json::json!({
+    "format": {
+      "type": "json_schema",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "summary": {"type": "string"},
+          "tags": {"type": "array", "items": {"type": "string"}},
+          "suggested_category": {"type": "string"},
+          "confidence": {"type": "number"}
+        },
+        "required": [
+          "summary", "tags", "suggested_category", "confidence"
+        ],
+        "additionalProperties": false
+      }
+    }
+  })
+}
+
+/// `output_config.format` payload constraining the grouping response.
+fn group_output_config() -> serde_json::Value {
+  serde_json::json!({
+    "format": {
+      "type": "json_schema",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {"type": "string"},
+                "rationale": {"type": "string"},
+                "members": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "index": {"type": "integer"},
+                      "dest_name": {"type": "string"}
+                    },
+                    "required": ["index", "dest_name"],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": ["label", "rationale", "members"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["groups"],
+        "additionalProperties": false
+      }
+    }
+  })
 }
 
 fn cached_system_block(text: impl Into<String>) -> SystemBlock {
@@ -95,6 +166,7 @@ fn cached_api_request(
   max_tokens: u32,
   system: Option<Vec<SystemBlock>>,
   messages: Vec<Message>,
+  output_config: Option<serde_json::Value>,
 ) -> ApiRequest {
   ApiRequest {
     model,
@@ -102,6 +174,7 @@ fn cached_api_request(
     cache_control: CacheControl::ephemeral(),
     system,
     messages,
+    output_config,
   }
 }
 
@@ -158,14 +231,27 @@ impl ClaudeProvider {
     model: impl Into<String>,
     max_retries: usize,
   ) -> Self {
+    let model = model.into();
     Self {
       client: Client::new(),
       api_key: api_key.into(),
-      model: model.into(),
+      describe_model: model.clone(),
+      model,
       base_url: DEFAULT_BASE_URL.to_string(),
       max_retries,
       poll_interval: DEFAULT_BATCH_POLL_INTERVAL,
     }
+  }
+
+  /// Use a different (usually cheaper) model for per-file
+  /// descriptions than for grouping.
+  pub fn with_describe_model(
+    self,
+    model: impl Into<String>,
+  ) -> Self {
+    let mut this = self;
+    this.describe_model = model.into();
+    this
   }
 
   #[cfg(test)]
@@ -310,13 +396,14 @@ impl ClaudeProvider {
     };
 
     cached_api_request(
-      self.model.clone(),
+      self.describe_model.clone(),
       1024,
       Some(vec![cached_system_block(system_text)]),
       vec![Message {
         role: "user",
         content,
       }],
+      Some(describe_output_config()),
     )
   }
 
@@ -657,6 +744,7 @@ impl AiProvider for ClaudeProvider {
           cache_control: None,
         }],
       }],
+      Some(group_output_config()),
     );
 
     let text = self.send_request(request).await?;
@@ -728,6 +816,7 @@ impl AiProvider for ClaudeProvider {
           cache_control: None,
         }],
       }],
+      Some(group_output_config()),
     );
 
     let text = self.send_request(request).await?;
@@ -789,6 +878,8 @@ mod tests {
           cache_control: None,
         }],
       }],
+    
+      None,
     );
 
     let json = serde_json::to_value(&request).unwrap();

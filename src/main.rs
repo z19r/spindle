@@ -67,7 +67,8 @@ async fn main() -> Result<()> {
     api_key,
     config.ai.model.clone(),
     config.ai.max_retries,
-  );
+  )
+  .with_describe_model(config.ai.describe_model.clone());
   if let Some(base_url) = &config.ai.base_url {
     provider = provider.with_base_url(base_url.clone());
   }
@@ -97,6 +98,7 @@ async fn main() -> Result<()> {
     use_organized_context: config.matching.use_organized_context,
     ledger_path: ledger_path.clone(),
     model: config.ai.model.clone(),
+    describe_model: config.ai.describe_model.clone(),
   };
 
   let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(64);
@@ -277,7 +279,22 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
   );
 
   print!("  Fingerprinting...  ");
-  let fingerprinted = fingerprint_files(scanned)?;
+  let mut fingerprinted = fingerprint_files(scanned)?;
+
+  // Skip files a previous run already organized.
+  if let Some(ledger_path) = spindle::config::resolve_ledger_path(cli)
+  {
+    let ledger = Ledger::load(&ledger_path);
+    let before = fingerprinted.len();
+    fingerprinted.retain(|f| {
+      let hex = spindle::ledger::hash_hex(&f.blake3_hash);
+      !ledger.is_organized(&f.scanned.path, &hex)
+    });
+    let skipped = before - fingerprinted.len();
+    if skipped > 0 {
+      println!("  (skipping {skipped} already-organized files)");
+    }
+  }
   let exact_dupes = find_exact_duplicates(&fingerprinted);
   let near_dupes = spindle::fingerprint::find_near_duplicates(
     &fingerprinted,

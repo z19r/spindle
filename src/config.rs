@@ -156,6 +156,11 @@ pub struct AiConfig {
   pub base_url: Option<String>,
   #[serde(default = "default_model")]
   pub model: String,
+  /// Model for per-file content descriptions. High volume, mostly
+  /// vision — a cheap fast model is the right default; the big model
+  /// stays on the harder grouping step.
+  #[serde(default = "default_describe_model")]
+  pub describe_model: String,
   #[serde(default = "default_max_concurrent")]
   pub max_concurrent_requests: usize,
   #[serde(default = "default_max_files")]
@@ -173,6 +178,7 @@ impl std::fmt::Debug for AiConfig {
     f.debug_struct("AiConfig")
       .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
       .field("model", &self.model)
+      .field("describe_model", &self.describe_model)
       .field("max_concurrent_requests", &self.max_concurrent_requests)
       .field("max_files_to_analyze", &self.max_files_to_analyze)
       .field(
@@ -237,6 +243,7 @@ impl Default for AiConfig {
       api_key: None,
       base_url: None,
       model: default_model(),
+      describe_model: default_describe_model(),
       max_concurrent_requests: default_max_concurrent(),
       max_files_to_analyze: default_max_files(),
       skip_files_larger_than_mb: default_skip_size(),
@@ -265,6 +272,10 @@ fn default_output_dir() -> PathBuf {
 
 fn default_model() -> String {
   "claude-opus-5".to_string()
+}
+
+fn default_describe_model() -> String {
+  "claude-haiku-4-5".to_string()
 }
 
 fn default_max_concurrent() -> usize {
@@ -401,6 +412,7 @@ mod tests {
     let config = Config::load(&cli).unwrap();
 
     assert_eq!(config.ai.model, "claude-opus-5");
+    assert_eq!(config.ai.describe_model, "claude-haiku-4-5");
     assert_eq!(config.ai.max_concurrent_requests, 5);
     assert_eq!(config.duplicates.near_duplicate_threshold, 8);
   }

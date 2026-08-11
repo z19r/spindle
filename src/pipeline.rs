@@ -88,8 +88,10 @@ pub struct PipelineConfig {
   /// Path to the persistent "already organized" ledger. `None` disables
   /// both candidate exclusion and recording.
   pub ledger_path: Option<PathBuf>,
-  /// Model id used for AI analysis — drives cost estimation.
+  /// Model id used for grouping — drives cost estimation.
   pub model: String,
+  /// Model id used for per-file descriptions.
+  pub describe_model: String,
 }
 
 #[derive(Debug)]
@@ -381,7 +383,8 @@ async fn run_ai_pipeline<P: AiProvider>(
     }
   }
   let to_send = analyze_count - cached;
-  let cost_est = estimate_cost(to_send, &config.model);
+  let cost_est =
+    estimate_cost(to_send, &config.describe_model, &config.model);
 
   let _ = tx
     .send(PipelineEvent::CostEstimated {
@@ -502,20 +505,16 @@ async fn run_ai_pipeline<P: AiProvider>(
     return Ok(groups);
   }
 
-  match if organized_context.is_empty() {
-    provider
-      .propose_groups_with_context(&summaries, existing_labels)
-      .await
-  } else {
-    provider
-      .propose_groups_with_organized_context(
-        &summaries,
-        existing_labels,
-        organized_context,
-      )
-      .await
-  } {
+  match propose_groups_batched(
+    provider,
+    &summaries,
+    existing_labels,
+    organized_context,
+  )
+  .await
+  {
     Ok(groups) => {
+      let groups = quarantine_low_confidence(groups, &summaries);
       let _ = write_cached_grouping(
         &config.cache_dir,
         &cache_key,
@@ -542,6 +541,140 @@ async fn run_ai_pipeline<P: AiProvider>(
       }])
     }
   }
+}
+
+/// One grouping call handles this many files well; beyond it the
+/// prompt degrades, so batch by topic and merge on shared labels.
+const MAX_GROUPING_BATCH: usize = 120;
+
+/// Placements below this description confidence land in a visible
+/// "Needs Review" group instead of silently joining a folder.
+const MIN_PLACEMENT_CONFIDENCE: f64 = 0.6;
+
+async fn propose_once<P: AiProvider>(
+  provider: &P,
+  summaries: &[FileSummary],
+  existing_labels: &[String],
+  organized_context: &[(String, Vec<ContentDescription>)],
+) -> Result<Vec<ProposedGroup>> {
+  if organized_context.is_empty() {
+    provider
+      .propose_groups_with_context(summaries, existing_labels)
+      .await
+  } else {
+    provider
+      .propose_groups_with_organized_context(
+        summaries,
+        existing_labels,
+        organized_context,
+      )
+      .await
+  }
+}
+
+/// Large sets are grouped in topic-coherent batches. Labels produced
+/// by earlier batches feed later ones (so they reuse folders instead
+/// of inventing near-duplicates), and same-label groups merge.
+async fn propose_groups_batched<P: AiProvider>(
+  provider: &P,
+  summaries: &[FileSummary],
+  existing_labels: &[String],
+  organized_context: &[(String, Vec<ContentDescription>)],
+) -> Result<Vec<ProposedGroup>> {
+  if summaries.len() <= MAX_GROUPING_BATCH {
+    return propose_once(
+      provider,
+      summaries,
+      existing_labels,
+      organized_context,
+    )
+    .await;
+  }
+
+  let mut ordered: Vec<FileSummary> = summaries.to_vec();
+  ordered.sort_by(|a, b| {
+    a.description
+      .suggested_category
+      .cmp(&b.description.suggested_category)
+  });
+
+  let mut labels: Vec<String> = existing_labels.to_vec();
+  let mut order: Vec<String> = Vec::new();
+  let mut merged: HashMap<String, ProposedGroup> = HashMap::new();
+
+  for chunk in ordered.chunks(MAX_GROUPING_BATCH) {
+    let groups =
+      propose_once(provider, chunk, &labels, organized_context)
+        .await?;
+    for group in groups {
+      if !labels.contains(&group.label) {
+        labels.push(group.label.clone());
+      }
+      match merged.get_mut(&group.label) {
+        Some(existing) => {
+          existing.member_indices.extend(group.member_indices);
+          existing
+            .member_destinations
+            .extend(group.member_destinations);
+        }
+        None => {
+          order.push(group.label.clone());
+          merged.insert(group.label.clone(), group);
+        }
+      }
+    }
+  }
+
+  Ok(
+    order
+      .into_iter()
+      .filter_map(|label| merged.remove(&label))
+      .collect(),
+  )
+}
+
+/// Pull low-confidence placements out of their groups into a visible
+/// "Needs Review" bucket so shaky calls never silently file away.
+fn quarantine_low_confidence(
+  mut groups: Vec<ProposedGroup>,
+  summaries: &[FileSummary],
+) -> Vec<ProposedGroup> {
+  let low: std::collections::HashSet<usize> = summaries
+    .iter()
+    .filter(|s| s.description.confidence < MIN_PLACEMENT_CONFIDENCE)
+    .map(|s| s.index)
+    .collect();
+  if low.is_empty() {
+    return groups;
+  }
+
+  let mut quarantined = Vec::new();
+  for group in &mut groups {
+    group.member_indices.retain(|idx| {
+      let keep = !low.contains(idx);
+      if !keep {
+        quarantined.push(*idx);
+      }
+      keep
+    });
+    group
+      .member_destinations
+      .retain(|dest| !low.contains(&dest.index));
+  }
+  groups.retain(|g| !g.member_indices.is_empty());
+
+  if !quarantined.is_empty() {
+    quarantined.sort_unstable();
+    groups.push(ProposedGroup {
+      label: "Needs Review".to_string(),
+      rationale: "Content analysis was low-confidence — check \
+                  these placements manually"
+        .to_string(),
+      member_indices: quarantined,
+      member_destinations: vec![],
+    });
+  }
+  groups
 }
 
 #[cfg(test)]
@@ -604,6 +737,101 @@ mod tests {
     }
   }
 
+  fn summary(index: usize, confidence: f64) -> FileSummary {
+    FileSummary {
+      index,
+      filename: format!("f{index}.jpg"),
+      source_path: format!("f{index}.jpg"),
+      description: ContentDescription {
+        summary: format!("file {index}"),
+        tags: vec![],
+        suggested_category: "photo".to_string(),
+        confidence,
+      },
+      metadata_hint: String::new(),
+    }
+  }
+
+  #[test]
+  fn quarantine_moves_low_confidence_to_needs_review() {
+    let groups = vec![ProposedGroup {
+      label: "Beach".to_string(),
+      rationale: "sandy".to_string(),
+      member_indices: vec![0, 1, 2],
+      member_destinations: vec![],
+    }];
+    let summaries =
+      vec![summary(0, 0.9), summary(1, 0.3), summary(2, 0.95)];
+
+    let result = quarantine_low_confidence(groups, &summaries);
+
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].member_indices, vec![0, 2]);
+    assert_eq!(result[1].label, "Needs Review");
+    assert_eq!(result[1].member_indices, vec![1]);
+  }
+
+  #[test]
+  fn quarantine_noop_when_all_confident() {
+    let groups = vec![ProposedGroup {
+      label: "Beach".to_string(),
+      rationale: "sandy".to_string(),
+      member_indices: vec![0],
+      member_destinations: vec![],
+    }];
+
+    let result =
+      quarantine_low_confidence(groups.clone(), &[summary(0, 0.9)]);
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].member_indices, vec![0]);
+  }
+
+  #[tokio::test]
+  async fn batched_grouping_merges_same_labels_across_chunks() {
+    /// Groups every chunk under one shared label, so a >1-batch run
+    /// must merge them into a single group.
+    struct OneLabelProvider;
+    impl AiProvider for OneLabelProvider {
+      async fn describe_image(
+        &self,
+        _: &[u8],
+        _: &str,
+        _: &DescribeContext,
+      ) -> anyhow::Result<ContentDescription> {
+        panic!("unused");
+      }
+      async fn propose_groups(
+        &self,
+        files: &[FileSummary],
+      ) -> anyhow::Result<Vec<ProposedGroup>> {
+        Ok(vec![ProposedGroup {
+          label: "Everything".to_string(),
+          rationale: "one bucket".to_string(),
+          member_indices: files.iter().map(|f| f.index).collect(),
+          member_destinations: vec![],
+        }])
+      }
+    }
+
+    let summaries: Vec<FileSummary> =
+      (0..MAX_GROUPING_BATCH * 2 + 5)
+        .map(|i| summary(i, 0.9))
+        .collect();
+
+    let groups = propose_groups_batched(
+      &OneLabelProvider,
+      &summaries,
+      &[],
+      &[],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].member_indices.len(), summaries.len());
+  }
+
   #[tokio::test]
   async fn second_run_makes_no_claude_calls_when_unchanged() {
     let source = TempDir::new().unwrap();
@@ -640,6 +868,7 @@ mod tests {
       use_organized_context: false,
       ledger_path: None,
       model: "claude-opus-5".to_string(),
+      describe_model: "claude-haiku-4-5".to_string(),
     };
 
     // First run populates both the description and grouping caches.
@@ -689,6 +918,7 @@ mod tests {
       use_organized_context: false,
       ledger_path,
       model: "claude-opus-5".to_string(),
+      describe_model: "claude-haiku-4-5".to_string(),
     }
   }
 
@@ -886,6 +1116,7 @@ mod tests {
       use_organized_context: false,
       ledger_path: None,
       model: "claude-opus-5".to_string(),
+      describe_model: "claude-haiku-4-5".to_string(),
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -942,6 +1173,7 @@ mod tests {
       use_organized_context: false,
       ledger_path: None,
       model: "claude-opus-5".to_string(),
+      describe_model: "claude-haiku-4-5".to_string(),
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -989,6 +1221,7 @@ mod tests {
       use_organized_context: false,
       ledger_path: None,
       model: "claude-opus-5".to_string(),
+      describe_model: "claude-haiku-4-5".to_string(),
     };
 
     let (tx, _rx) = mpsc::channel(64);
@@ -1034,6 +1267,7 @@ mod tests {
       use_organized_context: false,
       ledger_path: None,
       model: "claude-opus-5".to_string(),
+      describe_model: "claude-haiku-4-5".to_string(),
     };
 
     let (tx, _rx) = mpsc::channel(64);
@@ -1075,6 +1309,7 @@ mod tests {
       use_organized_context: false,
       ledger_path: None,
       model: "claude-opus-5".to_string(),
+      describe_model: "claude-haiku-4-5".to_string(),
     };
 
     let (tx, mut rx) = mpsc::channel(64);
