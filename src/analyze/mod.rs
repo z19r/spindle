@@ -490,8 +490,14 @@ fn extract_zip(
       continue;
     }
 
-    let dest_path = dest
-      .join(entry_name.file_name().unwrap_or(entry_name.as_os_str()));
+    // Preserve the entry's relative path — flattening by filename
+    // makes same-named files in different folders clobber each other.
+    let dest_path = dest.join(&entry_name);
+    if let Some(parent) = dest_path.parent() {
+      if std::fs::create_dir_all(parent).is_err() {
+        continue;
+      }
+    }
 
     let mut out = match std::fs::File::create(&dest_path) {
       Ok(f) => f,

@@ -283,8 +283,21 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
     &fingerprinted,
     config.duplicates.near_duplicate_threshold,
   );
-  let dupes: Vec<_> =
-    exact_dupes.into_iter().chain(near_dupes).collect();
+  let archive_matches =
+    spindle::fingerprint::archive::find_archive_matches(
+      &fingerprinted,
+    );
+  let text_matches =
+    spindle::fingerprint::text::find_similar_text(&fingerprinted);
+  let audio_matches =
+    spindle::fingerprint::audio::find_similar_audio(&fingerprinted);
+  let dupes: Vec<_> = exact_dupes
+    .into_iter()
+    .chain(near_dupes)
+    .chain(archive_matches)
+    .chain(text_matches)
+    .chain(audio_matches)
+    .collect();
   println!(
     "{} {} duplicate sets",
     progress::rainbow_bar(1.0, progress::BAR_WIDTH),
@@ -356,6 +369,23 @@ fn dupes_to_groups(
         format!(
           "Perceptually similar (distance {}) — keep {}",
           distance, canonical_name
+        )
+      }
+      spindle::model::DuplicateType::ArchiveMatch => {
+        "Archive contents already extracted — keep the folder, \
+         the archive is redundant"
+          .to_string()
+      }
+      spindle::model::DuplicateType::SimilarText { distance } => {
+        format!(
+          "Text near-identical (simhash distance {}) — keep {}",
+          distance, canonical_name
+        )
+      }
+      spindle::model::DuplicateType::SimilarAudio { score } => {
+        format!(
+          "Same recording ({}% acoustic match) — keep {}",
+          score, canonical_name
         )
       }
     };
