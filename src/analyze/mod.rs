@@ -540,7 +540,7 @@ async fn analyze_document(
     filename: filename.to_string(),
     file_type_label: document_type_label(file),
     file_size: file.scanned.size,
-    metadata_hint: None,
+    metadata_hint: mtime_hint(file),
   };
 
   provider.describe_text(&excerpt, &context).await
@@ -579,8 +579,122 @@ async fn extract_document_text(
     | Df::Html
     | Df::Yaml
     | Df::Toml => read_text_excerpt(&file.scanned.path).await,
-    Df::Doc | Df::Docx | Df::Rtf => None,
+    Df::Docx => extract_docx_text(&file.scanned.path).await,
+    Df::Rtf => extract_rtf_text(&file.scanned.path).await,
+    Df::Doc => None,
   }
+}
+
+/// docx is a zip: the body text lives in `word/document.xml`.
+async fn extract_docx_text(
+  path: &std::path::Path,
+) -> Option<String> {
+  let path = path.to_path_buf();
+  tokio::task::spawn_blocking(move || {
+    let file = std::fs::File::open(&path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let entry = archive.by_name("word/document.xml").ok()?;
+    let mut xml = String::new();
+    use std::io::Read;
+    entry
+      .take(4 * MAX_TEXT_EXCERPT_BYTES as u64)
+      .read_to_string(&mut xml)
+      .ok()?;
+    let text = strip_docx_xml(&xml);
+    (!text.trim().is_empty()).then(|| truncate_to_excerpt(text))
+  })
+  .await
+  .ok()?
+}
+
+/// Keep character data, turn paragraph ends into newlines, decode the
+/// few entities Word actually emits.
+fn strip_docx_xml(xml: &str) -> String {
+  let mut out = String::with_capacity(xml.len() / 4);
+  let mut in_tag = false;
+  let mut tag = String::new();
+  for c in xml.chars() {
+    match c {
+      '<' => {
+        in_tag = true;
+        tag.clear();
+      }
+      '>' => {
+        in_tag = false;
+        if tag == "/w:p" && !out.ends_with('\n') {
+          out.push('\n');
+        }
+      }
+      _ if in_tag => tag.push(c),
+      _ => out.push(c),
+    }
+  }
+  out
+    .replace("&amp;", "&")
+    .replace("&lt;", "<")
+    .replace("&gt;", ">")
+    .replace("&quot;", "\"")
+    .replace("&apos;", "'")
+}
+
+/// RTF: drop control words and groups, keep plain text.
+async fn extract_rtf_text(
+  path: &std::path::Path,
+) -> Option<String> {
+  let raw = read_text_excerpt(path).await?;
+  let text = strip_rtf(&raw);
+  (!text.trim().is_empty()).then_some(text)
+}
+
+fn strip_rtf(rtf: &str) -> String {
+  let mut out = String::with_capacity(rtf.len() / 2);
+  let mut chars = rtf.chars().peekable();
+  while let Some(c) = chars.next() {
+    match c {
+      '{' | '}' => {}
+      '\\' => {
+        match chars.peek() {
+          // escaped literals
+          Some('\\') | Some('{') | Some('}') => {
+            out.push(chars.next().unwrap());
+          }
+          // \'hh hex escape — skip the two hex digits
+          Some('\'') => {
+            chars.next();
+            chars.next();
+            chars.next();
+          }
+          _ => {
+            // control word: letters then optional numeric parameter
+            let mut word = String::new();
+            while let Some(&next) = chars.peek() {
+              if next.is_ascii_alphabetic() {
+                word.push(chars.next().unwrap());
+              } else {
+                break;
+              }
+            }
+            while chars
+              .peek()
+              .is_some_and(|n| n.is_ascii_digit() || *n == '-')
+            {
+              chars.next();
+            }
+            // the delimiting space belongs to the control word
+            if chars.peek() == Some(&' ') {
+              chars.next();
+            }
+            if word == "par" || word == "line" {
+              out.push('\n');
+            }
+          }
+        }
+      }
+      '\r' | '\n' => {}
+      _ => out.push(c),
+    }
+  }
+  out
 }
 
 async fn read_text_excerpt(path: &std::path::Path) -> Option<String> {
@@ -627,6 +741,49 @@ fn truncate_to_excerpt(text: String) -> String {
   text[..end].to_string()
 }
 
+/// EXIF hint for an image: capture date, camera, GPS presence — the
+/// strongest grouping signals a photo carries.
+pub(crate) fn exif_hint(path: &std::path::Path) -> Option<String> {
+  let file = std::fs::File::open(path).ok()?;
+  let mut reader = std::io::BufReader::new(file);
+  let exif =
+    exif::Reader::new().read_from_container(&mut reader).ok()?;
+
+  let mut parts = Vec::new();
+  if let Some(field) =
+    exif.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
+  {
+    parts.push(format!("Taken {}", field.display_value()));
+  }
+  if let Some(field) =
+    exif.get_field(exif::Tag::Model, exif::In::PRIMARY)
+  {
+    let model = field.display_value().to_string();
+    parts.push(format!("Camera {}", model.trim_matches('"')));
+  }
+  if exif
+    .get_field(exif::Tag::GPSLatitude, exif::In::PRIMARY)
+    .is_some()
+  {
+    parts.push("GPS-tagged".to_string());
+  }
+  (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// Filesystem modification date — a weak but universal signal, used
+/// when a file has no richer metadata.
+fn mtime_hint(file: &FingerprintedFile) -> Option<String> {
+  let modified =
+    chrono::DateTime::<chrono::Utc>::from(file.scanned.modified);
+  Some(format!("Modified {}", modified.format("%Y-%m-%d")))
+}
+
+pub(crate) fn image_metadata_hint(
+  file: &FingerprintedFile,
+) -> Option<String> {
+  exif_hint(&file.scanned.path).or_else(|| mtime_hint(file))
+}
+
 async fn analyze_image(
   provider: &impl AiProvider,
   file: &FingerprintedFile,
@@ -641,7 +798,7 @@ async fn analyze_image(
     filename: filename.to_string(),
     file_type_label: file.scanned.file_type.mime_type().to_string(),
     file_size: file.scanned.size,
-    metadata_hint: None,
+    metadata_hint: image_metadata_hint(file),
   };
 
   provider
@@ -848,7 +1005,7 @@ async fn analyze_batch_via_api(
                 .mime_type()
                 .to_string(),
               file_size: file.scanned.size,
-              metadata_hint: None,
+              metadata_hint: image_metadata_hint(file),
             },
           });
           slots.push(BatchSlot::Submitted(requests.len() - 1));
@@ -875,7 +1032,7 @@ async fn analyze_batch_via_api(
               filename,
               file_type_label: document_type_label(file),
               file_size: file.scanned.size,
-              metadata_hint: None,
+              metadata_hint: mtime_hint(file),
             },
           });
           slots.push(BatchSlot::Submitted(requests.len() - 1));
@@ -1687,6 +1844,78 @@ mod tests {
     );
     // Nothing was submitted to the API
     assert!(provider.batch_sizes.lock().unwrap().is_empty());
+  }
+
+  #[test]
+  fn strip_docx_xml_keeps_text_and_paragraphs() {
+    let xml = "<w:document><w:p><w:r><w:t>Hello &amp; \
+               welcome</w:t></w:r></w:p><w:p><w:r><w:t>Second \
+               paragraph</w:t></w:r></w:p></w:document>";
+
+    let text = strip_docx_xml(xml);
+
+    assert!(text.contains("Hello & welcome"));
+    assert!(text.contains("\nSecond paragraph"));
+    assert!(!text.contains('<'));
+  }
+
+  #[tokio::test]
+  async fn extract_docx_text_reads_real_docx_structure() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("report.docx");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("word/document.xml", options).unwrap();
+    std::io::Write::write_all(
+      &mut writer,
+      b"<w:document><w:p><w:t>QUARTERLY REPORT for Acme \
+        Corp</w:t></w:p></w:document>",
+    )
+    .unwrap();
+    writer.finish().unwrap();
+
+    let text = extract_docx_text(&path).await.unwrap();
+
+    assert!(text.contains("QUARTERLY REPORT for Acme Corp"));
+  }
+
+  #[test]
+  fn strip_rtf_removes_control_words() {
+    let rtf = r"{\rtf1\ansi\deff0 {\fonttbl {\f0 Times;}}\f0\fs24 Hello \b bold\b0  world.\par Second line.}";
+
+    let text = strip_rtf(rtf);
+
+    assert!(text.contains("Hello"));
+    assert!(text.contains("bold"));
+    assert!(text.contains("world."));
+    assert!(text.contains("\nSecond line."));
+    assert!(!text.contains("rtf1"));
+    assert!(!text.contains('\\'));
+  }
+
+  #[test]
+  fn exif_hint_none_for_plain_png() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("plain.png");
+    std::fs::write(&path, create_test_png(1, 1, &[1, 2, 3, 255]))
+      .unwrap();
+
+    assert!(exif_hint(&path).is_none());
+  }
+
+  fn create_test_png(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+  ) -> Vec<u8> {
+    use image::{ImageBuffer, RgbaImage};
+    let img: RgbaImage =
+      ImageBuffer::from_raw(width, height, rgba.to_vec()).unwrap();
+    let mut buf = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut buf);
+    img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+    buf
   }
 
   #[test]
