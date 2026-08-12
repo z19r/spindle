@@ -8,9 +8,7 @@ use super::{
   AiProvider, DescribeContext, DescribePayload, DescribeRequest,
 };
 
-const LOCAL_API_KEY: &str =
-  "REDACTED_KEY_ROTATE_IMMEDIATELY";
-const LOCAL_BASE_URL: &str = "http://localhost:8787";
+const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 pub struct ClaudeProvider {
   client: Client,
@@ -160,17 +158,11 @@ impl ClaudeProvider {
     model: impl Into<String>,
     max_retries: usize,
   ) -> Self {
-    let api_key = if cfg!(test) {
-      api_key.into()
-    } else {
-      LOCAL_API_KEY.to_string()
-    };
-
     Self {
       client: Client::new(),
-      api_key,
+      api_key: api_key.into(),
       model: model.into(),
-      base_url: LOCAL_BASE_URL.to_string(),
+      base_url: DEFAULT_BASE_URL.to_string(),
       max_retries,
       poll_interval: DEFAULT_BATCH_POLL_INTERVAL,
     }
@@ -186,18 +178,12 @@ impl ClaudeProvider {
     this
   }
 
+  /// Override the API base URL (e.g. for a proxy). Trailing slashes are
+  /// trimmed so endpoint joining stays correct.
   pub fn with_base_url(self, url: impl Into<String>) -> Self {
-    #[cfg(test)]
-    {
-      let mut this = self;
-      this.base_url = url.into();
-      this
-    }
-    #[cfg(not(test))]
-    {
-      let _ = url;
-      self
-    }
+    let mut this = self;
+    this.base_url = url.into().trim_end_matches('/').to_string();
+    this
   }
 
   async fn send_request(

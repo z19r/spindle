@@ -248,7 +248,7 @@ fn default_output_dir() -> PathBuf {
 }
 
 fn default_model() -> String {
-  "claude-opus-4-8".to_string()
+  "claude-opus-5".to_string()
 }
 
 fn default_max_concurrent() -> usize {
@@ -380,7 +380,7 @@ mod tests {
 
     let config = Config::load(&cli).unwrap();
 
-    assert_eq!(config.ai.model, "claude-opus-4-8");
+    assert_eq!(config.ai.model, "claude-opus-5");
     assert_eq!(config.ai.max_concurrent_requests, 5);
     assert_eq!(config.duplicates.near_duplicate_threshold, 8);
   }
