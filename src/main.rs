@@ -8,7 +8,9 @@ use tracing_subscriber::EnvFilter;
 
 use spindle::ai::ClaudeProvider;
 use spindle::config::{CliArgs, Config};
-use spindle::executor::execute_plan;
+use spindle::executor::{
+  execute_plan, journal, trash, ExecutorPaths,
+};
 use spindle::fingerprint::{
   find_exact_duplicates, fingerprint_files,
 };
@@ -39,8 +41,16 @@ async fn main() -> Result<()> {
   let config = Config::load(&cli)?;
   tracing::debug!(?config, "Loaded configuration");
 
-  if cli.undo {
-    return run_undo(&cli, &config);
+  if cli.list_undo {
+    return run_list_undo();
+  }
+
+  if cli.purge {
+    return run_purge(cli.older_than);
+  }
+
+  if cli.undo || cli.undo_run.is_some() || cli.undo_log.is_some() {
+    return run_undo(&cli);
   }
 
   if cli.dupes_only {
@@ -171,19 +181,82 @@ async fn main() -> Result<()> {
   execute_review(&cli, &config, &review_state, recording)
 }
 
-fn run_undo(cli: &CliArgs, config: &Config) -> Result<()> {
-  let undo_path = cli.undo_log.clone().unwrap_or_else(|| {
-    config.general.output_dir.join(".spindle_undo.json")
-  });
-  println!("Undoing from: {}", undo_path.display());
-  let restored = spindle::executor::undo(&undo_path)?;
+fn run_undo(cli: &CliArgs) -> Result<()> {
+  // Legacy escape hatch: an explicit --undo-log path uses the old
+  // single-shot undo log format.
+  if let Some(undo_path) = &cli.undo_log {
+    println!("Undoing from legacy log: {}", undo_path.display());
+    let restored = spindle::executor::undo(undo_path)?;
+    println!(
+      "Restored {} files to their original locations.",
+      restored.len()
+    );
+    for path in &restored {
+      println!("  ← {}", path.display());
+    }
+    return Ok(());
+  }
+
+  let paths = ExecutorPaths::default_paths();
+  let report =
+    spindle::executor::undo_run(&paths, cli.undo_run.as_deref())?;
+
   println!(
-    "Restored {} files to their original locations.",
-    restored.len()
+    "Undid run {}: {} restored, {} failed.",
+    report.run_id,
+    report.restored.len(),
+    report.failed.len()
   );
-  for path in &restored {
+  for path in &report.restored {
     println!("  ← {}", path.display());
   }
+  for (path, err) in &report.failed {
+    eprintln!("  ✗ {} ({err})", path.display());
+  }
+  if !report.failed.is_empty() {
+    anyhow::bail!(
+      "Some files could not be restored; the run journal was kept."
+    );
+  }
+  Ok(())
+}
+
+fn run_list_undo() -> Result<()> {
+  let paths = ExecutorPaths::default_paths();
+  let runs = journal::list_runs(&paths.journal_dir);
+  if runs.is_empty() {
+    println!("No undoable runs.");
+    return Ok(());
+  }
+  println!("Undoable runs (newest first):");
+  for run_id in runs {
+    match journal::load(&paths.journal_dir, &run_id) {
+      Ok(j) => {
+        let staged: u64 =
+          j.deletions.iter().map(|d| d.size).sum();
+        println!(
+          "  {}  {} moves, {} deletions ({} in trash)",
+          run_id,
+          j.moves.len(),
+          j.deletions.len(),
+          format_bytes(staged),
+        );
+      }
+      Err(_) => println!("  {run_id}  (unreadable journal)"),
+    }
+  }
+  println!("\nUndo one with: spindle --undo-run <RUN_ID>");
+  Ok(())
+}
+
+fn run_purge(older_than_days: Option<u64>) -> Result<()> {
+  let paths = ExecutorPaths::default_paths();
+  let report = trash::purge(&paths.trash_dir, older_than_days)?;
+  println!(
+    "Purged {} run(s) from trash, {} reclaimed.",
+    report.runs_purged,
+    format_bytes(report.bytes_freed),
+  );
   Ok(())
 }
 
@@ -388,8 +461,7 @@ fn execute_review(
   review_state: &ReviewState,
   ledger: Option<LedgerRecording<'_>>,
 ) -> Result<()> {
-  let undo_log_path =
-    config.general.output_dir.join(".spindle_undo.json");
+  let exec_paths = ExecutorPaths::default_paths();
 
   match review_state.review_mode() {
     ReviewMode::Organize => {
@@ -430,7 +502,7 @@ fn execute_review(
       println!("Executing plan ({} moves)...", approved.moves.len());
       let report = execute_plan(
         &approved,
-        &undo_log_path,
+        &exec_paths,
         &config.general.output_dir,
       );
 
@@ -471,7 +543,10 @@ fn execute_review(
         return Ok(());
       }
 
-      println!("Deleting {} duplicate files...", deletions.len());
+      println!(
+        "Staging {} duplicate files to trash...",
+        deletions.len()
+      );
       let plan = ApprovedPlan {
         moves: vec![],
         deletions,
@@ -479,21 +554,15 @@ fn execute_review(
       };
       let report = execute_plan(
         &plan,
-        &undo_log_path,
+        &exec_paths,
         &config.general.output_dir,
       );
 
-      let reclaimed: u64 = report
-        .deletions_completed
-        .iter()
-        .filter_map(|p| std::fs::metadata(p).ok())
-        .map(|m| m.len())
-        .sum();
-
       println!(
-        "\nDone! {} duplicates deleted ({} reclaimed).",
-        report.deletions_completed.len(),
-        format_bytes(reclaimed),
+        "\nDone! {} duplicates staged to trash ({} reclaimable \
+         with --purge).",
+        report.deletions_staged.len(),
+        format_bytes(report.bytes_staged),
       );
 
       print_undo_info(&report);
@@ -504,15 +573,17 @@ fn execute_review(
 }
 
 fn print_undo_info(report: &ExecutionReport) {
-  if let Some(ref err) = report.undo_log_error {
+  if let Some(ref err) = report.journal_error {
     eprintln!(
-      "WARNING: Failed to write undo log: {}. \
+      "WARNING: Failed to write the run journal: {}. \
        You will NOT be able to undo this operation.",
       err
     );
-  } else {
-    println!("Undo log saved to: {}", report.undo_log_path.display());
-    println!("Run with --undo to reverse this operation.");
+  } else if report.journal_path.is_some() {
+    println!(
+      "Undo with: spindle --undo   (this run: --undo-run {})",
+      report.run_id
+    );
   }
 }
 
