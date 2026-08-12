@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use std::io::IsTerminal;
+
 use anyhow::Result;
 use clap::Parser;
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use tracing_subscriber::EnvFilter;
 
 use spindle::ai::ClaudeProvider;
@@ -103,17 +105,37 @@ async fn main() -> Result<()> {
 
   let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(64);
 
-  let event_handle = tokio::spawn(async move {
-    let mut progress = PipelineProgress::new();
-    while let Some(event) = rx.recv().await {
-      progress.handle_event(&event);
-    }
-  });
+  // Full TUI progress in a real terminal; plain line output when
+  // piped or redirected.
+  let use_tui = std::io::stdout().is_terminal();
+  let event_handle: tokio::task::JoinHandle<Result<()>> = if use_tui {
+    tokio::task::spawn_blocking(move || {
+      tui::run_pipeline_progress(rx)
+    })
+  } else {
+    tokio::spawn(async move {
+      let mut progress = PipelineProgress::new();
+      while let Some(event) = rx.recv().await {
+        progress.handle_event(&event);
+      }
+      Ok(())
+    })
+  };
 
-  let result = pipeline::run(&provider, &pipeline_config, tx).await?;
-  if let Err(e) = event_handle.await {
-    tracing::error!(error = %e, "Event handler task panicked");
+  // Join the progress task before propagating pipeline errors so the
+  // terminal is restored first.
+  let pipeline_result =
+    pipeline::run(&provider, &pipeline_config, tx).await;
+  match event_handle.await {
+    Ok(Ok(())) => {}
+    Ok(Err(e)) => {
+      tracing::warn!(error = %e, "Progress display failed")
+    }
+    Err(e) => {
+      tracing::error!(error = %e, "Event handler task panicked")
+    }
   }
+  let result = pipeline_result?;
 
   let plan = &result.plan;
 
@@ -234,8 +256,7 @@ fn run_list_undo() -> Result<()> {
   for run_id in runs {
     match journal::load(&paths.journal_dir, &run_id) {
       Ok(j) => {
-        let staged: u64 =
-          j.deletions.iter().map(|d| d.size).sum();
+        let staged: u64 = j.deletions.iter().map(|d| d.size).sum();
         println!(
           "  {}  {} moves, {} deletions ({} in trash)",
           run_id,
@@ -599,11 +620,8 @@ fn execute_review(
         deletions,
         skipped_files: vec![],
       };
-      let report = execute_plan(
-        &plan,
-        &exec_paths,
-        &config.general.output_dir,
-      );
+      let report =
+        execute_plan(&plan, &exec_paths, &config.general.output_dir);
 
       println!(
         "\nDone! {} duplicates staged to trash ({} reclaimable \

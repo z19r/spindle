@@ -7,16 +7,22 @@ use serde::{Deserialize, Serialize};
 )]
 pub enum DuplicateType {
   Exact,
-  NearDuplicate { distance: u32 },
+  NearDuplicate {
+    distance: u32,
+  },
   /// An archive whose entries are all present, extracted, in a
   /// directory — the archive is redundant.
   ArchiveMatch,
   /// Text files whose normalized content is near-identical
   /// (simhash hamming distance).
-  SimilarText { distance: u32 },
+  SimilarText {
+    distance: u32,
+  },
   /// Audio files with matching acoustic fingerprints
   /// (percent bit-similarity of chromaprint streams).
-  SimilarAudio { score: u32 },
+  SimilarAudio {
+    score: u32,
+  },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

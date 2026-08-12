@@ -88,8 +88,7 @@ pub fn execute_plan(
   let mut deletions_staged = Vec::new();
   let mut bytes_staged = 0u64;
   for path in &plan.deletions {
-    let size =
-      std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let dest = trash::trash_path_for(&paths.trash_dir, &run_id, path);
     match move_file(path, &dest) {
       Ok(()) => {

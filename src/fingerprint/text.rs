@@ -123,8 +123,7 @@ mod tests {
 
   fn detect(dir: &TempDir) -> Vec<DuplicateSet> {
     let files =
-      fingerprint_files(scan_directory(dir.path()).unwrap())
-        .unwrap();
+      fingerprint_files(scan_directory(dir.path()).unwrap()).unwrap();
     find_similar_text(&files)
   }
 

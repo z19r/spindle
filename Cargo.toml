@@ -78,8 +78,7 @@ infer = "0.16"
 directories = "5"
 base64 = "0.22"
 hex = "0.4"
-atty = "0.2"
-dotenv = "0.15.0"
+dotenvy = "0.15"
 pdf-extract = "0.10.0"
 zip = "2"
 tempfile = "3"
@@ -89,7 +88,6 @@ tempfile = "3"
 wiremock = "0.6"
 tokio-test = "0.4"
 assert_fs = "1"
-dotenv = "0.15.0"
 
 
 [features]
