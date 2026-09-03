@@ -44,7 +44,7 @@ image_hasher = "2"
 image = "0.25"
 
 # EXIF metadata
-kamadak-exif = "0.5"
+kamadak-exif = "0.6"
 
 # Directory walking
 walkdir = "2"
