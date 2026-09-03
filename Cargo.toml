@@ -35,13 +35,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
 
-# File hashing
-blake3 = { version = "1", features = ["rayon"] }
-rayon = "1"
+# TUI
+ratatui = "0.29"
+ratatui-image = { version = "11.0", default-features = false, features = ["crossterm"] }
+crossterm = "0.28"
 
-# Perceptual image hashing
-image_hasher = "2"
-image = "0.25"
+# Timeimage = "0.25"
 
 # EXIF metadata
 kamadak-exif = "0.6"
