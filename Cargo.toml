@@ -50,7 +50,7 @@ kamadak-exif = "0.6"
 walkdir = "2"
 
 # TUI
-ratatui = "0.29"
+ratatui = "0.30"
 ratatui-image = { version = "7.0", features = ["crossterm"] }
 crossterm = "0.29"
 
