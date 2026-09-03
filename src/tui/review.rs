@@ -162,7 +162,7 @@ pub enum ReviewMode {
 pub enum PreviewState {
   None,
   Loading,
-  Ready(StatefulProtocol),
+  Ready(Box<StatefulProtocol>),
 }
 
 enum DiffLine {
@@ -408,7 +408,7 @@ impl ReviewState {
 
   pub fn image_state_mut(&mut self) -> Option<&mut StatefulProtocol> {
     match &mut self.preview {
-      PreviewState::Ready(protocol) => Some(protocol),
+      PreviewState::Ready(protocol) => Some(protocol.as_mut()),
       _ => None,
     }
   }
@@ -737,7 +737,7 @@ impl ReviewState {
       match rx.try_recv() {
         Ok((path, protocol)) => {
           if Some(&path) == self.preview_path.as_ref() {
-            self.preview = PreviewState::Ready(protocol);
+            self.preview = PreviewState::Ready(Box::new(protocol));
           }
           self.image_rx = None;
         }
@@ -756,7 +756,8 @@ impl ReviewState {
         match rx.try_recv() {
           Ok((path, protocol)) => {
             if Some(&path) == ds.primary_path.as_ref() {
-              ds.primary_preview = PreviewState::Ready(protocol);
+              ds.primary_preview =
+                PreviewState::Ready(Box::new(protocol));
             }
             ds.primary_rx = None;
           }
@@ -773,7 +774,8 @@ impl ReviewState {
         match rx.try_recv() {
           Ok((path, protocol)) => {
             if Some(&path) == ds.secondary_path.as_ref() {
-              ds.secondary_preview = PreviewState::Ready(protocol);
+              ds.secondary_preview =
+                PreviewState::Ready(Box::new(protocol));
             }
             ds.secondary_rx = None;
           }
@@ -1736,7 +1738,8 @@ fn render_preview_modal(frame: &mut Frame, state: &mut ReviewState) {
     if let Some(rx) = ds.primary_rx.as_ref() {
       if let Ok((path, protocol)) = rx.try_recv() {
         if Some(&path) == ds.primary_path.as_ref() {
-          ds.primary_preview = PreviewState::Ready(protocol);
+          ds.primary_preview =
+            PreviewState::Ready(Box::new(protocol));
         }
         ds.primary_rx = None;
       }
@@ -1745,7 +1748,7 @@ fn render_preview_modal(frame: &mut Frame, state: &mut ReviewState) {
     match &mut ds.primary_preview {
       PreviewState::Ready(protocol) => {
         let img = ratatui_image::StatefulImage::new();
-        frame.render_stateful_widget(img, inner, protocol);
+        frame.render_stateful_widget(img, inner, protocol.as_mut());
       }
       PreviewState::Loading => {
         let loading = Paragraph::new(Span::styled(
@@ -1940,7 +1943,11 @@ fn render_diff_modal(
       match &mut ds.primary_preview {
         PreviewState::Ready(protocol) => {
           let iw = ratatui_image::StatefulImage::new();
-          frame.render_stateful_widget(iw, left_inner, protocol);
+          frame.render_stateful_widget(
+            iw,
+            left_inner,
+            protocol.as_mut(),
+          );
         }
         PreviewState::Loading => {
           let loading = Paragraph::new(Span::styled(
@@ -1960,7 +1967,11 @@ fn render_diff_modal(
       match &mut ds.secondary_preview {
         PreviewState::Ready(protocol) => {
           let iw = ratatui_image::StatefulImage::new();
-          frame.render_stateful_widget(iw, right_inner, protocol);
+          frame.render_stateful_widget(
+            iw,
+            right_inner,
+            protocol.as_mut(),
+          );
         }
         PreviewState::Loading => {
           let loading = Paragraph::new(Span::styled(
