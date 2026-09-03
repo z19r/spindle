@@ -7,8 +7,8 @@ target-dir = "target"
 opt-level = 0
 debug = true
 split-debuginfo = "unpacked"
+
 [profile.release]
-# Release profile settings
 opt-level = 3
 debug = false
 lto = true
