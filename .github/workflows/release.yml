@@ -25,7 +25,7 @@ jobs:
       tag: ${{ steps.ver.outputs.tag }}
       tag_exists: ${{ steps.ver.outputs.tag_exists }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: ver
@@ -46,12 +46,12 @@ jobs:
     if: needs.read-version.outputs.tag_exists == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
       - run: just release-check
 
   build:
@@ -71,7 +71,7 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -96,7 +96,7 @@ jobs:
           cd target/${{ matrix.target }}/release
           tar czf "../../../${BIN_NAME}-${{ matrix.target }}.tar.gz" "${BIN_NAME}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.BIN_NAME }}-${{ matrix.target }}
           path: ${{ env.BIN_NAME }}-${{ matrix.target }}.tar.gz
@@ -106,7 +106,7 @@ jobs:
     if: needs.read-version.outputs.tag_exists == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v8
         with:
@@ -124,7 +124,7 @@ jobs:
           git tag ${{ needs.read-version.outputs.tag }}
           git push origin ${{ needs.read-version.outputs.tag }}
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.read-version.outputs.tag }}
           generate_release_notes: true
@@ -137,7 +137,7 @@ jobs:
     if: needs.read-version.outputs.tag_exists == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
