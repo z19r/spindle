@@ -15,15 +15,15 @@ authors = ["Zack Kitzmiller"]
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 toml = "1.1"
 
 # TUI
+ratatui = "0.30"
+ratatui-image = { version = "11.0", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
+
+# Image processing
+image = "0.25"
 ratatui = "0.29"
 ratatui-image = { version = "11.0", default-features = false, features = ["crossterm"] }
 crossterm = "0.28"
@@ -44,13 +44,13 @@ walkdir = "2"
 
 # Error handling
 anyhow = "1"
-thiserror = "2"
+dotenvy = "0.15"
+pdf-extract = "0.10.0"
+zip = "8"
+reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3"
 
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Async utilities
+[dev-dependencies]# Async utilities
 futures = "0.3"
 
 # Text diffing
