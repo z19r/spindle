@@ -76,11 +76,11 @@ infer = "0.16"
 
 # Misc
 directories = "5"
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 dotenvy = "0.15"
 pdf-extract = "0.10.0"
-zip = "2"
+zip = "8"
 tempfile = "3"
 
 [dev-dependencies]
