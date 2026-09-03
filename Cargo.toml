@@ -40,7 +40,7 @@ blake3 = { version = "1", features = ["rayon"] }
 rayon = "1"
 
 # Perceptual image hashing
-image_hasher = "2"
+image_hasher = "3"
 image = "0.25"
 
 # EXIF metadata
