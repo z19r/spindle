@@ -11,15 +11,14 @@ keywords = ["file-organizer", "ai", "content-analysis", "deduplication", "tui"]
 categories = ["command-line-utilities", "filesystem"]
 authors = ["Zack Kitzmiller"]
 
-[dependencies]
-# CLI
-clap = { version = "4", features = ["derive", "env"] }
-
-toml = "1.1"
 
 # TUI
-ratatui = "0.29"
+ratatui = "0.30"
 ratatui-image = { version = "11.0", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
+
+# Image processing
+image = "0.25"ratatui-image = { version = "11.0", default-features = false, features = ["crossterm"] }
 crossterm = "0.28"
 
 # Image processing
