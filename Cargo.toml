@@ -51,7 +51,7 @@ walkdir = "2"
 
 # TUI
 ratatui = "0.30"
-ratatui-image = { version = "7.0", features = ["crossterm"] }
+ratatui-image = { version = "11.0", default-features = false, features = ["image-defaults", "crossterm"] }
 crossterm = "0.29"
 
 # Time
