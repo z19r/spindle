@@ -50,13 +50,13 @@ kamadak-exif = "0.6"
 walkdir = "2"
 
 # Time
-chrono = { version = "0.4", features = ["serde"] }
 
 # Error handling
-anyhow = "1"thiserror = "2"
+anyhow = "1"
+thiserror = "2"
 
 # Logging
-tracing = "0.1"
+tracing = "0.1"tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Async utilities
