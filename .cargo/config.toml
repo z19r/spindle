@@ -2,13 +2,9 @@
 # Set the target directory
 target-dir = "target"
 
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=native"]
-
 [profile.dev]
 # Development profile settings
-opt-level = 0
-debug = true
+opt-level = 0debug = true
 split-debuginfo = "unpacked"
 
 [profile.release]
