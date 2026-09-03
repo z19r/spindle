@@ -4,8 +4,7 @@ target-dir = "target"
 
 [profile.dev]
 # Development profile settings
-opt-level = 0
-debug = true
+opt-level = 0debug = true
 split-debuginfo = "unpacked"
 
 [profile.release]# Release profile settings
