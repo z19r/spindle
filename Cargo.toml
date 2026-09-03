@@ -72,7 +72,7 @@ futures = "0.3"
 similar = "2"
 
 # File type detection (magic bytes)
-infer = "0.16"
+infer = "0.22"
 
 # Misc
 directories = "5"
