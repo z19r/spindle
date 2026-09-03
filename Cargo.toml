@@ -80,7 +80,7 @@ base64 = "0.22"
 hex = "0.4"
 dotenvy = "0.15"
 pdf-extract = "0.10.0"
-zip = "2"
+zip = "8"
 tempfile = "3"
 
 [dev-dependencies]
