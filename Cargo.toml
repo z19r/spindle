@@ -12,13 +12,10 @@ categories = ["command-line-utilities", "filesystem"]
 authors = ["Zack Kitzmiller"]
 
 
+[dependencies]
 # TUI
-ratatui = "0.30"
+ratatui = "0.29"
 ratatui-image = { version = "11.0", default-features = false, features = ["crossterm"] }
-crossterm = "0.29"
-
-# Image processing
-image = "0.25"ratatui-image = { version = "11.0", default-features = false, features = ["crossterm"] }
 crossterm = "0.28"
 
 # Image processing
