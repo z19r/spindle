@@ -70,6 +70,10 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -95,6 +99,11 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           tar czf "../../../${BIN_NAME}-${{ matrix.target }}.tar.gz" "${BIN_NAME}"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ env.BIN_NAME }}-${{ matrix.target }}.tar.gz
 
       - uses: actions/upload-artifact@v7
         with:
