@@ -1,5 +1,7 @@
 # spindle
 
+[![Monitored by Cooper&Wright](https://img.shields.io/badge/monitored%20by-Cooper%26Wright-8a6a3b?style=flat-square)](https://cooperwright.com)
+
 AI-powered file organizer that uses content analysis to intelligently group and sort files.
 
 ## What it does
