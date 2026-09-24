@@ -10,6 +10,20 @@ use crate::model::{
   Area, ContentDescription, FileSummary, ProposedGroup, RoutedFile,
 };
 
+/// The model produced a reply that is syntactically fine but useless:
+/// truncated at max_tokens while looping, or groups with no members.
+/// Callers retry once on this before falling back.
+#[derive(Debug, Clone)]
+pub struct DegenerateReply(pub String);
+
+impl std::fmt::Display for DegenerateReply {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "degenerate model reply: {}", self.0)
+  }
+}
+
+impl std::error::Error for DegenerateReply {}
+
 pub struct DescribeContext {
   pub filename: String,
   pub file_type_label: String,
