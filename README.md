@@ -35,6 +35,12 @@ spindle --no-ledger /path/to/folder
 
 # Use a specific ledger file instead of the global default
 spindle --ledger ./my-ledger.json /path/to/folder
+
+# Print the proposed plan as JSON and exit (no terminal needed)
+spindle --json /path/to/folder > plan.json
+
+# Execute the proposed plan without the review screen (undoable)
+spindle --yes /path/to/folder
 ```
 
 ## Configuration
