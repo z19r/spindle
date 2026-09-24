@@ -43,6 +43,16 @@ pub struct DescribeRequest {
   pub context: DescribeContext,
 }
 
+/// Everything a grouping call may be told besides the files.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GroupingHints<'a> {
+  pub area: Option<&'a Area>,
+  pub existing_labels: &'a [String],
+  pub organized_context: &'a [(String, Vec<ContentDescription>)],
+  /// (old label, new label) pairs the user applied in earlier runs.
+  pub renames: &'a [(String, String)],
+}
+
 pub trait AiProvider: Send + Sync {
   fn describe_image(
     &self,
@@ -124,6 +134,38 @@ pub trait AiProvider: Send + Sync {
       existing_labels,
       organized_context,
     )
+  }
+
+  /// Group with every hint the pipeline has: an optional area, folders
+  /// from earlier runs, sample contents of those folders, and the
+  /// user's past renames. The default drops the renames and dispatches
+  /// to the narrower methods; providers that build prompts override it.
+  fn propose_groups_with_hints(
+    &self,
+    files: &[FileSummary],
+    hints: &GroupingHints<'_>,
+  ) -> impl std::future::Future<Output = Result<Vec<ProposedGroup>>> + Send
+  {
+    async move {
+      if let Some(area) = hints.area {
+        self
+          .propose_groups_in_area(
+            files,
+            area,
+            hints.existing_labels,
+            hints.organized_context,
+          )
+          .await
+      } else {
+        self
+          .propose_groups_with_organized_context(
+            files,
+            hints.existing_labels,
+            hints.organized_context,
+          )
+          .await
+      }
+    }
   }
 
   /// Describe many files in one operation. The default falls back to

@@ -268,6 +268,11 @@ impl ReviewState {
     self.action
   }
 
+  /// Every group as the user left it, including unapproved ones.
+  pub fn groups(&self) -> &[FileGroup] {
+    &self.groups
+  }
+
   pub fn approved_groups(&self) -> Vec<&FileGroup> {
     self
       .groups

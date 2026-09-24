@@ -100,6 +100,11 @@ pub struct CliArgs {
   #[arg(long)]
   pub no_ledger: bool,
 
+  /// Don't read or record review corrections (renames, re-filed files)
+  /// this run.
+  #[arg(long)]
+  pub no_corrections: bool,
+
   /// Path to the organized ledger (defaults to the global data dir).
   #[arg(long)]
   pub ledger: Option<PathBuf>,
@@ -115,6 +120,12 @@ pub struct CliArgs {
 
 /// Resolve the ledger path for this run: `None` when disabled, otherwise the
 /// explicit `--ledger` path or the global default.
+/// `None` when corrections are disabled for this run.
+pub fn resolve_corrections_path(cli: &CliArgs) -> Option<PathBuf> {
+  (!cli.no_corrections)
+    .then(crate::corrections::default_corrections_path)
+}
+
 pub fn resolve_ledger_path(cli: &CliArgs) -> Option<PathBuf> {
   if cli.no_ledger {
     return None;
@@ -415,6 +426,7 @@ mod tests {
       undo_log: None,
       file_types: vec![],
       no_ledger: false,
+      no_corrections: false,
       ledger: None,
       no_organized_context: false,
       no_introspect_archives: false,

@@ -78,6 +78,8 @@ async fn main() -> Result<()> {
   }
 
   let ledger_path = spindle::config::resolve_ledger_path(&cli);
+  let corrections_path =
+    spindle::config::resolve_corrections_path(&cli);
 
   let pipeline_config = PipelineConfig {
     target_dirs: config.general.target_dirs.clone(),
@@ -104,6 +106,7 @@ async fn main() -> Result<()> {
     model: config.ai.model.clone(),
     describe_model: config.ai.describe_model.clone(),
     taxonomy: config.taxonomy.areas.clone(),
+    corrections_path: corrections_path.clone(),
   };
 
   let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(64);
@@ -213,7 +216,65 @@ async fn main() -> Result<()> {
       fingerprinted: &result.fingerprinted,
       groups: &plan.groups,
     });
-  execute_review(&cli, &config, &review_state, recording)
+  let corrections =
+    corrections_path
+      .as_deref()
+      .map(|path| CorrectionsRecording {
+        path,
+        plan,
+        fingerprinted: &result.fingerprinted,
+      });
+  execute_review(&cli, &config, &review_state, recording, corrections)
+}
+
+/// Everything needed to remember what the user changed in the review.
+struct CorrectionsRecording<'a> {
+  path: &'a Path,
+  plan: &'a spindle::model::ReorgPlan,
+  fingerprinted: &'a [FingerprintedFile],
+}
+
+/// Persist renames and re-filed files so the next run proposes them
+/// that way from the start. Failures are logged, never fatal.
+fn record_corrections(
+  recording: &CorrectionsRecording<'_>,
+  review_state: &ReviewState,
+  completed: &[FileMove],
+) {
+  let hash_by_path: HashMap<std::path::PathBuf, String> = recording
+    .fingerprinted
+    .iter()
+    .map(|f| {
+      (
+        f.scanned.path.clone(),
+        spindle::ledger::hash_hex(&f.blake3_hash),
+      )
+    })
+    .collect();
+  let derived = spindle::corrections::derive(
+    recording.plan,
+    review_state.groups(),
+    completed,
+    &hash_by_path,
+  );
+  if derived.renames.is_empty() && derived.placements.is_empty() {
+    return;
+  }
+  let mut corrections =
+    spindle::corrections::Corrections::load(recording.path);
+  corrections.absorb(&derived);
+  match corrections.save(recording.path) {
+    Ok(()) => println!(
+      "Remembered {} rename(s) and {} re-filed file(s) for next time.",
+      derived.renames.len(),
+      derived.placements.len()
+    ),
+    Err(err) => tracing::warn!(
+      path = %recording.path.display(),
+      error = %err,
+      "Failed to save review corrections"
+    ),
+  }
 }
 
 fn print_organized_duplicates(result: &pipeline::PipelineResult) {
@@ -402,7 +463,7 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
   }
 
   // Dedup-only runs don't organize into folders, so nothing is recorded.
-  execute_review(cli, config, &review_state, None)
+  execute_review(cli, config, &review_state, None, None)
 }
 
 fn dupes_to_groups(
@@ -559,6 +620,7 @@ fn execute_review(
   config: &Config,
   review_state: &ReviewState,
   ledger: Option<LedgerRecording<'_>>,
+  corrections: Option<CorrectionsRecording<'_>>,
 ) -> Result<()> {
   let exec_paths = ExecutorPaths::default_paths();
 
@@ -632,6 +694,13 @@ fn execute_review(
 
       if let Some(recording) = ledger {
         record_organized(&recording, &report.moves_completed);
+      }
+      if let Some(recording) = corrections {
+        record_corrections(
+          &recording,
+          review_state,
+          &report.moves_completed,
+        );
       }
     }
     ReviewMode::Dupes => {

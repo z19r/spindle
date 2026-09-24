@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 
-use super::DegenerateReply;
+use super::{DegenerateReply, GroupingHints};
 use crate::model::{
   Area, ContentDescription, FileSummary, ProposedGroup, RoutedFile,
 };
@@ -931,16 +931,38 @@ impl AiProvider for ClaudeProvider {
       Vec<crate::model::ContentDescription>,
     )],
   ) -> Result<Vec<ProposedGroup>> {
-    let user_prompt = format!(
-      "{}{}{}{}",
-      super::group_user_prompt(files),
-      super::group_area_note(area),
-      super::group_organized_context(organized_context),
-      super::group_existing_groups_note(existing_labels),
-    );
     self
-      .send_group_request(user_prompt, GROUP_AREA_MAX_TOKENS)
+      .propose_groups_with_hints(
+        files,
+        &GroupingHints {
+          area: Some(area),
+          existing_labels,
+          organized_context,
+          renames: &[],
+        },
+      )
       .await
+  }
+
+  async fn propose_groups_with_hints(
+    &self,
+    files: &[FileSummary],
+    hints: &GroupingHints<'_>,
+  ) -> Result<Vec<ProposedGroup>> {
+    let user_prompt = format!(
+      "{}{}{}{}{}",
+      super::group_user_prompt(files),
+      hints.area.map(super::group_area_note).unwrap_or_default(),
+      super::group_organized_context(hints.organized_context),
+      super::group_existing_groups_note(hints.existing_labels),
+      super::group_corrections_note(hints.renames),
+    );
+    let budget = if hints.area.is_some() {
+      GROUP_AREA_MAX_TOKENS
+    } else {
+      GROUP_MAX_TOKENS
+    };
+    self.send_group_request(user_prompt, budget).await
   }
 
   async fn propose_groups_with_organized_context(

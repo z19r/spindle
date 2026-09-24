@@ -6,12 +6,13 @@ use anyhow::Result;
 const BYTES_PER_MB: u64 = 1_000_000;
 use tokio::sync::mpsc;
 
-use crate::ai::AiProvider;
+use crate::ai::{AiProvider, GroupingHints};
 use crate::analyze::{
   analyze_batch, group_cache_key, read_cache, read_cached_grouping,
   read_cached_routing, write_cached_grouping, write_cached_routing,
   AnalyzeOptions,
 };
+use crate::corrections::Corrections;
 use crate::cost::estimate_cost;
 use crate::fingerprint::{
   find_exact_duplicates, find_near_duplicates, fingerprint_files,
@@ -111,6 +112,9 @@ pub struct PipelineConfig {
   pub describe_model: String,
   /// Top-level areas for two-stage grouping. Empty = single stage.
   pub taxonomy: Vec<Area>,
+  /// Review corrections (renames, re-filed files) to feed back into
+  /// grouping. `None` disables them.
+  pub corrections_path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -542,11 +546,45 @@ async fn run_ai_pipeline<P: AiProvider>(
     }
   }
 
-  // The taxonomy shapes the result, so it salts the cache key too.
+  // What the user corrected in earlier reviews: renames become label
+  // hints for every file, placements a per-file hint.
+  let corrections = config
+    .corrections_path
+    .as_deref()
+    .map(Corrections::load)
+    .unwrap_or_default();
+  let present_hashes: Vec<String> =
+    index_to_hash.values().cloned().collect();
+  let placements = corrections.placements_for(&present_hashes);
+  if !placements.is_empty() {
+    for summary in &mut summaries {
+      if let Some(label) = index_to_hash
+        .get(&summary.index)
+        .and_then(|hex| placements.get(hex))
+      {
+        summary.metadata_hint = format!("user filed under: {label}");
+      }
+    }
+  }
+  let renames = corrections.renames();
+  let mut existing_labels: Vec<String> = existing_labels.to_vec();
+  for (_, to) in &renames {
+    if !existing_labels.contains(to) {
+      existing_labels.push(to.clone());
+    }
+  }
+  let existing_labels = &existing_labels[..];
+
+  // The taxonomy and corrections shape the result, so they salt the
+  // cache key too.
   let mut cache_salt: Vec<String> = existing_labels.to_vec();
   cache_salt.extend(
     config.taxonomy.iter().map(|a| format!("area:{}", a.name)),
   );
+  cache_salt.push(format!(
+    "corrections:{}",
+    corrections.cache_salt(&present_hashes)
+  ));
   let cache_key = group_cache_key(&summary_hashes, &cache_salt);
   if let Some(groups) = read_cached_grouping(
     &config.cache_dir,
@@ -571,6 +609,7 @@ async fn run_ai_pipeline<P: AiProvider>(
     summary_hashes: &summary_hashes,
     hash_to_indices: &hash_to_indices,
     index_to_hash: &index_to_hash,
+    renames: &renames,
   };
   let groups = match propose_groups_two_stage(
     provider,
@@ -716,33 +755,20 @@ async fn propose_once<P: AiProvider>(
   existing_labels: &[String],
   organized_context: &[(String, Vec<ContentDescription>)],
   area: Option<&Area>,
+  renames: &[(String, String)],
 ) -> Result<Vec<ProposedGroup>> {
+  let hints = GroupingHints {
+    area,
+    existing_labels,
+    organized_context,
+    renames,
+  };
   // A garbled response can parse as groups with no members. Treat
   // "placed nothing" as a failed call and try once more before giving
   // up, so one bad generation doesn't unsort the whole run.
   for attempt in 0..2 {
-    let outcome = if let Some(area) = area {
-      provider
-        .propose_groups_in_area(
-          summaries,
-          area,
-          existing_labels,
-          organized_context,
-        )
-        .await
-    } else if organized_context.is_empty() {
-      provider
-        .propose_groups_with_context(summaries, existing_labels)
-        .await
-    } else {
-      provider
-        .propose_groups_with_organized_context(
-          summaries,
-          existing_labels,
-          organized_context,
-        )
-        .await
-    };
+    let outcome =
+      provider.propose_groups_with_hints(summaries, &hints).await;
     let groups = match outcome {
       Ok(groups) => groups,
       Err(err)
@@ -788,6 +814,7 @@ async fn propose_groups_batched<P: AiProvider>(
   existing_labels: &[String],
   organized_context: &[(String, Vec<ContentDescription>)],
   area: Option<&Area>,
+  renames: &[(String, String)],
 ) -> Result<Vec<ProposedGroup>> {
   if summaries.len() <= MAX_GROUPING_BATCH {
     return propose_once(
@@ -796,6 +823,7 @@ async fn propose_groups_batched<P: AiProvider>(
       existing_labels,
       organized_context,
       area,
+      renames,
     )
     .await;
   }
@@ -812,9 +840,15 @@ async fn propose_groups_batched<P: AiProvider>(
   let mut merged: HashMap<String, ProposedGroup> = HashMap::new();
 
   for chunk in ordered.chunks(MAX_GROUPING_BATCH) {
-    let groups =
-      propose_once(provider, chunk, &labels, organized_context, area)
-        .await?;
+    let groups = propose_once(
+      provider,
+      chunk,
+      &labels,
+      organized_context,
+      area,
+      renames,
+    )
+    .await?;
     for group in groups {
       if !labels.contains(&group.label) {
         labels.push(group.label.clone());
@@ -853,6 +887,7 @@ struct TwoStage<'a> {
   summary_hashes: &'a [[u8; 32]],
   hash_to_indices: &'a HashMap<String, Vec<usize>>,
   index_to_hash: &'a HashMap<usize, String>,
+  renames: &'a [(String, String)],
 }
 
 /// Stage one routes every file to a configured area (cached by content
@@ -874,6 +909,7 @@ async fn propose_groups_two_stage<P: AiProvider>(
       existing_labels,
       organized_context,
       None,
+      stage.renames,
     )
     .await;
   }
@@ -917,6 +953,7 @@ async fn propose_groups_two_stage<P: AiProvider>(
           existing_labels,
           organized_context,
           None,
+          stage.renames,
         )
         .await;
       }
@@ -971,6 +1008,7 @@ async fn propose_groups_two_stage<P: AiProvider>(
       &labels,
       organized_context,
       Some(area),
+      stage.renames,
     )
     .await?;
     for mut group in groups {
@@ -988,6 +1026,7 @@ async fn propose_groups_two_stage<P: AiProvider>(
       &labels,
       organized_context,
       None,
+      stage.renames,
     )
     .await?;
     all.extend(groups);
@@ -1223,6 +1262,7 @@ mod tests {
       &[],
       &[],
       None,
+      &[],
     )
     .await
     .unwrap();
@@ -1269,6 +1309,7 @@ mod tests {
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
       taxonomy: vec![],
+      corrections_path: None,
     };
 
     // First run populates both the description and grouping caches.
@@ -1320,6 +1361,7 @@ mod tests {
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
       taxonomy: crate::model::default_areas(),
+      corrections_path: None,
     }
   }
 
@@ -1563,6 +1605,7 @@ mod tests {
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
       taxonomy: vec![],
+      corrections_path: None,
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -1621,6 +1664,7 @@ mod tests {
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
       taxonomy: vec![],
+      corrections_path: None,
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -2461,6 +2505,134 @@ mod tests {
     );
   }
 
+  /// Per call: the renames passed and "filename|metadata_hint" per file.
+  type SeenHints = Vec<(Vec<(String, String)>, Vec<String>)>;
+
+  /// Records the hints every grouping call receives.
+  struct HintRecordingProvider {
+    seen: std::sync::Mutex<SeenHints>,
+  }
+
+  impl AiProvider for HintRecordingProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      context: &DescribeContext,
+    ) -> anyhow::Result<ContentDescription> {
+      Ok(ContentDescription {
+        summary: format!("Description of {}", context.filename),
+        tags: vec![],
+        suggested_category: "photo".to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      })
+    }
+
+    async fn propose_groups(
+      &self,
+      _files: &[FileSummary],
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      unreachable!("with_hints is overridden")
+    }
+
+    async fn propose_groups_with_hints(
+      &self,
+      files: &[FileSummary],
+      hints: &GroupingHints<'_>,
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      self.seen.lock().unwrap().push((
+        hints.renames.to_vec(),
+        files
+          .iter()
+          .map(|f| format!("{}|{}", f.filename, f.metadata_hint))
+          .collect(),
+      ));
+      Ok(vec![ProposedGroup {
+        label: "Everything".to_string(),
+        rationale: String::new(),
+        member_indices: files.iter().map(|f| f.index).collect(),
+        member_destinations: vec![],
+        member_notes: vec![],
+      }])
+    }
+  }
+
+  #[tokio::test]
+  async fn corrections_reach_the_grouping_call_and_bust_the_cache() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let corrections_path = output.path().join("corrections.json");
+    let other_hex = crate::ledger::hash_hex(
+      &crate::fingerprint::compute_blake3(
+        &source.path().join("other.png"),
+      )
+      .unwrap(),
+    );
+    let mut c = crate::corrections::Corrections::default();
+    c.record_rename("Photos/Pets", "Personal/Pets/Biscuit");
+    c.record_placement(&other_hex, "Work/Acme");
+    c.save(&corrections_path).unwrap();
+
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+    config.taxonomy = vec![];
+    config.corrections_path = Some(corrections_path.clone());
+
+    let provider = HintRecordingProvider {
+      seen: Default::default(),
+    };
+    let (tx, _rx) = mpsc::channel(64);
+    run(&provider, &config, tx).await.unwrap();
+
+    let seen = provider.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    let (renames, files) = &seen[0];
+    assert_eq!(
+      renames,
+      &vec![(
+        "Photos/Pets".to_string(),
+        "Personal/Pets/Biscuit".to_string()
+      )]
+    );
+    assert!(
+      files.contains(
+        &"other.png|user filed under: Work/Acme".to_string()
+      ),
+      "{files:?}"
+    );
+    assert!(files.iter().any(|f| f == "keep_a.png|"), "{files:?}");
+
+    // Same run again: served from the grouping cache, no call.
+    let provider2 = HintRecordingProvider {
+      seen: Default::default(),
+    };
+    let (tx, _rx) = mpsc::channel(64);
+    run(&provider2, &config, tx).await.unwrap();
+    assert!(provider2.seen.lock().unwrap().is_empty());
+
+    // A new correction must invalidate that cache.
+    c.record_placement(&other_hex, "Personal/Recipes");
+    c.save(&corrections_path).unwrap();
+    let provider3 = HintRecordingProvider {
+      seen: Default::default(),
+    };
+    let (tx, _rx) = mpsc::channel(64);
+    run(&provider3, &config, tx).await.unwrap();
+    let seen = provider3.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].1.contains(
+      &"other.png|user filed under: Personal/Recipes".to_string()
+    ));
+  }
+
   #[test]
   fn quarantine_ignores_non_ai_descriptions() {
     let mut fallback = summary(1, 0.5);
@@ -2644,6 +2816,7 @@ mod tests {
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
       taxonomy: vec![],
+      corrections_path: None,
     };
 
     let (tx, _rx) = mpsc::channel(64);
@@ -2691,6 +2864,7 @@ mod tests {
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
       taxonomy: vec![],
+      corrections_path: None,
     };
 
     let (tx, _rx) = mpsc::channel(64);
@@ -2734,6 +2908,7 @@ mod tests {
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
       taxonomy: vec![],
+      corrections_path: None,
     };
 
     let (tx, mut rx) = mpsc::channel(64);
