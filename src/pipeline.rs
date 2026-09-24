@@ -537,7 +537,7 @@ async fn run_ai_pipeline<P: AiProvider>(
           "Semantic grouping failed ({err:#}), \
            falling back to single group"
         ),
-        member_indices: (0..summaries.len()).collect(),
+        member_indices: summaries.iter().map(|s| s.index).collect(),
         member_destinations: vec![],
       }])
     }
@@ -1234,6 +1234,94 @@ mod tests {
     assert!(events
       .iter()
       .any(|e| matches!(e, PipelineEvent::GroupingComplete { .. })));
+  }
+
+  /// Describes every file except `skip` and always fails grouping,
+  /// so the fallback group must map summary positions back to real
+  /// file indices.
+  struct SkipOneNoGroupProvider {
+    skip: String,
+  }
+
+  impl AiProvider for SkipOneNoGroupProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      context: &DescribeContext,
+    ) -> anyhow::Result<ContentDescription> {
+      if context.filename == self.skip {
+        anyhow::bail!("simulated analysis failure");
+      }
+      Ok(ContentDescription {
+        summary: format!("Description of {}", context.filename),
+        tags: vec![],
+        suggested_category: "photo".to_string(),
+        confidence: 0.9,
+      })
+    }
+
+    async fn propose_groups(
+      &self,
+      _files: &[FileSummary],
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      anyhow::bail!("simulated grouping failure")
+    }
+  }
+
+  #[tokio::test]
+  async fn grouping_fallback_uses_file_indices_not_summary_positions()
+  {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    for (name, rgb) in [
+      ("a.png", (255, 0, 0)),
+      ("b.png", (0, 255, 0)),
+      ("c.png", (0, 0, 255)),
+    ] {
+      fs::write(
+        source.path().join(name),
+        create_test_png(rgb.0, rgb.1, rgb.2),
+      )
+      .unwrap();
+    }
+    // Fail whichever file the scanner yields first, so every summary
+    // position is offset by one from its file index.
+    let first = crate::scanner::scan_directory(source.path())
+      .unwrap()[0]
+      .path
+      .file_name()
+      .unwrap()
+      .to_string_lossy()
+      .to_string();
+    let provider = SkipOneNoGroupProvider {
+      skip: first.clone(),
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    let analyzed: Vec<usize> = result
+      .fingerprinted
+      .iter()
+      .enumerate()
+      .filter(|(_, f)| {
+        f.scanned.path.file_name().unwrap().to_string_lossy() != first
+      })
+      .map(|(i, _)| i)
+      .collect();
+    assert_eq!(result.plan.groups.len(), 1);
+    let mut members = result.plan.groups[0].members.clone();
+    members.sort_unstable();
+    assert_eq!(members, analyzed);
   }
 
   #[tokio::test]
