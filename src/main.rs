@@ -187,7 +187,7 @@ async fn main() -> Result<()> {
 
   if cli.json {
     drop(session);
-    println!("{}", plan_json(&result)?);
+    println!("{}", plan_json(&result, &usage)?);
     return Ok(());
   }
 
@@ -313,7 +313,26 @@ fn record_corrections(
 /// The plan as JSON for scripts: groups with their labels, members and
 /// notes, every move, duplicate sets, stats, and already-organized
 /// copies. Paths are absolute.
-fn plan_json(result: &pipeline::PipelineResult) -> Result<String> {
+fn plan_json(
+  result: &pipeline::PipelineResult,
+  usage: &[(String, spindle::ai::Usage)],
+) -> Result<String> {
+  let (usd, calls, input_tokens, output_tokens) =
+    spindle::cost::spend_summary(usage);
+  let spend = serde_json::json!({
+    "usd": usd,
+    "calls": calls,
+    "input_tokens": input_tokens,
+    "output_tokens": output_tokens,
+    "by_model": usage.iter().map(|(m, u)| serde_json::json!({
+      "model": m,
+      "calls": u.calls,
+      "input_tokens": u.input_tokens,
+      "cache_read_tokens": u.cache_read_tokens,
+      "output_tokens": u.output_tokens,
+      "usd": spindle::cost::cost_usd(m, u),
+    })).collect::<Vec<_>>(),
+  });
   let organized_duplicates: Vec<serde_json::Value> = result
     .organized_duplicates
     .iter()
@@ -342,6 +361,7 @@ fn plan_json(result: &pipeline::PipelineResult) -> Result<String> {
     "plan": result.plan,
     "files": files,
     "organized_duplicates": organized_duplicates,
+    "spend": spend,
   });
   serde_json::to_string_pretty(&value)
     .context("Failed to encode plan")
