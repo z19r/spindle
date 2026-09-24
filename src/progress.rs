@@ -279,6 +279,12 @@ impl PipelineProgress {
       PipelineEvent::GroupingComplete { group_count, .. } => {
         tracing::info!(group_count, "Semantic grouping complete");
       }
+      PipelineEvent::RoutingComplete {
+        areas_used,
+        unrouted,
+      } => {
+        tracing::info!(areas_used, unrouted, "Routing complete");
+      }
       PipelineEvent::LabelsNormalised {
         merged,
         collapsed,

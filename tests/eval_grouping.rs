@@ -124,6 +124,7 @@ async fn grouping_quality_meets_floor() {
     ledger_path: None,
     model: ai.model,
     describe_model: ai.describe_model,
+    taxonomy: spindle::model::default_areas(),
   };
 
   let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(64);

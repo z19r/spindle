@@ -42,19 +42,12 @@ pub(crate) fn decode_image(
 }
 
 impl ReviewState {
-  #[allow(clippy::type_complexity)]
   pub fn new(
     groups: Vec<FileGroup>,
     moves: Vec<FileMove>,
     output_dir: PathBuf,
     picker: Option<Picker>,
     mode: ReviewMode,
-    other_mode: Option<(
-      Vec<FileGroup>,
-      Vec<FileMove>,
-      ReviewMode,
-      Vec<DuplicateType>,
-    )>,
   ) -> Self {
     // Notes are keyed by fingerprinted index; moves line up with
     // `members` in order, so pair them positionally once, by path.
@@ -110,31 +103,6 @@ impl ReviewState {
     let file_keep: Vec<Vec<bool>> =
       Self::init_file_keep(&group_moves, mode);
 
-    let other_mode_data =
-      other_mode.map(|(og, om, omode, odupe_types)| {
-        let other_group_moves: Vec<Vec<FileMove>> = og
-          .iter()
-          .map(|g| {
-            om.iter()
-              .filter(|m| m.group_id == g.id)
-              .cloned()
-              .collect()
-          })
-          .collect();
-        let other_approved = vec![true; og.len()];
-        let other_file_keep =
-          Self::init_file_keep(&other_group_moves, omode);
-        let other_file_marked = vec![HashSet::new(); og.len()];
-        ModeData {
-          groups: og,
-          group_moves: other_group_moves,
-          approved: other_approved,
-          file_keep: other_file_keep,
-          file_marked: other_file_marked,
-          dupe_types: odupe_types,
-        }
-      });
-
     let mut state = Self {
       groups,
       approved,
@@ -153,14 +121,25 @@ impl ReviewState {
       file_keep,
       file_marked: vec![HashSet::new(); len],
       review_mode: mode,
-      other_mode_data,
       file_metadata: HashMap::new(),
+      dupe_info: HashMap::new(),
       dupe_types: Vec::new(),
       diff_state: None,
       file_notes,
+      banner: None,
     };
     state.update_image_preview();
     state
+  }
+
+  /// Show a one-line summary of the run in the header.
+  pub fn with_banner(mut self, text: impl Into<String>) -> Self {
+    self.banner = Some(text.into());
+    self
+  }
+
+  pub fn banner(&self) -> Option<&str> {
+    self.banner.as_deref()
   }
 
   /// Why the pipeline put this file where it did, if it said.
@@ -201,8 +180,64 @@ impl ReviewState {
       .collect()
   }
 
-  pub fn can_swap_mode(&self) -> bool {
-    self.other_mode_data.is_some()
+  /// Attach duplicate relationships so the organize screen can badge
+  /// files and diff them. Byte-identical copies start marked for
+  /// deletion; near/similar matches stay kept until the user decides.
+  pub fn with_duplicates(
+    mut self,
+    dupes: &[DuplicateSet],
+    files: &[FingerprintedFile],
+  ) -> Self {
+    for set in dupes {
+      let Some(canonical) = files.get(set.canonical) else {
+        continue;
+      };
+      let canonical_path = canonical.scanned.path.clone();
+      let mut first_dup: Option<PathBuf> = None;
+      for &dup_idx in &set.duplicates {
+        let Some(dup) = files.get(dup_idx) else {
+          continue;
+        };
+        let path = dup.scanned.path.clone();
+        first_dup.get_or_insert_with(|| path.clone());
+        self.dupe_info.insert(
+          path.clone(),
+          DupeInfo {
+            kind: set.duplicate_type,
+            partner: canonical_path.clone(),
+            is_canonical: false,
+          },
+        );
+        if set.duplicate_type == DuplicateType::Exact {
+          self.set_keep_by_path(&path, false);
+        }
+      }
+      if let Some(partner) = first_dup {
+        self.dupe_info.insert(
+          canonical_path,
+          DupeInfo {
+            kind: set.duplicate_type,
+            partner,
+            is_canonical: true,
+          },
+        );
+      }
+    }
+    self
+  }
+
+  pub fn dupe_info(&self, path: &Path) -> Option<&DupeInfo> {
+    self.dupe_info.get(path)
+  }
+
+  fn set_keep_by_path(&mut self, path: &Path, keep: bool) {
+    for (gi, moves) in self.group_moves.iter().enumerate() {
+      if let Some(fi) = moves.iter().position(|m| m.from == path) {
+        if let Some(k) = self.file_keep[gi].get_mut(fi) {
+          *k = keep;
+        }
+      }
+    }
   }
 
   pub fn selected_index(&self) -> usize {
@@ -243,13 +278,21 @@ impl ReviewState {
       .collect()
   }
 
+  /// Moves that will run: approved groups, files not marked for
+  /// deletion.
   pub fn approved_moves(&self) -> Vec<FileMove> {
     self
       .groups
       .iter()
       .enumerate()
       .filter(|(i, _)| self.approved[*i])
-      .flat_map(|(i, _)| self.group_moves[i].iter().cloned())
+      .flat_map(|(gi, _)| {
+        self.group_moves[gi]
+          .iter()
+          .enumerate()
+          .filter(move |(fi, _)| self.is_file_kept(gi, *fi))
+          .map(|(_, m)| m.clone())
+      })
       .collect()
   }
 
@@ -359,8 +402,10 @@ impl ReviewState {
       return;
     };
     if current {
+      // A duplicate set must keep at least one copy; an organize
+      // group may delete anything.
       let kept_count = keeps.iter().filter(|&&k| k).count();
-      if kept_count > 1 {
+      if self.review_mode == ReviewMode::Organize || kept_count > 1 {
         keeps[fi] = false;
       }
     } else {
@@ -379,7 +424,33 @@ impl ReviewState {
       Some(m) => m.from.clone(),
       None => return,
     };
+    self.enter_diff_paths(primary_path, secondary_path);
+  }
 
+  /// Organize mode: diff the current file against its duplicate
+  /// partner, wherever that partner sits.
+  pub(crate) fn enter_dupe_diff(&mut self) {
+    let Some(mv) = self.current_file_move() else {
+      return;
+    };
+    let path = mv.from.clone();
+    let Some(info) = self.dupe_info.get(&path).cloned() else {
+      return;
+    };
+    let (primary, secondary) = if info.is_canonical {
+      (path, info.partner)
+    } else {
+      (info.partner, path)
+    };
+    self.mode = Mode::DiffView { compare_idx: 0 };
+    self.enter_diff_paths(primary, secondary);
+  }
+
+  pub(crate) fn enter_diff_paths(
+    &mut self,
+    primary_path: PathBuf,
+    secondary_path: PathBuf,
+  ) {
     let primary_ext = primary_path
       .extension()
       .and_then(|e| e.to_str())

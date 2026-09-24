@@ -33,6 +33,13 @@ pub(crate) fn render_header(
       .alignment(Alignment::Right),
     )
     .border_style(Style::default().fg(theme::BORDER_PURPLE));
+  let block = match state.banner() {
+    Some(text) => block.title_bottom(
+      Line::from(Span::styled(format!(" {text} "), theme::dim()))
+        .alignment(Alignment::Center),
+    ),
+    None => block,
+  };
 
   frame.render_widget(block, area);
 }

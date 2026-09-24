@@ -46,6 +46,27 @@ pub(crate) fn render_confirm_execute_modal(
           theme::dim(),
         )));
       }
+      let deletions = state.files_to_delete();
+      if !deletions.is_empty() {
+        let bytes: u64 = deletions
+          .iter()
+          .filter_map(|p| state.file_metadata.get(p))
+          .map(|(_, size)| *size)
+          .sum();
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+          Span::styled("  Stage ", theme::normal()),
+          Span::styled(
+            format!("{}", deletions.len()),
+            Style::default()
+              .fg(theme::BRIGHT_YELLOW)
+              .add_modifier(Modifier::BOLD),
+          ),
+          Span::styled(" files to trash (", theme::normal()),
+          Span::styled(format_size(bytes), theme::value()),
+          Span::styled("), undoable.", theme::normal()),
+        ]));
+      }
     }
     ReviewMode::Dupes => {
       let deletions = state.files_to_delete();
@@ -119,47 +140,16 @@ pub(crate) fn render_help_modal(
     lines.push(Line::from(""));
   };
 
-  section(
-    "NAVIGATE",
-    &[
-      ("j/k \u{2191}\u{2193}", "move up/down"),
-      ("tab", "switch pane (groups \u{2194} files)"),
-      ("s", "switch organize \u{2194} dupes mode"),
-    ],
-    &mut lines,
-  );
-  match state.review_mode {
-    ReviewMode::Organize => section(
-      "ORGANIZE",
-      &[
-        ("space", "toggle group approval / preview file"),
-        ("enter", "mark file (multi-select)"),
-        ("m", "move file(s) to another group"),
-        ("n", "move file(s) to a new group"),
-        ("d", "remove file(s) from the plan"),
-        ("r", "rename the current group"),
-        ("M", "merge the current group into another"),
-      ],
-      &mut lines,
-    ),
-    ReviewMode::Dupes => section(
-      "DUPES",
-      &[
-        ("space", "toggle keep/delete on a file"),
-        ("d", "side-by-side diff of the set"),
-      ],
-      &mut lines,
-    ),
-  }
-  section(
-    "ACT",
-    &[
-      ("x", "execute (with confirmation)"),
-      ("q", "quit without changes"),
-      ("?", "this help"),
-    ],
-    &mut lines,
-  );
+  section("KEYS", &key_table(state.review_mode, None), &mut lines);
+  lines.push(Line::from(Span::styled(
+    "  Space always toggles the item under the cursor; Enter always opens it.",
+    theme::dim(),
+  )));
+  lines.push(Line::from(Span::styled(
+    "  Deleted files are staged to trash and undoable with 'spindle --undo'.",
+    theme::dim(),
+  )));
+  lines.push(Line::from(""));
 
   let block = Block::bordered()
     .border_type(BorderType::Rounded)

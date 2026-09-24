@@ -2,13 +2,27 @@ use anyhow::{Context, Result};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{ContentDescription, FileSummary, ProposedGroup};
+use crate::model::{
+  Area, ContentDescription, FileSummary, ProposedGroup, RoutedFile,
+};
 
 use super::{
   AiProvider, DescribeContext, DescribePayload, DescribeRequest,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+
+/// Upper bound on one API call. Grouping replies can legitimately take
+/// a minute or two; anything beyond this is a stall worth retrying.
+const DEFAULT_REQUEST_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(300);
+
+fn http_client(timeout: std::time::Duration) -> Client {
+  Client::builder()
+    .timeout(timeout)
+    .build()
+    .unwrap_or_else(|_| Client::new())
+}
 
 pub struct ClaudeProvider {
   client: Client,
@@ -107,6 +121,38 @@ fn describe_output_config() -> serde_json::Value {
         "required": [
           "summary", "tags", "suggested_category", "confidence"
         ],
+        "additionalProperties": false
+      }
+    }
+  })
+}
+
+/// `output_config.format` payload for routing: `area` is an enum of the
+/// configured names, so the model cannot invent one.
+fn route_output_config(areas: &[Area]) -> serde_json::Value {
+  let names: Vec<&str> =
+    areas.iter().map(|a| a.name.as_str()).collect();
+  serde_json::json!({
+    "format": {
+      "type": "json_schema",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "assignments": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {"type": "integer"},
+                "area": {"type": "string", "enum": names}
+              },
+              "required": ["index", "area"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["assignments"],
         "additionalProperties": false
       }
     }
@@ -235,7 +281,7 @@ impl ClaudeProvider {
   ) -> Self {
     let model = model.into();
     Self {
-      client: Client::new(),
+      client: http_client(DEFAULT_REQUEST_TIMEOUT),
       api_key: api_key.into(),
       describe_model: model.clone(),
       model,
@@ -260,6 +306,14 @@ impl ClaudeProvider {
   ) -> Self {
     let mut this = self;
     this.poll_interval = interval;
+    this
+  }
+
+  /// Give up on a single API call after `timeout`; the call is then
+  /// retried like any other transport error.
+  pub fn with_timeout(self, timeout: std::time::Duration) -> Self {
+    let mut this = self;
+    this.client = http_client(timeout);
     this
   }
 
@@ -354,6 +408,49 @@ impl ClaudeProvider {
     Err(last_err.unwrap_or_else(|| {
       anyhow::anyhow!("All retry attempts exhausted")
     }))
+  }
+
+  /// One grouping call: cached system prompt, schema-constrained
+  /// reply, member indices derived from destinations.
+  async fn send_group_request(
+    &self,
+    user_prompt: String,
+  ) -> Result<Vec<ProposedGroup>> {
+    let request = cached_api_request(
+      self.model.clone(),
+      32_768,
+      Some(vec![cached_system_block(super::group_system_prompt())]),
+      vec![Message {
+        role: "user",
+        content: vec![ContentBlock::Text {
+          text: user_prompt,
+          cache_control: None,
+        }],
+      }],
+      Some(group_output_config()),
+    );
+
+    tracing::debug!(
+      prompt = %preview(&request_prompt_text(&request), 6000),
+      "Grouping prompt"
+    );
+    let text = self.send_request(request).await?;
+    tracing::debug!(raw = %preview(&text, 6000), "Grouping reply");
+
+    #[derive(Deserialize)]
+    struct GroupResponse {
+      groups: Vec<ProposedGroup>,
+    }
+
+    let response: GroupResponse = serde_json::from_str(&text)
+      .with_context(|| {
+        format!(
+          "Failed to parse groups JSON from Claude. Raw response:\n{}",
+          preview(&text, 500)
+        )
+      })?;
+
+    Ok(finish_groups(response.groups, &text))
   }
 
   /// Build the Messages API request for a describe payload — shared
@@ -776,46 +873,63 @@ impl AiProvider for ClaudeProvider {
       super::group_user_prompt(files),
       super::group_existing_groups_note(existing_labels),
     );
+    self.send_group_request(user_prompt).await
+  }
+
+  async fn route_files(
+    &self,
+    files: &[FileSummary],
+    areas: &[Area],
+  ) -> Result<Vec<RoutedFile>> {
     let request = cached_api_request(
-      self.model.clone(),
-      32_768,
-      Some(vec![cached_system_block(super::group_system_prompt())]),
+      self.describe_model.clone(),
+      8_192,
+      Some(vec![cached_system_block(super::route_system_prompt(
+        areas,
+      ))]),
       vec![Message {
         role: "user",
         content: vec![ContentBlock::Text {
-          text: user_prompt,
+          text: super::route_user_prompt(files),
           cache_control: None,
         }],
       }],
-      Some(group_output_config()),
-    );
-
-    tracing::debug!(
-      prompt = %preview(&request_prompt_text(&request), 6000),
-      "Grouping prompt"
+      Some(route_output_config(areas)),
     );
     let text = self.send_request(request).await?;
-    tracing::debug!(raw = %preview(&text, 6000), "Grouping reply");
 
     #[derive(Deserialize)]
-    struct GroupResponse {
-      groups: Vec<ProposedGroup>,
+    struct RouteResponse {
+      assignments: Vec<RoutedFile>,
     }
-
-    let response: GroupResponse = serde_json::from_str(&text)
-      .with_context(|| {
-        let preview = if text.len() > 500 {
-          format!("{}...(truncated, {} bytes total)", &text[..500], text.len())
-        } else {
-          text.clone()
-        };
+    let response: RouteResponse =
+      serde_json::from_str(&text).with_context(|| {
         format!(
-          "Failed to parse groups JSON from Claude. Raw response:\n{}",
-          preview
+          "Failed to parse routing JSON from Claude. Raw response:\n{}",
+          preview(&text, 500)
         )
       })?;
+    Ok(response.assignments)
+  }
 
-    Ok(finish_groups(response.groups, &text))
+  async fn propose_groups_in_area(
+    &self,
+    files: &[FileSummary],
+    area: &Area,
+    existing_labels: &[String],
+    organized_context: &[(
+      String,
+      Vec<crate::model::ContentDescription>,
+    )],
+  ) -> Result<Vec<ProposedGroup>> {
+    let user_prompt = format!(
+      "{}{}{}{}",
+      super::group_user_prompt(files),
+      super::group_area_note(area),
+      super::group_organized_context(organized_context),
+      super::group_existing_groups_note(existing_labels),
+    );
+    self.send_group_request(user_prompt).await
   }
 
   async fn propose_groups_with_organized_context(
@@ -832,57 +946,13 @@ impl AiProvider for ClaudeProvider {
         .propose_groups_with_context(files, existing_labels)
         .await;
     }
-
     let user_prompt = format!(
       "{}{}{}",
       super::group_user_prompt(files),
       super::group_organized_context(organized_context),
       super::group_existing_groups_note(existing_labels),
     );
-    let request = cached_api_request(
-      self.model.clone(),
-      32_768,
-      Some(vec![cached_system_block(super::group_system_prompt())]),
-      vec![Message {
-        role: "user",
-        content: vec![ContentBlock::Text {
-          text: user_prompt,
-          cache_control: None,
-        }],
-      }],
-      Some(group_output_config()),
-    );
-
-    tracing::debug!(
-      prompt = %preview(&request_prompt_text(&request), 6000),
-      "Grouping prompt"
-    );
-    let text = self.send_request(request).await?;
-    tracing::debug!(raw = %preview(&text, 6000), "Grouping reply");
-
-    #[derive(Deserialize)]
-    struct GroupResponse {
-      groups: Vec<ProposedGroup>,
-    }
-
-    let response: GroupResponse = serde_json::from_str(&text)
-      .with_context(|| {
-        let preview = if text.len() > 500 {
-          format!(
-            "{}...(truncated, {} bytes total)",
-            &text[..500],
-            text.len()
-          )
-        } else {
-          text.clone()
-        };
-        format!(
-          "Failed to parse groups JSON from Claude. Raw response:\n{}",
-          preview
-        )
-      })?;
-
-    Ok(finish_groups(response.groups, &text))
+    self.send_group_request(user_prompt).await
   }
 }
 
@@ -893,6 +963,33 @@ mod tests {
 
   /// The grammar must forbid a group with no members and a reply with
   /// no groups: both parsed fine yet placed nothing in real runs.
+  #[test]
+  fn route_schema_constrains_area_to_the_configured_names() {
+    let areas = vec![
+      crate::model::Area::new("Work", "jobs"),
+      crate::model::Area::new("Personal", "life"),
+    ];
+    let cfg = route_output_config(&areas);
+    let assignments =
+      &cfg["format"]["schema"]["properties"]["assignments"];
+    assert_eq!(assignments["minItems"], 1);
+    assert_eq!(
+      assignments["items"]["properties"]["area"]["enum"],
+      serde_json::json!(["Work", "Personal"])
+    );
+  }
+
+  #[test]
+  fn group_schema_requires_at_least_one_group_and_member() {
+    let cfg = group_output_config();
+    let groups = &cfg["format"]["schema"]["properties"]["groups"];
+    assert_eq!(groups["minItems"], 1);
+    assert_eq!(
+      groups["items"]["properties"]["members"]["minItems"],
+      1
+    );
+  }
+
   #[test]
   fn request_prompt_text_keeps_text_blocks_only() {
     let request = cached_api_request(
@@ -924,17 +1021,6 @@ mod tests {
   }
 
   #[test]
-  fn group_schema_requires_at_least_one_group_and_member() {
-    let cfg = group_output_config();
-    let groups = &cfg["format"]["schema"]["properties"]["groups"];
-    assert_eq!(groups["minItems"], 1);
-    assert_eq!(
-      groups["items"]["properties"]["members"]["minItems"],
-      1
-    );
-  }
-
-  #[test]
   fn api_request_serializes_prompt_caching_fields() {
     let request = cached_api_request(
       "claude-sonnet-4-6".to_string(),
@@ -960,6 +1046,54 @@ mod tests {
 
   use wiremock::matchers::{header, method, path};
   use wiremock::{Mock, MockServer, ResponseTemplate};
+
+  /// A stalled API reply must not hang the run: the request times out,
+  /// is retried like any transport error, and finally fails loudly.
+  #[tokio::test]
+  async fn stalled_response_times_out_and_is_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+      .and(path("/v1/messages"))
+      .respond_with(
+        ResponseTemplate::new(200)
+          .set_delay(std::time::Duration::from_millis(400))
+          .set_body_json(serde_json::json!({"content": []})),
+      )
+      .expect(2)
+      .mount(&server)
+      .await;
+
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-sonnet-4-6".to_string(),
+      1,
+    )
+    .with_base_url(server.uri())
+    .with_timeout(std::time::Duration::from_millis(50));
+
+    let ctx = DescribeContext {
+      filename: "red.png".to_string(),
+      file_type_label: "PNG".to_string(),
+      file_size: 100,
+      metadata_hint: None,
+    };
+    let started = std::time::Instant::now();
+    let err = provider
+      .describe_image(&[0xFF, 0x00, 0x00], "image/png", &ctx)
+      .await
+      .unwrap_err();
+
+    assert!(
+      format!("{err:#}").to_lowercase().contains("timed out")
+        || format!("{err:#}").to_lowercase().contains("timeout"),
+      "{err:#}"
+    );
+    // Two attempts of 50 ms plus one 1 s backoff, never the 800 ms of
+    // two full stalled replies plus backoff.
+    assert!(
+      started.elapsed() < std::time::Duration::from_millis(1800)
+    );
+  }
 
   #[tokio::test]
   async fn describe_image_sends_correct_headers() {
