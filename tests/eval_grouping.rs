@@ -1,10 +1,9 @@
 //! Grouping-quality eval against the real Claude API.
 //!
-//! Ignored by default. Run with `just eval` (sets `SPINDLE_EVAL=1` and
-//! pins `ANTHROPIC_BASE_URL` to the real API). Needs `ANTHROPIC_API_KEY`,
-//! or `ANTHROPIC_BASE_URL` pointing at a proxy that injects the key.
-//! A rewriting proxy can garble the grouping request, so measure the
-//! model directly and use `just eval-via-proxy` only to test the proxy. Per-file descriptions are cached under
+//! Ignored by default. Run with `just eval` (sets `SPINDLE_EVAL=1`); it
+//! follows your `ANTHROPIC_*` environment, proxy included. Needs
+//! `ANTHROPIC_API_KEY`, or `ANTHROPIC_BASE_URL` pointing at a proxy that
+//! injects the key. `just eval-direct` pins the real API instead. Per-file descriptions are cached under
 //! `target/eval-cache`, so re-runs only pay for the grouping call.
 
 use std::collections::BTreeMap;
