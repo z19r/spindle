@@ -101,7 +101,7 @@ jobs:
           tar czf "../../../${BIN_NAME}-${{ matrix.target }}.tar.gz" "${BIN_NAME}"
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ env.BIN_NAME }}-${{ matrix.target }}.tar.gz
 
