@@ -861,6 +861,7 @@ impl AiProvider for ClaudeProvider {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::model::DescriptionSource;
 
   #[test]
   fn api_request_serializes_prompt_caching_fields() {
@@ -997,6 +998,7 @@ mod tests {
           tags: vec![],
           suggested_category: "photo".to_string(),
           confidence: 0.9,
+          source: DescriptionSource::Ai,
         },
         metadata_hint: String::new(),
       },
@@ -1009,6 +1011,7 @@ mod tests {
           tags: vec![],
           suggested_category: "photo".to_string(),
           confidence: 0.9,
+          source: DescriptionSource::Ai,
         },
         metadata_hint: String::new(),
       },

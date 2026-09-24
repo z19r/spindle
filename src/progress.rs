@@ -276,7 +276,7 @@ impl PipelineProgress {
         println!("  \u{26a0} Semantic grouping failed: {}", error,);
         println!("    Falling back to single group");
       }
-      PipelineEvent::GroupingComplete { group_count } => {
+      PipelineEvent::GroupingComplete { group_count, .. } => {
         tracing::info!(group_count, "Semantic grouping complete");
       }
       PipelineEvent::PlanReady => {

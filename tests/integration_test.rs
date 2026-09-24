@@ -129,12 +129,14 @@ fn group_and_plan_from_proposals() {
       rationale: "Similar beach scenes".to_string(),
       member_indices: vec![0, 1],
       member_destinations: vec![],
+      member_notes: vec![],
     },
     ProposedGroup {
       label: "Sunsets".to_string(),
       rationale: "Sunset imagery".to_string(),
       member_indices: vec![2],
       member_destinations: vec![],
+      member_notes: vec![],
     },
   ];
 
@@ -246,6 +248,7 @@ impl AiProvider for FakeAiProvider {
       tags: vec!["test".to_string()],
       suggested_category: "photo".to_string(),
       confidence: 0.85,
+      source: DescriptionSource::Ai,
     })
   }
 
@@ -258,6 +261,7 @@ impl AiProvider for FakeAiProvider {
       rationale: "All test files".to_string(),
       member_indices: vec![0],
       member_destinations: vec![],
+      member_notes: vec![],
     }])
   }
 }
@@ -297,7 +301,7 @@ async fn analyze_caches_and_reuses_results() {
 
   let cache_file = cache_dir
     .path()
-    .join(format!("{}.v2.json", hex::encode(file.blake3_hash)));
+    .join(format!("{}.v3.json", hex::encode(file.blake3_hash)));
   assert!(cache_file.exists());
 
   let result2 =
@@ -387,12 +391,14 @@ async fn full_pipeline_end_to_end() {
       rationale: "Red-ish images".to_string(),
       member_indices: vec![0, 3],
       member_destinations: vec![],
+      member_notes: vec![],
     },
     ProposedGroup {
       label: "Cool Colors".to_string(),
       rationale: "Green and blue".to_string(),
       member_indices: vec![1, 2],
       member_destinations: vec![],
+      member_notes: vec![],
     },
   ];
 

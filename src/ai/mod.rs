@@ -110,6 +110,7 @@ pub trait AiProvider: Send + Sync {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::model::DescriptionSource;
 
   #[test]
   fn describe_context_holds_metadata() {
@@ -168,6 +169,7 @@ mod tests {
         tags: vec![],
         suggested_category: "other".to_string(),
         confidence: 0.5,
+        source: DescriptionSource::Ai,
       }
     }
 

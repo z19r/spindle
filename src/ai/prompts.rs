@@ -139,6 +139,7 @@ pub fn build_group_prompt(files: &[FileSummary]) -> String {
 mod tests {
   use super::*;
   use crate::model::ContentDescription;
+  use crate::model::DescriptionSource;
 
   #[test]
   fn describe_prompt_includes_filename() {
@@ -231,6 +232,7 @@ mod tests {
           tags: vec!["beach".to_string(), "sunset".to_string()],
           suggested_category: "photo".to_string(),
           confidence: 0.9,
+          source: DescriptionSource::Ai,
         },
         metadata_hint: String::new(),
       },
@@ -243,6 +245,7 @@ mod tests {
           tags: vec!["beach".to_string(), "ocean".to_string()],
           suggested_category: "photo".to_string(),
           confidence: 0.85,
+          source: DescriptionSource::Ai,
         },
         metadata_hint: String::new(),
       },
@@ -268,6 +271,7 @@ mod tests {
           tags: vec![],
           suggested_category: "photo".to_string(),
           confidence: 0.8,
+          source: DescriptionSource::Ai,
         },
         metadata_hint: String::new(),
       },
@@ -280,6 +284,7 @@ mod tests {
           tags: vec![],
           suggested_category: "photo".to_string(),
           confidence: 0.8,
+          source: DescriptionSource::Ai,
         },
         metadata_hint: String::new(),
       },
@@ -302,6 +307,7 @@ mod tests {
         tags: vec![],
         suggested_category: "photo".to_string(),
         confidence: 0.8,
+        source: DescriptionSource::Ai,
       },
       metadata_hint: String::new(),
     }];
@@ -327,6 +333,7 @@ mod tests {
           tags: vec![],
           suggested_category: "photo".to_string(),
           confidence: 0.8,
+          source: DescriptionSource::Ai,
         },
         metadata_hint: String::new(),
       })
@@ -348,6 +355,7 @@ mod tests {
         tags: vec!["cat".to_string()],
         suggested_category: "pets".to_string(),
         confidence: 0.9,
+        source: DescriptionSource::Ai,
       },
       metadata_hint: String::new(),
     }];
@@ -368,6 +376,7 @@ mod tests {
         tags: vec![],
         suggested_category: "photo".to_string(),
         confidence: 0.8,
+        source: DescriptionSource::Ai,
       },
       metadata_hint: String::new(),
     }];
@@ -429,12 +438,14 @@ mod tests {
           tags: vec!["beach".to_string(), "sunset".to_string()],
           suggested_category: "travel".to_string(),
           confidence: 0.9,
+          source: DescriptionSource::Ai,
         },
         ContentDescription {
           summary: "Ocean waves crashing".to_string(),
           tags: vec!["ocean".to_string(), "waves".to_string()],
           suggested_category: "nature".to_string(),
           confidence: 0.85,
+          source: DescriptionSource::Ai,
         },
       ],
     )];
@@ -456,6 +467,7 @@ mod tests {
         tags: vec![],
         suggested_category: "other".to_string(),
         confidence: 0.5,
+        source: DescriptionSource::Ai,
       })
       .collect();
     let groups = vec![("Big Group".to_string(), descriptions)];

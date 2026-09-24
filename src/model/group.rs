@@ -38,6 +38,14 @@ pub struct MemberDestination {
   pub dest_name: String,
 }
 
+/// A per-file explanation attached to a group (e.g. why a file sits in
+/// `Unsorted`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberNote {
+  pub index: usize,
+  pub note: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileGroup {
   pub id: usize,
@@ -46,6 +54,8 @@ pub struct FileGroup {
   pub members: Vec<usize>,
   pub member_destinations: Vec<MemberDestination>,
   pub suggested_path: PathBuf,
+  #[serde(default)]
+  pub member_notes: Vec<MemberNote>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,4 +66,6 @@ pub struct ProposedGroup {
   pub member_indices: Vec<usize>,
   #[serde(default, rename = "members")]
   pub member_destinations: Vec<MemberDestination>,
+  #[serde(default)]
+  pub member_notes: Vec<MemberNote>,
 }

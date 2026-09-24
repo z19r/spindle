@@ -80,7 +80,7 @@ impl PipelineTuiState {
         self.analysis_done = true;
         self.current_file = None;
       }
-      PipelineEvent::GroupingComplete { group_count } => {
+      PipelineEvent::GroupingComplete { group_count, .. } => {
         self.groups = Some(*group_count);
       }
       PipelineEvent::GroupingFailed { error } => {
