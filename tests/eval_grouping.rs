@@ -15,7 +15,7 @@ use spindle::pipeline::{self, PipelineConfig, PipelineEvent};
 
 /// Minimum composite score. Raised as grouping improves; a change
 /// that drops below it is a regression.
-const FLOOR: f64 = 0.0;
+const FLOOR: f64 = 0.70;
 
 fn fixture_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))
