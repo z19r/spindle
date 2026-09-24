@@ -1122,7 +1122,8 @@ mod tests {
   use crate::model::{FileType, ImageFormat, ScannedFile};
 
   /// Image fixture: `content` only seeds the hash and pixel colour; the
-  /// file on disk is a real 1x1 PNG so upload preparation can decode it.
+  /// file on disk is a real 1x1 JPEG, matching the declared type, so
+  /// upload preparation can decode it.
   fn make_test_file(
     dir: &Path,
     name: &str,
@@ -1131,11 +1132,8 @@ mod tests {
     let path = dir.join(name);
     let seed = blake3::hash(content);
     let b = seed.as_bytes();
-    std::fs::write(
-      &path,
-      create_test_png(1, 1, &[b[0], b[1], b[2], 255]),
-    )
-    .unwrap();
+    let jpeg = create_test_jpeg(1, 1, &[b[0], b[1], b[2]]);
+    std::fs::write(&path, jpeg).unwrap();
     FingerprintedFile {
       scanned: ScannedFile {
         path,
@@ -2289,6 +2287,20 @@ mod tests {
     let mut buf = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut buf);
     img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+    buf
+  }
+
+  fn create_test_jpeg(
+    width: u32,
+    height: u32,
+    rgb: &[u8],
+  ) -> Vec<u8> {
+    use image::{ImageBuffer, RgbImage};
+    let img: RgbImage =
+      ImageBuffer::from_raw(width, height, rgb.to_vec()).unwrap();
+    let mut buf = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut buf);
+    img.write_to(&mut cursor, image::ImageFormat::Jpeg).unwrap();
     buf
   }
 
