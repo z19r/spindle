@@ -721,7 +721,7 @@ async fn propose_once<P: AiProvider>(
   // "placed nothing" as a failed call and try once more before giving
   // up, so one bad generation doesn't unsort the whole run.
   for attempt in 0..2 {
-    let groups = if let Some(area) = area {
+    let outcome = if let Some(area) = area {
       provider
         .propose_groups_in_area(
           summaries,
@@ -729,11 +729,11 @@ async fn propose_once<P: AiProvider>(
           existing_labels,
           organized_context,
         )
-        .await?
+        .await
     } else if organized_context.is_empty() {
       provider
         .propose_groups_with_context(summaries, existing_labels)
-        .await?
+        .await
     } else {
       provider
         .propose_groups_with_organized_context(
@@ -741,7 +741,27 @@ async fn propose_once<P: AiProvider>(
           existing_labels,
           organized_context,
         )
-        .await?
+        .await
+    };
+    let groups = match outcome {
+      Ok(groups) => groups,
+      Err(err)
+        if err
+          .downcast_ref::<crate::ai::DegenerateReply>()
+          .is_some() =>
+      {
+        tracing::warn!(
+          attempt = attempt + 1,
+          files = summaries.len(),
+          error = %err,
+          "Degenerate grouping reply"
+        );
+        if attempt == 0 {
+          continue;
+        }
+        return Err(err);
+      }
+      Err(err) => return Err(err),
     };
     let placed = groups.iter().any(|g| !g.member_indices.is_empty());
     if placed || summaries.is_empty() {
@@ -2334,6 +2354,111 @@ mod tests {
 
     assert_eq!(labels_of(&result), vec!["Stuff"]);
     assert_eq!(provider.calls(), (0, 1));
+  }
+
+  /// Fails the first `bad_calls` grouping calls with a DegenerateReply
+  /// (the model looping under the schema), then groups properly.
+  struct DegenerateThenOkProvider {
+    bad_calls: usize,
+    calls: std::sync::atomic::AtomicUsize,
+  }
+
+  impl AiProvider for DegenerateThenOkProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      context: &DescribeContext,
+    ) -> anyhow::Result<ContentDescription> {
+      Ok(ContentDescription {
+        summary: format!("Description of {}", context.filename),
+        tags: vec![],
+        suggested_category: "photo".to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      })
+    }
+
+    async fn propose_groups(
+      &self,
+      files: &[FileSummary],
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      let n =
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+      if n < self.bad_calls {
+        return Err(
+          crate::ai::DegenerateReply("rationale looped".to_string())
+            .into(),
+        );
+      }
+      Ok(vec![ProposedGroup {
+        label: "Everything".to_string(),
+        rationale: String::new(),
+        member_indices: files.iter().map(|f| f.index).collect(),
+        member_destinations: vec![],
+        member_notes: vec![],
+      }])
+    }
+  }
+
+  #[tokio::test]
+  async fn degenerate_reply_is_retried_once_then_succeeds() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = DegenerateThenOkProvider {
+      bad_calls: 1,
+      calls: Default::default(),
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+    config.taxonomy = vec![];
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    assert_eq!(labels_of(&result), vec!["Everything"]);
+    assert_eq!(
+      provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+      2
+    );
+  }
+
+  #[tokio::test]
+  async fn degenerate_reply_twice_falls_back_to_all_files() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = DegenerateThenOkProvider {
+      bad_calls: 5,
+      calls: Default::default(),
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+    config.taxonomy = vec![];
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    assert_eq!(labels_of(&result), vec!["All Files"]);
+    assert_eq!(
+      provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+      2
+    );
   }
 
   #[test]

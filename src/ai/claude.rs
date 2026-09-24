@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 
+use super::DegenerateReply;
 use crate::model::{
   Area, ContentDescription, FileSummary, ProposedGroup, RoutedFile,
 };
@@ -11,6 +12,12 @@ use super::{
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+
+/// Reply budget for a full (single-stage) grouping call.
+const GROUP_MAX_TOKENS: u32 = 32_768;
+/// Reply budget for one area's grouping. A looping reply then fails
+/// in seconds instead of minutes.
+const GROUP_AREA_MAX_TOKENS: u32 = 8_192;
 
 /// Upper bound on one API call. Grouping replies can legitimately take
 /// a minute or two; anything beyond this is a stall worth retrying.
@@ -415,10 +422,11 @@ impl ClaudeProvider {
   async fn send_group_request(
     &self,
     user_prompt: String,
+    max_tokens: u32,
   ) -> Result<Vec<ProposedGroup>> {
     let request = cached_api_request(
       self.model.clone(),
-      32_768,
+      max_tokens,
       Some(vec![cached_system_block(super::group_system_prompt())]),
       vec![Message {
         role: "user",
@@ -709,12 +717,13 @@ fn response_text(api_response: ApiResponse) -> Result<String> {
     .context("No text content in Claude API response")?;
 
   if truncated {
-    anyhow::bail!(
-      "Claude response truncated (hit max_tokens limit). \
-       Increase max_tokens or reduce the input size. \
-       Partial response ({} bytes): {}",
-      raw.len(),
-      preview(&raw, 500),
+    return Err(
+      DegenerateReply(format!(
+        "reply truncated at max_tokens ({} bytes): {}",
+        raw.len(),
+        preview(&raw, 300),
+      ))
+      .into(),
     );
   }
 
@@ -873,7 +882,7 @@ impl AiProvider for ClaudeProvider {
       super::group_user_prompt(files),
       super::group_existing_groups_note(existing_labels),
     );
-    self.send_group_request(user_prompt).await
+    self.send_group_request(user_prompt, GROUP_MAX_TOKENS).await
   }
 
   async fn route_files(
@@ -929,7 +938,9 @@ impl AiProvider for ClaudeProvider {
       super::group_organized_context(organized_context),
       super::group_existing_groups_note(existing_labels),
     );
-    self.send_group_request(user_prompt).await
+    self
+      .send_group_request(user_prompt, GROUP_AREA_MAX_TOKENS)
+      .await
   }
 
   async fn propose_groups_with_organized_context(
@@ -952,7 +963,7 @@ impl AiProvider for ClaudeProvider {
       super::group_organized_context(organized_context),
       super::group_existing_groups_note(existing_labels),
     );
-    self.send_group_request(user_prompt).await
+    self.send_group_request(user_prompt, GROUP_MAX_TOKENS).await
   }
 }
 
@@ -987,6 +998,34 @@ mod tests {
     assert_eq!(
       groups["items"]["properties"]["members"]["minItems"],
       1
+    );
+  }
+
+  #[tokio::test]
+  async fn truncated_reply_is_a_degenerate_reply_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+      .and(path("/v1/messages"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(
+        serde_json::json!({
+          "content": [{"type": "text", "text": "{\"groups\":[{\"label\":\"x\",\"rationale\":\" --- --- ---"}],
+          "stop_reason": "max_tokens"
+        }),
+      ))
+      .mount(&server)
+      .await;
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-sonnet-4-6".to_string(),
+      0,
+    )
+    .with_base_url(server.uri());
+
+    let err = provider.propose_groups(&[]).await.unwrap_err();
+
+    assert!(
+      err.downcast_ref::<DegenerateReply>().is_some(),
+      "expected DegenerateReply, got {err:#}"
     );
   }
 
