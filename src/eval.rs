@@ -83,6 +83,11 @@ impl Hygiene {
 pub struct EvalReport {
   pub expected_files: usize,
   pub placed_files: usize,
+  /// Distinct expected groups.
+  pub expected_groups: usize,
+  /// Distinct produced groups, system groups excluded. Compared with
+  /// `expected_groups` it shows over- or under-splitting at a glance.
+  pub produced_groups: usize,
   pub pairwise_precision: f64,
   pub pairwise_recall: f64,
   pub pairwise_f1: f64,
@@ -118,6 +123,11 @@ impl std::fmt::Display for EvalReport {
       self.placed_files,
       self.expected_files,
       self.placed_fraction()
+    )?;
+    writeln!(
+      f,
+      "groups                 {} produced / {} expected",
+      self.produced_groups, self.expected_groups
     )?;
     writeln!(
       f,
@@ -282,6 +292,13 @@ pub fn score(
     pairwise_recall: recall,
     pairwise_f1: f1,
     top_level_accuracy,
+    expected_groups: expected
+      .files
+      .iter()
+      .map(|e| normalize_label(&e.group))
+      .collect::<HashSet<_>>()
+      .len(),
+    produced_groups: hygiene(actual).total_groups,
     hygiene: hygiene(actual),
   }
 }
@@ -558,6 +575,20 @@ area = "Finance"
         put("Documents/a.txt", "Legal/Lease"),
       ]
     );
+  }
+
+  #[test]
+  fn report_counts_expected_and_produced_groups() {
+    let actual = vec![
+      put("a.txt", "Finance/Taxes"),
+      put("b.txt", "Finance/Taxes/2023"),
+      put("c.txt", "Legal/Lease"),
+      put("d.txt", "Unsorted"),
+    ];
+    let r = score(&expected(), &actual);
+    assert_eq!(r.expected_groups, 2);
+    assert_eq!(r.produced_groups, 3);
+    assert!(r.to_string().contains("3 produced / 2 expected"));
   }
 
   #[test]
