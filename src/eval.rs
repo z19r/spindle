@@ -12,27 +12,9 @@ use serde::Deserialize;
 use crate::model::{FingerprintedFile, ReorgPlan};
 
 /// Folder-name segments that describe a file *type* rather than a
-/// subject. A label containing one is a hygiene violation.
-pub const TYPE_WORDS: &[&str] = &[
-  "pdf",
-  "pdfs",
-  "image",
-  "images",
-  "file",
-  "files",
-  "doc",
-  "docs",
-  "document",
-  "documents",
-  "misc",
-  "miscellaneous",
-  "other",
-  "others",
-  "spreadsheet",
-  "spreadsheets",
-  "text",
-  "texts",
-];
+/// subject. Shared with the validator so the eval judges the same rule
+/// the pipeline enforces.
+pub use crate::group::validate::TYPE_WORDS;
 
 /// Groups the pipeline itself creates; excluded from hygiene checks.
 pub const SYSTEM_LABELS: &[&str] = &["Needs Review", "Unsorted"];

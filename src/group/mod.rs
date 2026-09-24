@@ -1,3 +1,5 @@
+pub mod validate;
+
 use crate::model::{FileGroup, ProposedGroup};
 
 pub fn build_groups(
