@@ -166,16 +166,7 @@ async fn main() -> Result<()> {
     return Ok(());
   }
 
-  let (dupes_groups, dupes_moves, dupe_types) =
-    dupes_to_groups(&result.all_dupes, &result.fingerprinted);
-
   let picker = ratatui_image::picker::Picker::from_query_stdio().ok();
-
-  let dupes_alt = if dupes_groups.is_empty() {
-    None
-  } else {
-    Some((dupes_groups, dupes_moves, ReviewMode::Dupes, dupe_types))
-  };
 
   let review_state = ReviewState::new(
     plan.groups.clone(),
@@ -183,9 +174,9 @@ async fn main() -> Result<()> {
     config.general.output_dir.clone(),
     picker,
     ReviewMode::Organize,
-    dupes_alt,
   )
-  .with_file_metadata(&result.fingerprinted);
+  .with_file_metadata(&result.fingerprinted)
+  .with_duplicates(&result.all_dupes, &result.fingerprinted);
   let (action, review_state) = tui::run_review(review_state)?;
 
   match action {
@@ -357,7 +348,6 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
     config.general.output_dir.clone(),
     picker,
     ReviewMode::Dupes,
-    None,
   )
   .with_file_metadata(&fingerprinted);
   review_state.set_dupe_types(dupe_types);
@@ -535,7 +525,8 @@ fn execute_review(
   match review_state.review_mode() {
     ReviewMode::Organize => {
       let approved_moves = review_state.approved_moves();
-      if approved_moves.is_empty() {
+      let deletions = review_state.files_to_delete();
+      if approved_moves.is_empty() && deletions.is_empty() {
         println!("No groups approved. Nothing to do.");
         return Ok(());
       }
@@ -554,21 +545,29 @@ fn execute_review(
         for m in &approved_moves {
           println!("  mv {} → {}", m.from.display(), m.to.display());
         }
+        for path in &deletions {
+          println!("  rm {}", path.display());
+        }
         println!(
-          "\n{} approved groups, {} moves (not executed).",
+          "\n{} approved groups, {} moves, {} deletions (not executed).",
           review_state.approved_groups().len(),
-          approved_moves.len()
+          approved_moves.len(),
+          deletions.len()
         );
         return Ok(());
       }
 
       let approved = ApprovedPlan {
         moves: approved_moves,
-        deletions: vec![],
+        deletions,
         skipped_files: vec![],
       };
 
-      println!("Executing plan ({} moves)...", approved.moves.len());
+      println!(
+        "Executing plan ({} moves, {} deletions)...",
+        approved.moves.len(),
+        approved.deletions.len()
+      );
       let report = execute_plan(
         &approved,
         &exec_paths,
@@ -576,9 +575,11 @@ fn execute_review(
       );
 
       println!(
-        "\nDone! {} files moved, {} failed.",
+        "\nDone! {} files moved, {} failed, {} staged to trash ({}).",
         report.moves_completed.len(),
-        report.moves_failed.len()
+        report.moves_failed.len(),
+        report.deletions_staged.len(),
+        format_bytes(report.bytes_staged),
       );
 
       if !report.moves_failed.is_empty() {

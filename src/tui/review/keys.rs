@@ -80,21 +80,26 @@ impl ReviewState {
         _ => {}
       },
 
+      // Space always toggles the item under the cursor.
       KeyCode::Char(' ') => match self.focus {
         Pane::Groups => {
           if let Some(val) = self.approved.get_mut(self.selected) {
             *val = !*val;
           }
         }
-        Pane::Files if self.review_mode == ReviewMode::Dupes => {
-          self.toggle_file_keep();
-        }
-        Pane::Files => {
-          self.enter_preview();
-        }
+        Pane::Files => self.toggle_file_keep(),
       },
 
-      KeyCode::Enter
+      // Enter always opens: a group opens its files, a file its preview.
+      KeyCode::Enter => match self.focus {
+        Pane::Groups if !self.current_group_moves().is_empty() => {
+          self.focus = Pane::Files;
+        }
+        Pane::Files => self.enter_preview(),
+        _ => {}
+      },
+
+      KeyCode::Char('v')
         if self.focus == Pane::Files
           && self.review_mode == ReviewMode::Organize =>
       {
@@ -116,7 +121,7 @@ impl ReviewState {
         self.remove_marked_files();
       }
 
-      KeyCode::Char('d')
+      KeyCode::Char('D')
         if self.review_mode == ReviewMode::Dupes
           && self
             .group_moves
@@ -127,6 +132,13 @@ impl ReviewState {
       {
         self.mode = Mode::DiffView { compare_idx: 0 };
         self.enter_diff_view(0);
+      }
+
+      KeyCode::Char('D')
+        if self.focus == Pane::Files
+          && self.review_mode == ReviewMode::Organize =>
+      {
+        self.enter_dupe_diff();
       }
 
       KeyCode::Char('m')
@@ -153,50 +165,6 @@ impl ReviewState {
       {
         self.enter_merge();
       }
-      KeyCode::Char('s') if self.other_mode_data.is_some() => {
-        let cached = self.other_mode_data.take().unwrap();
-        let current = ModeData {
-          groups: std::mem::replace(&mut self.groups, cached.groups),
-          group_moves: std::mem::replace(
-            &mut self.group_moves,
-            cached.group_moves,
-          ),
-          approved: std::mem::replace(
-            &mut self.approved,
-            cached.approved,
-          ),
-          file_keep: std::mem::replace(
-            &mut self.file_keep,
-            cached.file_keep,
-          ),
-          file_marked: std::mem::replace(
-            &mut self.file_marked,
-            cached.file_marked,
-          ),
-          dupe_types: std::mem::replace(
-            &mut self.dupe_types,
-            cached.dupe_types,
-          ),
-        };
-        self.other_mode_data = Some(current);
-        self.review_mode = match self.review_mode {
-          ReviewMode::Organize => ReviewMode::Dupes,
-          ReviewMode::Dupes => ReviewMode::Organize,
-        };
-        self.selected = 0;
-        self.file_selected = 0;
-        self.focus = Pane::Groups;
-        self.mode = Mode::Normal;
-        self.next_group_id = self
-          .groups
-          .iter()
-          .map(|g| g.id)
-          .max()
-          .map(|m| m + 1)
-          .unwrap_or(0);
-        self.update_image_preview();
-      }
-
       _ => {}
     }
   }
@@ -379,7 +347,10 @@ impl ReviewState {
           ds.scroll = ds.scroll.saturating_add(3);
         }
       }
-      KeyCode::Esc | KeyCode::Char('d') | KeyCode::Char('q') => {
+      KeyCode::Esc
+      | KeyCode::Char('d')
+      | KeyCode::Char('D')
+      | KeyCode::Char('q') => {
         self.mode = Mode::Normal;
         self.exit_diff_view();
       }

@@ -71,25 +71,45 @@ pub(crate) fn render_file_list(
       }
 
       let mut spans = Vec::new();
-      if state.review_mode == ReviewMode::Dupes {
-        let keep_indicator = if state.is_file_kept(state.selected, i)
-        {
-          Span::styled(" \u{2713} ", theme::approved())
-        } else {
-          Span::styled(" \u{2717} ", theme::rejected())
-        };
-        spans.push(keep_indicator);
-      } else if state.is_file_marked(state.selected, i) {
-        spans.push(Span::styled(
-          " \u{25cf} ",
-          Style::default()
-            .fg(theme::PURPLE)
-            .add_modifier(Modifier::BOLD),
-        ));
+      let kept = state.is_file_kept(state.selected, i);
+      spans.push(if kept {
+        Span::styled(" \u{2713} ", theme::approved())
       } else {
-        spans.push(Span::styled(" \u{25cb} ", theme::dim()));
+        Span::styled(" \u{2717} ", theme::rejected())
+      });
+      if state.review_mode == ReviewMode::Organize {
+        spans.push(if state.is_file_marked(state.selected, i) {
+          Span::styled(
+            "\u{25cf} ",
+            Style::default()
+              .fg(theme::PURPLE)
+              .add_modifier(Modifier::BOLD),
+          )
+        } else {
+          Span::styled("\u{25cb} ", theme::dim())
+        });
       }
+      let name_style = if !kept {
+        name_style.add_modifier(Modifier::CROSSED_OUT)
+      } else {
+        name_style
+      };
       spans.push(Span::styled(filename, name_style));
+      if let Some(info) = state.dupe_info(&mv.from) {
+        let partner = info
+          .partner
+          .file_name()
+          .map(|n| n.to_string_lossy().to_string())
+          .unwrap_or_default();
+        let badge = match (info.is_canonical, info.kind) {
+          (true, _) => format!("  \u{2261} has copy {partner}"),
+          (false, DuplicateType::Exact) => {
+            format!("  \u{2261} copy of {partner}")
+          }
+          (false, _) => format!("  \u{2248} similar to {partner}"),
+        };
+        spans.push(Span::styled(badge, theme::warning()));
+      }
       spans.push(Span::styled(
         "  \u{2192}  ",
         Style::default().fg(theme::DIM_PURPLE),

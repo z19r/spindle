@@ -17,7 +17,8 @@ use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 
 use crate::model::{
-  DuplicateType, FileGroup, FileMove, FileType, FingerprintedFile,
+  DuplicateSet, DuplicateType, FileGroup, FileMove, FileType,
+  FingerprintedFile,
 };
 
 mod keys;
@@ -90,13 +91,15 @@ struct DiffState {
   scroll: usize,
 }
 
-struct ModeData {
-  groups: Vec<FileGroup>,
-  group_moves: Vec<Vec<FileMove>>,
-  approved: Vec<bool>,
-  file_keep: Vec<Vec<bool>>,
-  file_marked: Vec<HashSet<usize>>,
-  dupe_types: Vec<DuplicateType>,
+/// Why a file is a duplicate and of what, so the organize screen can
+/// badge it and diff it against its partner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DupeInfo {
+  pub kind: DuplicateType,
+  /// The other file: the canonical copy for a duplicate, the first
+  /// duplicate for a canonical.
+  pub partner: PathBuf,
+  pub is_canonical: bool,
 }
 
 pub struct ReviewState {
@@ -117,8 +120,9 @@ pub struct ReviewState {
   file_keep: Vec<Vec<bool>>,
   file_marked: Vec<HashSet<usize>>,
   review_mode: ReviewMode,
-  other_mode_data: Option<ModeData>,
   file_metadata: HashMap<PathBuf, (String, u64)>,
+  /// Duplicate relationships by source path (organize mode).
+  dupe_info: HashMap<PathBuf, DupeInfo>,
   dupe_types: Vec<DuplicateType>,
   diff_state: Option<DiffState>,
   /// Per-file explanation (from `FileGroup::member_notes`), keyed by
