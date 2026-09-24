@@ -1281,6 +1281,7 @@ impl ReviewState {
       members: vec![],
       member_destinations: vec![],
       suggested_path: PathBuf::from(&slug),
+      member_notes: vec![],
     };
 
     self.groups.push(new_group);
@@ -3286,6 +3287,7 @@ mod tests {
         members: vec![0, 1],
         member_destinations: vec![],
         suggested_path: PathBuf::from("beach"),
+        member_notes: vec![],
       },
       FileGroup {
         id: 1,
@@ -3294,6 +3296,7 @@ mod tests {
         members: vec![2, 3, 4],
         member_destinations: vec![],
         suggested_path: PathBuf::from("cats"),
+        member_notes: vec![],
       },
     ]
   }
@@ -3620,6 +3623,7 @@ mod tests {
         members: vec![0],
         member_destinations: vec![],
         suggested_path: PathBuf::from("only"),
+        member_notes: vec![],
       }],
       vec![FileMove {
         from: PathBuf::from("/dl/a.jpg"),
@@ -3771,6 +3775,7 @@ mod tests {
         members: vec![],
         member_destinations: vec![],
         suggested_path: PathBuf::from("empty"),
+        member_notes: vec![],
       }],
       vec![],
       PathBuf::from("/out"),
@@ -3881,6 +3886,7 @@ mod tests {
         members: vec![0],
         member_destinations: vec![],
         suggested_path: PathBuf::from("videos"),
+        member_notes: vec![],
       }],
       vec![FileMove {
         from: PathBuf::from("/dl/clip.mp4"),

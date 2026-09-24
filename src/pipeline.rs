@@ -17,11 +17,11 @@ use crate::fingerprint::{
 };
 use crate::group::build_groups;
 use crate::ledger::{Ledger, OrganizedDuplicate};
-use crate::model::FileCategory;
 use crate::model::{
   ContentDescription, DuplicateSet, FileSummary, FingerprintedFile,
-  ProposedGroup, ReorgPlan,
+  MemberNote, ProposedGroup, ReorgPlan,
 };
+use crate::model::{DescriptionSource, FileCategory};
 use crate::plan::propose_plan;
 use crate::scanner::{scan_directories_filtered, ScanOptions};
 
@@ -64,6 +64,8 @@ pub enum PipelineEvent {
   },
   GroupingComplete {
     group_count: usize,
+    /// Files placed in the `Unsorted` group rather than a real one.
+    unsorted: usize,
   },
   PlanReady,
 }
@@ -230,6 +232,7 @@ pub async fn run<P: AiProvider>(
       rationale: "AI analysis skipped".to_string(),
       member_indices: (0..fingerprinted.len()).collect(),
       member_destinations: vec![],
+      member_notes: vec![],
     }]
   } else {
     let existing_labels: Vec<String> = ledger
@@ -270,6 +273,11 @@ pub async fn run<P: AiProvider>(
   let _ = tx
     .send(PipelineEvent::GroupingComplete {
       group_count: groups.len(),
+      unsorted: groups
+        .iter()
+        .filter(|g| g.label == UNSORTED_LABEL)
+        .map(|g| g.members.len())
+        .sum(),
     })
     .await;
 
@@ -357,14 +365,33 @@ async fn run_ai_pipeline<P: AiProvider>(
   config: &PipelineConfig,
   tx: &mpsc::Sender<PipelineEvent>,
 ) -> Result<Vec<ProposedGroup>> {
-  let files_to_analyze: Vec<_> = fingerprinted
-    .iter()
-    .enumerate()
-    .filter(|(_, f)| {
-      f.scanned.size <= config.max_file_size_mb * BYTES_PER_MB
-    })
-    .take(config.max_files)
-    .collect();
+  let size_cap = config.max_file_size_mb * BYTES_PER_MB;
+  let mut files_to_analyze: Vec<(usize, &FingerprintedFile)> =
+    Vec::new();
+  // Files that never reach the model still belong to the user; keep
+  // them, with the reason, for the Unsorted group.
+  let mut skipped: Vec<(usize, String)> = Vec::new();
+  for (idx, f) in fingerprinted.iter().enumerate() {
+    if f.scanned.size > size_cap {
+      skipped.push((
+        idx,
+        format!(
+          "not analyzed: larger than {} MB",
+          config.max_file_size_mb
+        ),
+      ));
+    } else if files_to_analyze.len() >= config.max_files {
+      skipped.push((
+        idx,
+        format!(
+          "not analyzed: beyond --max-files ({})",
+          config.max_files
+        ),
+      ));
+    } else {
+      files_to_analyze.push((idx, f));
+    }
+  }
 
   let analyze_count = files_to_analyze.len();
 
@@ -424,6 +451,7 @@ async fn run_ai_pipeline<P: AiProvider>(
 
   let mut summaries = Vec::new();
   let mut failed_files = Vec::new();
+  let mut failed_notes: Vec<(usize, String)> = Vec::new();
   for ((idx, f), result) in
     files_to_analyze.iter().zip(results.iter())
   {
@@ -459,6 +487,8 @@ async fn run_ai_pipeline<P: AiProvider>(
       }
       Err(err) => {
         failed_files.push((filename, err.to_string()));
+        failed_notes
+          .push((*idx, format!("analysis failed: {err:#}")));
       }
     }
   }
@@ -503,10 +533,15 @@ async fn run_ai_pipeline<P: AiProvider>(
   .await
   {
     tracing::info!("Reused cached grouping (no Claude call)");
-    return Ok(groups);
+    return Ok(add_unsorted(
+      groups,
+      &summaries,
+      skipped,
+      failed_notes,
+    ));
   }
 
-  match propose_groups_batched(
+  let groups = match propose_groups_batched(
     provider,
     &summaries,
     existing_labels,
@@ -523,7 +558,7 @@ async fn run_ai_pipeline<P: AiProvider>(
         &index_to_hash,
       )
       .await;
-      Ok(groups)
+      groups
     }
     Err(err) => {
       let _ = tx
@@ -531,7 +566,7 @@ async fn run_ai_pipeline<P: AiProvider>(
           error: format!("{err:#}"),
         })
         .await;
-      Ok(vec![ProposedGroup {
+      vec![ProposedGroup {
         label: "All Files".to_string(),
         rationale: format!(
           "Semantic grouping failed ({err:#}), \
@@ -539,9 +574,64 @@ async fn run_ai_pipeline<P: AiProvider>(
         ),
         member_indices: summaries.iter().map(|s| s.index).collect(),
         member_destinations: vec![],
-      }])
+        member_notes: vec![],
+      }]
     }
+  };
+  Ok(add_unsorted(groups, &summaries, skipped, failed_notes))
+}
+
+/// Label of the catch-all group for files the plan would otherwise
+/// lose: omitted by the model, failed analysis, or never analyzed.
+pub const UNSORTED_LABEL: &str = "Unsorted";
+
+/// Guarantee every analyzed, failed, or skipped file appears in exactly
+/// one group. Files the model left out join `Unsorted` with a per-file
+/// note explaining why; empty groups are dropped.
+fn add_unsorted(
+  mut groups: Vec<ProposedGroup>,
+  summaries: &[FileSummary],
+  skipped: Vec<(usize, String)>,
+  failed: Vec<(usize, String)>,
+) -> Vec<ProposedGroup> {
+  groups.retain(|g| !g.member_indices.is_empty());
+
+  let placed: std::collections::HashSet<usize> = groups
+    .iter()
+    .flat_map(|g| g.member_indices.iter().copied())
+    .collect();
+
+  let mut notes: Vec<MemberNote> = summaries
+    .iter()
+    .filter(|s| !placed.contains(&s.index))
+    .map(|s| MemberNote {
+      index: s.index,
+      note: "not placed by grouping".to_string(),
+    })
+    .collect();
+  notes.extend(
+    failed
+      .into_iter()
+      .chain(skipped)
+      .map(|(index, note)| MemberNote { index, note }),
+  );
+  if notes.is_empty() {
+    return groups;
   }
+  notes.sort_by_key(|n| n.index);
+  notes.dedup_by_key(|n| n.index);
+
+  let count = notes.len();
+  groups.push(ProposedGroup {
+    label: UNSORTED_LABEL.to_string(),
+    rationale: format!(
+      "{count} file(s) the plan could not place — see each file's note"
+    ),
+    member_indices: notes.iter().map(|n| n.index).collect(),
+    member_destinations: vec![],
+    member_notes: notes,
+  });
+  groups
 }
 
 /// One grouping call handles this many files well; beyond it the
@@ -642,7 +732,10 @@ fn quarantine_low_confidence(
 ) -> Vec<ProposedGroup> {
   let low: std::collections::HashSet<usize> = summaries
     .iter()
-    .filter(|s| s.description.confidence < MIN_PLACEMENT_CONFIDENCE)
+    .filter(|s| {
+      s.description.source == DescriptionSource::Ai
+        && s.description.confidence < MIN_PLACEMENT_CONFIDENCE
+    })
     .map(|s| s.index)
     .collect();
   if low.is_empty() {
@@ -673,6 +766,7 @@ fn quarantine_low_confidence(
         .to_string(),
       member_indices: quarantined,
       member_destinations: vec![],
+      member_notes: vec![],
     });
   }
   groups
@@ -700,6 +794,7 @@ mod tests {
         tags: vec!["test".to_string()],
         suggested_category: "photo".to_string(),
         confidence: 0.85,
+        source: DescriptionSource::Ai,
       })
     }
 
@@ -712,6 +807,7 @@ mod tests {
         rationale: "Grouped for testing".to_string(),
         member_indices: (0..files.len()).collect(),
         member_destinations: vec![],
+        member_notes: vec![],
       }])
     }
   }
@@ -748,6 +844,7 @@ mod tests {
         tags: vec![],
         suggested_category: "photo".to_string(),
         confidence,
+        source: DescriptionSource::Ai,
       },
       metadata_hint: String::new(),
     }
@@ -760,6 +857,7 @@ mod tests {
       rationale: "sandy".to_string(),
       member_indices: vec![0, 1, 2],
       member_destinations: vec![],
+      member_notes: vec![],
     }];
     let summaries =
       vec![summary(0, 0.9), summary(1, 0.3), summary(2, 0.95)];
@@ -779,6 +877,7 @@ mod tests {
       rationale: "sandy".to_string(),
       member_indices: vec![0],
       member_destinations: vec![],
+      member_notes: vec![],
     }];
 
     let result =
@@ -811,6 +910,7 @@ mod tests {
           rationale: "one bucket".to_string(),
           member_indices: files.iter().map(|f| f.index).collect(),
           member_destinations: vec![],
+          member_notes: vec![],
         }])
       }
     }
@@ -1258,6 +1358,7 @@ mod tests {
         tags: vec![],
         suggested_category: "photo".to_string(),
         confidence: 0.9,
+        source: DescriptionSource::Ai,
       })
     }
 
@@ -1318,10 +1419,254 @@ mod tests {
       })
       .map(|(i, _)| i)
       .collect();
-    assert_eq!(result.plan.groups.len(), 1);
-    let mut members = result.plan.groups[0].members.clone();
+    let all_files = result
+      .plan
+      .groups
+      .iter()
+      .find(|g| g.label == "All Files")
+      .expect("fallback group");
+    let mut members = all_files.members.clone();
     members.sort_unstable();
     assert_eq!(members, analyzed);
+    assert_every_file_placed_once(&result);
+  }
+
+  fn unsorted_group(
+    result: &PipelineResult,
+  ) -> &crate::model::FileGroup {
+    result
+      .plan
+      .groups
+      .iter()
+      .find(|g| g.label == UNSORTED_LABEL)
+      .expect("an Unsorted group")
+  }
+
+  fn assert_every_file_placed_once(result: &PipelineResult) {
+    let mut placed: Vec<usize> = result
+      .plan
+      .groups
+      .iter()
+      .flat_map(|g| g.members.iter().copied())
+      .collect();
+    placed.sort_unstable();
+    let expected: Vec<usize> =
+      (0..result.fingerprinted.len()).collect();
+    assert_eq!(placed, expected, "every file placed exactly once");
+  }
+
+  fn note_for(group: &crate::model::FileGroup, index: usize) -> &str {
+    group
+      .member_notes
+      .iter()
+      .find(|n| n.index == index)
+      .map(|n| n.note.as_str())
+      .unwrap_or_else(|| panic!("no note for index {index}"))
+  }
+
+  fn write_three_pngs(dir: &std::path::Path) {
+    for (name, rgb) in [
+      ("keep_a.png", (255, 0, 0)),
+      ("keep_b.png", (0, 255, 0)),
+      ("other.png", (0, 0, 255)),
+    ] {
+      fs::write(dir.join(name), create_test_png(rgb.0, rgb.1, rgb.2))
+        .unwrap();
+    }
+  }
+
+  /// Groups only files whose name starts with `keep`; omits the rest,
+  /// as the real model is allowed to.
+  struct PartialGroupProvider;
+
+  impl AiProvider for PartialGroupProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      context: &DescribeContext,
+    ) -> anyhow::Result<ContentDescription> {
+      Ok(ContentDescription {
+        summary: format!("Description of {}", context.filename),
+        tags: vec![],
+        suggested_category: "photo".to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      })
+    }
+
+    async fn propose_groups(
+      &self,
+      files: &[FileSummary],
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      Ok(vec![ProposedGroup {
+        label: "Kept".to_string(),
+        rationale: "keepers".to_string(),
+        member_indices: files
+          .iter()
+          .filter(|f| f.filename.starts_with("keep"))
+          .map(|f| f.index)
+          .collect(),
+        member_destinations: vec![],
+        member_notes: vec![],
+      }])
+    }
+  }
+
+  #[test]
+  fn quarantine_ignores_non_ai_descriptions() {
+    let mut fallback = summary(1, 0.5);
+    fallback.description.source = DescriptionSource::Filename;
+    let mut unanalyzed = summary(2, 0.0);
+    unanalyzed.description.source = DescriptionSource::Unanalyzed;
+    let summaries = vec![summary(0, 0.3), fallback, unanalyzed];
+    let groups = vec![ProposedGroup {
+      label: "Beach".to_string(),
+      rationale: String::new(),
+      member_indices: vec![0, 1, 2],
+      member_destinations: vec![],
+      member_notes: vec![],
+    }];
+
+    let out = quarantine_low_confidence(groups, &summaries);
+
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].member_indices, vec![1, 2]);
+    assert_eq!(out[1].label, "Needs Review");
+    assert_eq!(out[1].member_indices, vec![0]);
+  }
+
+  #[tokio::test]
+  async fn unplaced_files_land_in_unsorted_with_notes() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let result =
+      run(&PartialGroupProvider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    let other = result
+      .fingerprinted
+      .iter()
+      .position(|f| f.scanned.path.ends_with("other.png"))
+      .unwrap();
+    let unsorted = unsorted_group(&result);
+    assert_eq!(unsorted.members, vec![other]);
+    assert_eq!(note_for(unsorted, other), "not placed by grouping");
+
+    let mut unsorted_count = None;
+    while let Ok(ev) = rx.try_recv() {
+      if let PipelineEvent::GroupingComplete { unsorted, .. } = ev {
+        unsorted_count = Some(unsorted);
+      }
+    }
+    assert_eq!(unsorted_count, Some(1));
+  }
+
+  #[tokio::test]
+  async fn analysis_failures_land_in_unsorted_with_the_error() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = SkipOneNoGroupProvider {
+      skip: "other.png".to_string(),
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    let other = result
+      .fingerprinted
+      .iter()
+      .position(|f| f.scanned.path.ends_with("other.png"))
+      .unwrap();
+    let unsorted = unsorted_group(&result);
+    assert_eq!(unsorted.members, vec![other]);
+    assert!(
+      note_for(unsorted, other)
+        .contains("simulated analysis failure"),
+      "note: {}",
+      note_for(unsorted, other)
+    );
+  }
+
+  #[tokio::test]
+  async fn files_beyond_max_files_land_in_unsorted() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+    config.max_files = 1;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&FakeProvider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    let unsorted = unsorted_group(&result);
+    assert_eq!(unsorted.members.len(), 2);
+    for &idx in &unsorted.members {
+      assert_eq!(
+        note_for(unsorted, idx),
+        "not analyzed: beyond --max-files (1)"
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn oversized_files_land_in_unsorted() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+    config.max_file_size_mb = 0;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&FakeProvider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    let unsorted = unsorted_group(&result);
+    assert_eq!(unsorted.members.len(), 3);
+    for &idx in &unsorted.members {
+      assert_eq!(
+        note_for(unsorted, idx),
+        "not analyzed: larger than 0 MB"
+      );
+    }
+    // No empty real group survives.
+    assert!(result.plan.groups.iter().all(|g| !g.members.is_empty()));
   }
 
   #[tokio::test]

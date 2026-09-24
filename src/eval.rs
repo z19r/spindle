@@ -557,6 +557,7 @@ area = "Finance"
         members: vec![1, 0, 7],
         member_destinations: vec![],
         suggested_path: root.join("out"),
+        member_notes: vec![],
       }],
       duplicates: vec![],
       moves: vec![],

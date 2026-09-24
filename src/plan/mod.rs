@@ -159,6 +159,7 @@ mod tests {
       suggested_path: PathBuf::from(
         label.to_lowercase().replace(' ', "_"),
       ),
+      member_notes: vec![],
     }
   }
 
@@ -447,6 +448,7 @@ mod tests {
       suggested_path: PathBuf::from(
         label.to_lowercase().replace(' ', "_"),
       ),
+      member_notes: vec![],
     }
   }
 

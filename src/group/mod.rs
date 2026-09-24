@@ -16,6 +16,7 @@ pub fn build_groups(
         members: p.member_indices.clone(),
         member_destinations: p.member_destinations.clone(),
         suggested_path: output_dir.join(&folder_name),
+        member_notes: p.member_notes.clone(),
       }
     })
     .collect()
@@ -79,6 +80,7 @@ mod tests {
       rationale: format!("Test rationale for {label}"),
       member_indices: members,
       member_destinations: vec![],
+      member_notes: vec![],
     }
   }
 
@@ -167,6 +169,7 @@ mod tests {
       rationale: "Similar beach scenes".to_string(),
       member_indices: vec![0],
       member_destinations: vec![],
+      member_notes: vec![],
     }];
     let output = Path::new("/out");
 

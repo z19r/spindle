@@ -442,6 +442,7 @@ fn dupes_to_groups(
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .to_path_buf(),
+      member_notes: vec![],
     });
 
     moves.push(FileMove {

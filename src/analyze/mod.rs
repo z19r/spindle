@@ -7,8 +7,8 @@ use tokio::sync::Semaphore;
 
 use crate::ai::{AiProvider, DescribeContext};
 use crate::model::{
-  ContentDescription, FingerprintedFile, MemberDestination,
-  ProposedGroup,
+  ContentDescription, DescriptionSource, FingerprintedFile,
+  MemberDestination, ProposedGroup,
 };
 
 pub struct AnalyzeOptions {
@@ -43,7 +43,7 @@ fn default_cache_dir() -> PathBuf {
 
 /// Bump when the describe prompts change materially — old cached
 /// descriptions are too shallow for the new grouping to work with.
-const ANALYSIS_CACHE_VERSION: u32 = 2;
+const ANALYSIS_CACHE_VERSION: u32 = 3;
 
 fn cache_path(cache_dir: &Path, blake3_hash: &[u8; 32]) -> PathBuf {
   let hex = hex::encode(blake3_hash);
@@ -80,7 +80,7 @@ pub async fn write_cache(
 
 /// Bump when the grouping prompt changes materially.
 /// v3: nested folder-path labels are offered as an option, not mandated.
-const GROUP_CACHE_VERSION: u32 = 3;
+const GROUP_CACHE_VERSION: u32 = 4;
 
 /// Cached grouping, addressed by content hash rather than positional index
 /// so it can be replayed across runs even if scan order differs.
@@ -177,6 +177,7 @@ pub async fn read_cached_grouping(
       rationale: group.rationale,
       member_indices,
       member_destinations,
+      member_notes: vec![],
     });
   }
   Some(groups)
@@ -302,6 +303,7 @@ fn describe_by_filename(
     tags: vec![category.to_string(), ext.to_string()],
     suggested_category: category.to_string(),
     confidence: 0.5,
+    source: DescriptionSource::Filename,
   }
 }
 
@@ -360,6 +362,7 @@ async fn analyze_archive(
     tags: all_tags,
     suggested_category: top_category,
     confidence: 0.8,
+    source: DescriptionSource::Ai,
   })
 }
 
@@ -892,6 +895,7 @@ async fn analyze_video(
     tags: all_tags,
     suggested_category: first_desc.suggested_category,
     confidence: first_desc.confidence,
+    source: DescriptionSource::Ai,
   })
 }
 
@@ -913,6 +917,7 @@ async fn analyze_video(
     tags: vec!["video".to_string(), "unanalyzed".to_string()],
     suggested_category: "other".to_string(),
     confidence: 0.0,
+    source: DescriptionSource::Unanalyzed,
   })
 }
 
@@ -1121,6 +1126,7 @@ mod tests {
       tags: vec!["sunset".to_string(), "ocean".to_string()],
       suggested_category: "photo".to_string(),
       confidence: 0.92,
+      source: DescriptionSource::Ai,
     }
   }
 
@@ -1237,6 +1243,7 @@ mod tests {
         index: 0,
         dest_name: "a.jpg".to_string(),
       }],
+      member_notes: vec![],
     }];
     let key = group_cache_key(&[h0, h1], &[]);
     let index_to_hash =
@@ -1273,6 +1280,7 @@ mod tests {
       rationale: "sandy".to_string(),
       member_indices: vec![0, 1],
       member_destinations: vec![],
+      member_notes: vec![],
     }];
     let key = group_cache_key(&[h0, h1], &[]);
     let index_to_hash =
@@ -1303,6 +1311,7 @@ mod tests {
       rationale: "same apartment".to_string(),
       member_indices: vec![0, 1, 2],
       member_destinations: vec![],
+      member_notes: vec![],
     }];
     let key = group_cache_key(&[same, other, same], &[]);
     let index_to_hash = HashMap::from([
@@ -1338,6 +1347,7 @@ mod tests {
       rationale: String::new(),
       member_indices: vec![0, 1],
       member_destinations: vec![],
+      member_notes: vec![],
     }];
     let key = group_cache_key(&[same, same], &[]);
     let index_to_hash =
@@ -1423,6 +1433,7 @@ mod tests {
           tags: vec![],
           suggested_category: "photo".to_string(),
           confidence: 0.8,
+          source: DescriptionSource::Ai,
         })
       }
       async fn propose_groups(
@@ -1570,6 +1581,7 @@ mod tests {
           tags: vec![],
           suggested_category: "other".to_string(),
           confidence: 0.5,
+          source: DescriptionSource::Ai,
         })
       }
       async fn propose_groups(
@@ -1624,6 +1636,7 @@ mod tests {
         tags: vec!["lease".to_string(), "legal".to_string()],
         suggested_category: "legal".to_string(),
         confidence: 0.9,
+        source: DescriptionSource::Ai,
       })
     }
 
@@ -1793,6 +1806,7 @@ mod tests {
             tags: vec!["batch".to_string()],
             suggested_category: "other".to_string(),
             confidence: 0.9,
+            source: DescriptionSource::Ai,
           })
         })
         .collect()
@@ -1992,6 +2006,7 @@ mod tests {
         tags: vec![],
         suggested_category: "other".to_string(),
         confidence: 0.9,
+        source: DescriptionSource::Ai,
       })
     }
 
