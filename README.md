@@ -75,6 +75,14 @@ areas = [
 
 An empty list (`areas = []`) groups in a single stage with no fixed top level.
 
+### Learning from your review
+
+When you rename a group, merge groups, or move files in the review screen and
+then execute, Spindle remembers it in `~/.local/share/spindle/corrections.json`
+(next to the ledger). The next run tells the model to use your names instead of
+the ones it proposed before and to file those same files where you put them.
+Pass `--no-corrections` to run without reading or recording them.
+
 ## Development
 
 ```bash

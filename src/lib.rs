@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod analyze;
 pub mod config;
+pub mod corrections;
 pub mod cost;
 pub mod eval;
 pub mod executor;

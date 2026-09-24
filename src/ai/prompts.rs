@@ -41,14 +41,40 @@ pub fn group_user_prompt(files: &[FileSummary]) -> String {
 
   for file in files {
     let tags = file.description.tags.join(", ");
-    let _ = writeln!(
+    let _ = write!(
       prompt,
       "[{}] {} — {} (tags: {})",
       file.index, file.source_path, file.description.summary, tags
     );
+    if !file.metadata_hint.trim().is_empty() {
+      let _ = write!(prompt, " [{}]", file.metadata_hint.trim());
+    }
+    prompt.push('\n');
   }
 
   prompt
+}
+
+/// Renames the user made in earlier reviews: the strongest signal for
+/// what a label should be called.
+pub fn group_corrections_note(
+  renames: &[(String, String)],
+) -> String {
+  if renames.is_empty() {
+    return String::new();
+  }
+  let mut note = String::from(
+    "\nThe user has previously renamed folders you proposed. Use their \
+     names, and never propose the old ones again:\n",
+  );
+  for (from, to) in renames {
+    let _ = writeln!(note, "- \"{from}\" → \"{to}\"");
+  }
+  note.push_str(
+    "A file marked [user filed under: X] was placed under X by the \
+     user before; put it there again unless its content clearly changed.\n",
+  );
+  note
 }
 
 /// Hint listing folders previous runs already created. Empty when there is
@@ -215,6 +241,42 @@ mod tests {
     }];
     let user = route_user_prompt(&files);
     assert!(user.contains("[4] w2.txt — 2023 W-2 from Acme"));
+  }
+
+  #[test]
+  fn user_prompt_shows_metadata_hint_when_present() {
+    let mut f = FileSummary {
+      index: 3,
+      filename: "a.txt".to_string(),
+      source_path: "a.txt".to_string(),
+      description: ContentDescription {
+        summary: "s".to_string(),
+        tags: vec![],
+        suggested_category: "other".to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      },
+      metadata_hint: String::new(),
+    };
+    assert!(
+      !group_user_prompt(&[f.clone()]).contains("user filed under")
+    );
+    f.metadata_hint = "user filed under: Work/Acme".to_string();
+    let line = group_user_prompt(&[f]);
+    assert!(line.contains("[user filed under: Work/Acme]"), "{line}");
+  }
+
+  #[test]
+  fn corrections_note_lists_renames() {
+    assert!(group_corrections_note(&[]).is_empty());
+    let note = group_corrections_note(&[(
+      "Photos/Pets".to_string(),
+      "Personal/Pets/Biscuit".to_string(),
+    )]);
+    assert!(
+      note.contains("\"Photos/Pets\" → \"Personal/Pets/Biscuit\"")
+    );
+    assert!(note.contains("user filed under"));
   }
 
   #[test]
