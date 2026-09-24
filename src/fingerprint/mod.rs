@@ -193,21 +193,33 @@ fn banded_candidates(
 }
 
 fn compute_perceptual_hash(path: &Path) -> Result<Vec<u8>> {
-  let img = image::open(path).or_else(|_| decode_via_magick(path))?;
+  let img =
+    image::open(path).or_else(|_| decode_via_magick(path, 512))?;
   let hasher = image_hasher::HasherConfig::new().to_hasher();
   let hash = hasher.hash_image(&img);
   Ok(hash.as_bytes().to_vec())
 }
 
-fn decode_via_magick(path: &Path) -> Result<image::DynamicImage> {
-  let tmp = std::env::temp_dir()
-    .join(format!("spindle_conv_{}.png", std::process::id()));
+/// Decode with ImageMagick for formats the `image` crate can't read
+/// (HEIC, AVIF, …), shrinking so the long edge is at most `max_edge`.
+pub(crate) fn decode_via_magick(
+  path: &Path,
+  max_edge: u32,
+) -> Result<image::DynamicImage> {
+  static COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+  let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+  let tmp = std::env::temp_dir().join(format!(
+    "spindle_conv_{}_{}.png",
+    std::process::id(),
+    n
+  ));
   let status = std::process::Command::new("magick")
     .arg("convert")
     .arg(path)
     .arg("-strip")
     .arg("-resize")
-    .arg("512x512>")
+    .arg(format!("{max_edge}x{max_edge}>"))
     .arg(tmp.as_os_str())
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::null())

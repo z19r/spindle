@@ -1,3 +1,5 @@
+pub mod image_prep;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -799,10 +801,7 @@ async fn analyze_image(
   file: &FingerprintedFile,
   filename: &str,
 ) -> Result<ContentDescription> {
-  let image_data =
-    tokio::fs::read(&file.scanned.path).await.with_context(|| {
-      format!("Failed to read file: {}", file.scanned.path.display())
-    })?;
+  let prepared = prepare_image(file).await?;
 
   let context = DescribeContext {
     filename: filename.to_string(),
@@ -812,12 +811,22 @@ async fn analyze_image(
   };
 
   provider
-    .describe_image(
-      &image_data,
-      file.scanned.file_type.mime_type(),
-      &context,
-    )
+    .describe_image(&prepared.data, prepared.mime_type, &context)
     .await
+}
+
+/// Decode/downscale/transcode on a blocking thread so a big HEIC
+/// doesn't stall the async runtime.
+async fn prepare_image(
+  file: &FingerprintedFile,
+) -> Result<image_prep::PreparedImage> {
+  let path = file.scanned.path.clone();
+  let mime = file.scanned.file_type.mime_type();
+  tokio::task::spawn_blocking(move || {
+    image_prep::prepare_for_upload(&path, mime)
+  })
+  .await
+  .context("image preparation task failed")?
 }
 
 #[cfg(feature = "video")]
@@ -998,16 +1007,12 @@ async fn analyze_batch_via_api(
     }
 
     if file.scanned.file_type.is_image() {
-      match tokio::fs::read(&file.scanned.path).await {
-        Ok(data) => {
+      match prepare_image(file).await {
+        Ok(prepared) => {
           requests.push(DescribeRequest {
             payload: DescribePayload::Image {
-              data,
-              mime_type: file
-                .scanned
-                .file_type
-                .mime_type()
-                .to_string(),
+              data: prepared.data,
+              mime_type: prepared.mime_type.to_string(),
             },
             context: DescribeContext {
               filename,
@@ -1023,10 +1028,7 @@ async fn analyze_batch_via_api(
           slots.push(BatchSlot::Submitted(requests.len() - 1));
         }
         Err(e) => {
-          slots.push(BatchSlot::Resolved(Err(anyhow::anyhow!(
-            "Failed to read file {}: {e}",
-            file.scanned.path.display()
-          ))));
+          slots.push(BatchSlot::Resolved(Err(e)));
         }
       }
       continue;
@@ -1100,13 +1102,21 @@ mod tests {
   use crate::model::VideoFormat;
   use crate::model::{FileType, ImageFormat, ScannedFile};
 
+  /// Image fixture: `content` only seeds the hash and pixel colour; the
+  /// file on disk is a real 1x1 PNG so upload preparation can decode it.
   fn make_test_file(
     dir: &Path,
     name: &str,
     content: &[u8],
   ) -> FingerprintedFile {
     let path = dir.join(name);
-    std::fs::write(&path, content).unwrap();
+    let seed = blake3::hash(content);
+    let b = seed.as_bytes();
+    std::fs::write(
+      &path,
+      create_test_png(1, 1, &[b[0], b[1], b[2], 255]),
+    )
+    .unwrap();
     FingerprintedFile {
       scanned: ScannedFile {
         path,
@@ -1606,6 +1616,8 @@ mod tests {
     format: crate::model::DocumentFormat,
   ) -> FingerprintedFile {
     let mut file = make_test_file(dir, name, content);
+    // Documents need their real bytes on disk for text extraction.
+    std::fs::write(&file.scanned.path, content).unwrap();
     file.scanned.file_type = FileType::Document(format);
     file
   }
