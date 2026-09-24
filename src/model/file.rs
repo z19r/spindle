@@ -15,6 +15,7 @@ pub enum ImageFormat {
   Tiff,
   Bmp,
   Avif,
+  Psd,
 }
 
 #[derive(
@@ -44,6 +45,30 @@ pub enum DocumentFormat {
   Html,
   Yaml,
   Toml,
+  Xlsx,
+  Pptx,
+  Odt,
+  Ods,
+  Epub,
+  /// SVG is XML text; described from its markup, not rasterised.
+  Svg,
+  /// Source code of any language; treated as plain text.
+  Code,
+}
+
+#[derive(
+  Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize,
+)]
+pub enum InstallerFormat {
+  Dmg,
+  Pkg,
+  Exe,
+  Msi,
+  Apk,
+  Iso,
+  Deb,
+  Rpm,
+  AppImage,
 }
 
 #[derive(
@@ -80,6 +105,7 @@ pub enum FileCategory {
   Audio,
   Document,
   Archive,
+  Installer,
 }
 
 impl FileCategory {
@@ -95,6 +121,9 @@ impl FileCategory {
       "archive" | "archives" | "zip" | "compressed" => {
         Some(Self::Archive)
       }
+      "installer" | "installers" | "app" | "apps" | "software" => {
+        Some(Self::Installer)
+      }
       _ => None,
     }
   }
@@ -106,6 +135,7 @@ impl FileCategory {
       Self::Audio => "audio",
       Self::Document => "document",
       Self::Archive => "archive",
+      Self::Installer => "installer",
     }
   }
 }
@@ -123,8 +153,8 @@ impl std::str::FromStr for FileCategory {
     Self::from_alias(s).ok_or_else(|| {
       format!(
         "unknown file category '{}'. \
-         Valid: image, video, audio, document, archive \
-         (aliases: photo, movie, music, pdf, zip, etc.)",
+         Valid: image, video, audio, document, archive, installer \
+         (aliases: photo, movie, music, pdf, zip, app, etc.)",
         s
       )
     })
@@ -140,6 +170,7 @@ pub enum FileType {
   Document(DocumentFormat),
   Audio(AudioFormat),
   Archive(ArchiveFormat),
+  Installer(InstallerFormat),
   Other,
 }
 
@@ -154,6 +185,7 @@ impl FileType {
       "tiff" | "tif" => Self::Image(ImageFormat::Tiff),
       "bmp" => Self::Image(ImageFormat::Bmp),
       "avif" => Self::Image(ImageFormat::Avif),
+      "psd" => Self::Image(ImageFormat::Psd),
 
       "mp4" => Self::Video(VideoFormat::Mp4),
       "mov" => Self::Video(VideoFormat::Mov),
@@ -173,6 +205,18 @@ impl FileType {
       "html" | "htm" => Self::Document(DocumentFormat::Html),
       "yaml" | "yml" => Self::Document(DocumentFormat::Yaml),
       "toml" => Self::Document(DocumentFormat::Toml),
+      "xlsx" | "xlsm" => Self::Document(DocumentFormat::Xlsx),
+      "pptx" => Self::Document(DocumentFormat::Pptx),
+      "odt" => Self::Document(DocumentFormat::Odt),
+      "ods" => Self::Document(DocumentFormat::Ods),
+      "epub" => Self::Document(DocumentFormat::Epub),
+      "svg" => Self::Document(DocumentFormat::Svg),
+      "rs" | "py" | "js" | "ts" | "jsx" | "tsx" | "go" | "rb"
+      | "sh" | "bash" | "zsh" | "fish" | "java" | "kt" | "swift"
+      | "c" | "h" | "cpp" | "hpp" | "cc" | "cs" | "php" | "sql"
+      | "lua" | "pl" | "r" | "scala" | "css" | "scss" | "dart"
+      | "ex" | "exs" | "hs" | "ml" | "zig" | "vue" | "svelte"
+      | "ipynb" => Self::Document(DocumentFormat::Code),
 
       "mp3" => Self::Audio(AudioFormat::Mp3),
       "wav" => Self::Audio(AudioFormat::Wav),
@@ -189,6 +233,16 @@ impl FileType {
       "7z" => Self::Archive(ArchiveFormat::SevenZ),
       "rar" => Self::Archive(ArchiveFormat::Rar),
 
+      "dmg" => Self::Installer(InstallerFormat::Dmg),
+      "pkg" => Self::Installer(InstallerFormat::Pkg),
+      "exe" => Self::Installer(InstallerFormat::Exe),
+      "msi" => Self::Installer(InstallerFormat::Msi),
+      "apk" => Self::Installer(InstallerFormat::Apk),
+      "iso" => Self::Installer(InstallerFormat::Iso),
+      "deb" => Self::Installer(InstallerFormat::Deb),
+      "rpm" => Self::Installer(InstallerFormat::Rpm),
+      "appimage" => Self::Installer(InstallerFormat::AppImage),
+
       _ => Self::Other,
     }
   }
@@ -200,6 +254,7 @@ impl FileType {
       Self::Document(_) => Some(FileCategory::Document),
       Self::Audio(_) => Some(FileCategory::Audio),
       Self::Archive(_) => Some(FileCategory::Archive),
+      Self::Installer(_) => Some(FileCategory::Installer),
       Self::Other => None,
     }
   }
@@ -232,6 +287,41 @@ impl FileType {
       "video/webm" => Some(Self::Video(VideoFormat::Webm)),
 
       "application/pdf" => Some(Self::Document(DocumentFormat::Pdf)),
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+        Some(Self::Document(DocumentFormat::Docx))
+      }
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
+        Some(Self::Document(DocumentFormat::Xlsx))
+      }
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
+        Some(Self::Document(DocumentFormat::Pptx))
+      }
+      "application/vnd.oasis.opendocument.text" => {
+        Some(Self::Document(DocumentFormat::Odt))
+      }
+      "application/vnd.oasis.opendocument.spreadsheet" => {
+        Some(Self::Document(DocumentFormat::Ods))
+      }
+      "application/epub+zip" => Some(Self::Document(DocumentFormat::Epub)),
+      "image/vnd.adobe.photoshop" => Some(Self::Image(ImageFormat::Psd)),
+      "application/vnd.microsoft.portable-executable"
+      | "application/x-msdownload" => {
+        Some(Self::Installer(InstallerFormat::Exe))
+      }
+      "application/x-msi" => Some(Self::Installer(InstallerFormat::Msi)),
+      "application/vnd.android.package-archive" => {
+        Some(Self::Installer(InstallerFormat::Apk))
+      }
+      "application/x-iso9660-image" => {
+        Some(Self::Installer(InstallerFormat::Iso))
+      }
+      "application/vnd.debian.binary-package" => {
+        Some(Self::Installer(InstallerFormat::Deb))
+      }
+      "application/x-rpm" => Some(Self::Installer(InstallerFormat::Rpm)),
+      "application/x-apple-diskimage" => {
+        Some(Self::Installer(InstallerFormat::Dmg))
+      }
 
       "audio/mpeg" => Some(Self::Audio(AudioFormat::Mp3)),
       "audio/x-wav" | "audio/wav" => {
@@ -284,6 +374,8 @@ impl FileType {
           | DocumentFormat::Html
           | DocumentFormat::Yaml
           | DocumentFormat::Toml
+          | DocumentFormat::Svg
+          | DocumentFormat::Code
       )
     )
   }
@@ -298,6 +390,7 @@ impl FileType {
       Self::Image(ImageFormat::Tiff) => "image/tiff",
       Self::Image(ImageFormat::Bmp) => "image/bmp",
       Self::Image(ImageFormat::Avif) => "image/avif",
+      Self::Image(ImageFormat::Psd) => "image/vnd.adobe.photoshop",
       Self::Video(VideoFormat::Mp4) => "video/mp4",
       Self::Video(VideoFormat::Mov) => "video/quicktime",
       Self::Video(VideoFormat::Avi) => "video/x-msvideo",
@@ -317,6 +410,21 @@ impl FileType {
       Self::Document(DocumentFormat::Html) => "text/html",
       Self::Document(DocumentFormat::Yaml) => "application/yaml",
       Self::Document(DocumentFormat::Toml) => "application/toml",
+      Self::Document(DocumentFormat::Xlsx) => {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      }
+      Self::Document(DocumentFormat::Pptx) => {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+      }
+      Self::Document(DocumentFormat::Odt) => {
+        "application/vnd.oasis.opendocument.text"
+      }
+      Self::Document(DocumentFormat::Ods) => {
+        "application/vnd.oasis.opendocument.spreadsheet"
+      }
+      Self::Document(DocumentFormat::Epub) => "application/epub+zip",
+      Self::Document(DocumentFormat::Svg) => "image/svg+xml",
+      Self::Document(DocumentFormat::Code) => "text/plain",
       Self::Audio(AudioFormat::Mp3) => "audio/mpeg",
       Self::Audio(AudioFormat::Wav) => "audio/wav",
       Self::Audio(AudioFormat::Flac) => "audio/flac",
@@ -332,6 +440,21 @@ impl FileType {
         "application/x-7z-compressed"
       }
       Self::Archive(ArchiveFormat::Rar) => "application/vnd.rar",
+      Self::Installer(InstallerFormat::Dmg) => "application/x-apple-diskimage",
+      Self::Installer(InstallerFormat::Pkg) => "application/octet-stream",
+      Self::Installer(InstallerFormat::Exe) => {
+        "application/vnd.microsoft.portable-executable"
+      }
+      Self::Installer(InstallerFormat::Msi) => "application/x-msi",
+      Self::Installer(InstallerFormat::Apk) => {
+        "application/vnd.android.package-archive"
+      }
+      Self::Installer(InstallerFormat::Iso) => "application/x-iso9660-image",
+      Self::Installer(InstallerFormat::Deb) => {
+        "application/vnd.debian.binary-package"
+      }
+      Self::Installer(InstallerFormat::Rpm) => "application/x-rpm",
+      Self::Installer(InstallerFormat::AppImage) => "application/x-executable",
       Self::Other => "application/octet-stream",
     }
   }
@@ -366,6 +489,97 @@ pub struct FingerprintedFile {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn office_ebook_vector_and_code_extensions_are_documents() {
+    use DocumentFormat as D;
+    for (ext, want) in [
+      ("xlsx", D::Xlsx),
+      ("pptx", D::Pptx),
+      ("odt", D::Odt),
+      ("ods", D::Ods),
+      ("epub", D::Epub),
+      ("svg", D::Svg),
+      ("rs", D::Code),
+      ("py", D::Code),
+      ("ts", D::Code),
+      ("sh", D::Code),
+    ] {
+      assert_eq!(
+        FileType::from_extension(ext),
+        FileType::Document(want),
+        "{ext}"
+      );
+    }
+    assert!(FileType::from_extension("svg").is_text());
+    assert!(FileType::from_extension("py").is_text());
+    assert!(!FileType::from_extension("xlsx").is_text());
+  }
+
+  #[test]
+  fn psd_is_an_image() {
+    assert_eq!(
+      FileType::from_extension("psd"),
+      FileType::Image(ImageFormat::Psd)
+    );
+  }
+
+  #[test]
+  fn installer_extensions_get_their_own_category() {
+    use InstallerFormat as I;
+    for (ext, want) in [
+      ("dmg", I::Dmg),
+      ("pkg", I::Pkg),
+      ("exe", I::Exe),
+      ("msi", I::Msi),
+      ("apk", I::Apk),
+      ("iso", I::Iso),
+      ("deb", I::Deb),
+      ("rpm", I::Rpm),
+      ("appimage", I::AppImage),
+    ] {
+      let ft = FileType::from_extension(ext);
+      assert_eq!(ft, FileType::Installer(want), "{ext}");
+      assert_eq!(
+        ft.category(),
+        Some(FileCategory::Installer),
+        "{ext}"
+      );
+    }
+    for alias in
+      ["installer", "installers", "app", "apps", "software"]
+    {
+      assert_eq!(
+        FileCategory::from_alias(alias),
+        Some(FileCategory::Installer)
+      );
+    }
+    assert_eq!(FileCategory::Installer.label(), "installer");
+  }
+
+  #[test]
+  fn new_mime_types_map_to_new_formats() {
+    assert_eq!(
+      FileType::from_mime(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      ),
+      Some(FileType::Document(DocumentFormat::Xlsx))
+    );
+    assert_eq!(
+      FileType::from_mime("application/epub+zip"),
+      Some(FileType::Document(DocumentFormat::Epub))
+    );
+    assert_eq!(
+      FileType::from_mime("application/vnd.android.package-archive"),
+      Some(FileType::Installer(InstallerFormat::Apk))
+    );
+    assert_eq!(
+      FileType::from_mime(
+        "application/vnd.microsoft.portable-executable"
+      ),
+      Some(FileType::Installer(InstallerFormat::Exe))
+    );
+  }
 
   #[test]
   fn from_extension_recognizes_images() {

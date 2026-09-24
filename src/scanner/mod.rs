@@ -134,14 +134,25 @@ pub fn scan_directories_filtered(
 }
 
 fn detect_file_type(path: &Path) -> FileType {
-  if let Some(ft) = FileType::from_magic_bytes(path) {
-    return ft;
-  }
-  path
+  let by_ext = path
     .extension()
     .and_then(|ext| ext.to_str())
     .map(FileType::from_extension)
-    .unwrap_or(FileType::Other)
+    .unwrap_or(FileType::Other);
+  match FileType::from_magic_bytes(path) {
+    // Office files, ebooks and APKs are zip containers; the extension
+    // says what they are, the magic bytes only say "zip".
+    Some(FileType::Archive(_))
+      if matches!(
+        by_ext,
+        FileType::Document(_) | FileType::Installer(_)
+      ) =>
+    {
+      by_ext
+    }
+    Some(ft) => ft,
+    None => by_ext,
+  }
 }
 
 #[cfg(test)]
@@ -159,6 +170,59 @@ mod tests {
       .unwrap();
     fs::write(dir.path().join("data.csv"), b"not an image").unwrap();
     dir
+  }
+
+  fn write_zip(path: &std::path::Path, entry: &str, body: &[u8]) {
+    let file = fs::File::create(path).unwrap();
+    let mut w = zip::ZipWriter::new(file);
+    w.start_file(entry, zip::write::SimpleFileOptions::default())
+      .unwrap();
+    std::io::Write::write_all(&mut w, body).unwrap();
+    w.finish().unwrap();
+  }
+
+  #[test]
+  fn zip_containers_keep_their_document_or_installer_type() {
+    use crate::model::{DocumentFormat, FileType, InstallerFormat};
+    let dir = TempDir::new().unwrap();
+    write_zip(
+      &dir.path().join("book.epub"),
+      "OEBPS/ch1.xhtml",
+      b"<p>hi</p>",
+    );
+    write_zip(
+      &dir.path().join("sheet.xlsx"),
+      "xl/workbook.xml",
+      b"<x/>",
+    );
+    write_zip(&dir.path().join("app.apk"), "classes.dex", b"dex");
+    write_zip(&dir.path().join("plain.zip"), "a.txt", b"a");
+
+    let by_name: std::collections::HashMap<String, FileType> =
+      scan_directory(dir.path())
+        .unwrap()
+        .into_iter()
+        .map(|f| {
+          (
+            f.path.file_name().unwrap().to_string_lossy().to_string(),
+            f.file_type,
+          )
+        })
+        .collect();
+
+    assert_eq!(
+      by_name["book.epub"],
+      FileType::Document(DocumentFormat::Epub)
+    );
+    assert_eq!(
+      by_name["sheet.xlsx"],
+      FileType::Document(DocumentFormat::Xlsx)
+    );
+    assert_eq!(
+      by_name["app.apk"],
+      FileType::Installer(InstallerFormat::Apk)
+    );
+    assert!(matches!(by_name["plain.zip"], FileType::Archive(_)));
   }
 
   #[test]
