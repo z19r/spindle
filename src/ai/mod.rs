@@ -6,7 +6,9 @@ pub use prompts::*;
 
 use anyhow::Result;
 
-use crate::model::{ContentDescription, FileSummary, ProposedGroup};
+use crate::model::{
+  Area, ContentDescription, FileSummary, ProposedGroup, RoutedFile,
+};
 
 pub struct DescribeContext {
   pub filename: String,
@@ -77,6 +79,37 @@ pub trait AiProvider: Send + Sync {
   ) -> impl std::future::Future<Output = Result<Vec<ProposedGroup>>> + Send
   {
     self.propose_groups_with_context(files, existing_labels)
+  }
+
+  /// Assign each file to one of `areas` (stage one of grouping). The
+  /// default cannot route; the pipeline then groups in a single stage.
+  fn route_files(
+    &self,
+    files: &[FileSummary],
+    areas: &[Area],
+  ) -> impl std::future::Future<Output = Result<Vec<RoutedFile>>> + Send
+  {
+    let _ = (files, areas);
+    async { anyhow::bail!("routing not supported by this provider") }
+  }
+
+  /// Group files already known to belong under `area`; labels must
+  /// start with the area name. The default ignores the area (the
+  /// pipeline enforces the prefix afterwards).
+  fn propose_groups_in_area(
+    &self,
+    files: &[FileSummary],
+    area: &Area,
+    existing_labels: &[String],
+    organized_context: &[(String, Vec<ContentDescription>)],
+  ) -> impl std::future::Future<Output = Result<Vec<ProposedGroup>>> + Send
+  {
+    let _ = area;
+    self.propose_groups_with_organized_context(
+      files,
+      existing_labels,
+      organized_context,
+    )
   }
 
   /// Describe many files in one operation. The default falls back to

@@ -101,6 +101,7 @@ async fn main() -> Result<()> {
     ledger_path: ledger_path.clone(),
     model: config.ai.model.clone(),
     describe_model: config.ai.describe_model.clone(),
+    taxonomy: config.taxonomy.areas.clone(),
   };
 
   let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(64);

@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{ContentDescription, FileSummary, ProposedGroup};
+use crate::model::{
+  Area, ContentDescription, FileSummary, ProposedGroup, RoutedFile,
+};
 
 use super::{
   AiProvider, DescribeContext, DescribePayload, DescribeRequest,
@@ -107,6 +109,38 @@ fn describe_output_config() -> serde_json::Value {
         "required": [
           "summary", "tags", "suggested_category", "confidence"
         ],
+        "additionalProperties": false
+      }
+    }
+  })
+}
+
+/// `output_config.format` payload for routing: `area` is an enum of the
+/// configured names, so the model cannot invent one.
+fn route_output_config(areas: &[Area]) -> serde_json::Value {
+  let names: Vec<&str> =
+    areas.iter().map(|a| a.name.as_str()).collect();
+  serde_json::json!({
+    "format": {
+      "type": "json_schema",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "assignments": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {"type": "integer"},
+                "area": {"type": "string", "enum": names}
+              },
+              "required": ["index", "area"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["assignments"],
         "additionalProperties": false
       }
     }
@@ -354,6 +388,44 @@ impl ClaudeProvider {
     Err(last_err.unwrap_or_else(|| {
       anyhow::anyhow!("All retry attempts exhausted")
     }))
+  }
+
+  /// One grouping call: cached system prompt, schema-constrained
+  /// reply, member indices derived from destinations.
+  async fn send_group_request(
+    &self,
+    user_prompt: String,
+  ) -> Result<Vec<ProposedGroup>> {
+    let request = cached_api_request(
+      self.model.clone(),
+      32_768,
+      Some(vec![cached_system_block(super::group_system_prompt())]),
+      vec![Message {
+        role: "user",
+        content: vec![ContentBlock::Text {
+          text: user_prompt,
+          cache_control: None,
+        }],
+      }],
+      Some(group_output_config()),
+    );
+
+    let text = self.send_request(request).await?;
+
+    #[derive(Deserialize)]
+    struct GroupResponse {
+      groups: Vec<ProposedGroup>,
+    }
+
+    let response: GroupResponse = serde_json::from_str(&text)
+      .with_context(|| {
+        format!(
+          "Failed to parse groups JSON from Claude. Raw response:\n{}",
+          preview(&text, 500)
+        )
+      })?;
+
+    Ok(finish_groups(response.groups, &text))
   }
 
   /// Build the Messages API request for a describe payload — shared
@@ -761,41 +833,63 @@ impl AiProvider for ClaudeProvider {
       super::group_user_prompt(files),
       super::group_existing_groups_note(existing_labels),
     );
+    self.send_group_request(user_prompt).await
+  }
+
+  async fn route_files(
+    &self,
+    files: &[FileSummary],
+    areas: &[Area],
+  ) -> Result<Vec<RoutedFile>> {
     let request = cached_api_request(
-      self.model.clone(),
-      32_768,
-      Some(vec![cached_system_block(super::group_system_prompt())]),
+      self.describe_model.clone(),
+      8_192,
+      Some(vec![cached_system_block(super::route_system_prompt(
+        areas,
+      ))]),
       vec![Message {
         role: "user",
         content: vec![ContentBlock::Text {
-          text: user_prompt,
+          text: super::route_user_prompt(files),
           cache_control: None,
         }],
       }],
-      Some(group_output_config()),
+      Some(route_output_config(areas)),
     );
-
     let text = self.send_request(request).await?;
 
     #[derive(Deserialize)]
-    struct GroupResponse {
-      groups: Vec<ProposedGroup>,
+    struct RouteResponse {
+      assignments: Vec<RoutedFile>,
     }
-
-    let response: GroupResponse = serde_json::from_str(&text)
-      .with_context(|| {
-        let preview = if text.len() > 500 {
-          format!("{}...(truncated, {} bytes total)", &text[..500], text.len())
-        } else {
-          text.clone()
-        };
+    let response: RouteResponse =
+      serde_json::from_str(&text).with_context(|| {
         format!(
-          "Failed to parse groups JSON from Claude. Raw response:\n{}",
-          preview
+          "Failed to parse routing JSON from Claude. Raw response:\n{}",
+          preview(&text, 500)
         )
       })?;
+    Ok(response.assignments)
+  }
 
-    Ok(finish_groups(response.groups, &text))
+  async fn propose_groups_in_area(
+    &self,
+    files: &[FileSummary],
+    area: &Area,
+    existing_labels: &[String],
+    organized_context: &[(
+      String,
+      Vec<crate::model::ContentDescription>,
+    )],
+  ) -> Result<Vec<ProposedGroup>> {
+    let user_prompt = format!(
+      "{}{}{}{}",
+      super::group_user_prompt(files),
+      super::group_area_note(area),
+      super::group_organized_context(organized_context),
+      super::group_existing_groups_note(existing_labels),
+    );
+    self.send_group_request(user_prompt).await
   }
 
   async fn propose_groups_with_organized_context(
@@ -812,52 +906,13 @@ impl AiProvider for ClaudeProvider {
         .propose_groups_with_context(files, existing_labels)
         .await;
     }
-
     let user_prompt = format!(
       "{}{}{}",
       super::group_user_prompt(files),
       super::group_organized_context(organized_context),
       super::group_existing_groups_note(existing_labels),
     );
-    let request = cached_api_request(
-      self.model.clone(),
-      32_768,
-      Some(vec![cached_system_block(super::group_system_prompt())]),
-      vec![Message {
-        role: "user",
-        content: vec![ContentBlock::Text {
-          text: user_prompt,
-          cache_control: None,
-        }],
-      }],
-      Some(group_output_config()),
-    );
-
-    let text = self.send_request(request).await?;
-
-    #[derive(Deserialize)]
-    struct GroupResponse {
-      groups: Vec<ProposedGroup>,
-    }
-
-    let response: GroupResponse = serde_json::from_str(&text)
-      .with_context(|| {
-        let preview = if text.len() > 500 {
-          format!(
-            "{}...(truncated, {} bytes total)",
-            &text[..500],
-            text.len()
-          )
-        } else {
-          text.clone()
-        };
-        format!(
-          "Failed to parse groups JSON from Claude. Raw response:\n{}",
-          preview
-        )
-      })?;
-
-    Ok(finish_groups(response.groups, &text))
+    self.send_group_request(user_prompt).await
   }
 }
 
@@ -868,6 +923,22 @@ mod tests {
 
   /// The grammar must forbid a group with no members and a reply with
   /// no groups: both parsed fine yet placed nothing in real runs.
+  #[test]
+  fn route_schema_constrains_area_to_the_configured_names() {
+    let areas = vec![
+      crate::model::Area::new("Work", "jobs"),
+      crate::model::Area::new("Personal", "life"),
+    ];
+    let cfg = route_output_config(&areas);
+    let assignments =
+      &cfg["format"]["schema"]["properties"]["assignments"];
+    assert_eq!(assignments["minItems"], 1);
+    assert_eq!(
+      assignments["items"]["properties"]["area"]["enum"],
+      serde_json::json!(["Work", "Personal"])
+    );
+  }
+
   #[test]
   fn group_schema_requires_at_least_one_group_and_member() {
     let cfg = group_output_config();
