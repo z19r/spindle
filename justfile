@@ -136,8 +136,12 @@ test-verbose:
 test-integration:
     cargo test --test integration_test
 
-# Grouping-quality eval against the real Claude API (needs ANTHROPIC_* env)
+# Grouping-quality eval straight against the Claude API (needs ANTHROPIC_API_KEY)
 eval:
+    ANTHROPIC_BASE_URL=https://api.anthropic.com SPINDLE_EVAL=1 cargo test --test eval_grouping -- --ignored --nocapture
+
+# Same eval routed through whatever ANTHROPIC_BASE_URL points at (e.g. a proxy)
+eval-via-proxy:
     SPINDLE_EVAL=1 cargo test --test eval_grouping -- --ignored --nocapture
 
 # Run tests with all features enabled
