@@ -28,7 +28,8 @@ pub fn default_areas() -> Vec<Area> {
     ),
     Area::new(
       "Personal",
-      "family, friends, hobbies, recipes, home life, travel",
+      "family, friends, pets, hobbies, recipes, home life, trips and \
+       their photos",
     ),
     Area::new("Finance", "taxes, bills, invoices, receipts, banking"),
     Area::new(
@@ -38,7 +39,9 @@ pub fn default_areas() -> Vec<Area> {
     Area::new("Health", "medical records, lab results, fitness"),
     Area::new(
       "Photos",
-      "photographs and videos of people, pets, places",
+      "photo and video collections with no other home: camera dumps, \
+       screenshots kept for their own sake — a trip's or pet's photos \
+       belong with that trip or pet instead",
     ),
     Area::new(
       "Media",
