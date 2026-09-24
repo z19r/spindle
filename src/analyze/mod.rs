@@ -930,7 +930,7 @@ pub async fn analyze_batch(
         analyze_file(provider, file, options).await
       }
     })
-    .buffer_unordered(options.max_concurrent)
+    .buffered(options.max_concurrent)
     .collect()
     .await
 }
@@ -1888,6 +1888,90 @@ mod tests {
     assert!(text.contains("\nSecond line."));
     assert!(!text.contains("rtf1"));
     assert!(!text.contains('\\'));
+  }
+
+  /// Provider whose calls finish in reverse submission order, so a
+  /// collector that yields in completion order would scramble results.
+  struct ReverseOrderProvider;
+
+  impl AiProvider for ReverseOrderProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      context: &DescribeContext,
+    ) -> Result<ContentDescription> {
+      // img0 waits longest, img4 returns first.
+      let idx: u64 = context
+        .filename
+        .trim_start_matches("img")
+        .trim_end_matches(".png")
+        .parse()
+        .unwrap();
+      tokio::time::sleep(std::time::Duration::from_millis(
+        (5 - idx) * 20,
+      ))
+      .await;
+      Ok(ContentDescription {
+        summary: format!("description of {}", context.filename),
+        tags: vec![],
+        suggested_category: "other".to_string(),
+        confidence: 0.9,
+      })
+    }
+
+    async fn propose_groups(
+      &self,
+      _files: &[crate::model::FileSummary],
+    ) -> Result<Vec<crate::model::ProposedGroup>> {
+      Ok(vec![])
+    }
+  }
+
+  #[tokio::test]
+  async fn analyze_batch_preserves_input_order_under_concurrency() {
+    let file_dir = TempDir::new().unwrap();
+    let cache_dir = TempDir::new().unwrap();
+    let files: Vec<FingerprintedFile> = (0..5)
+      .map(|i| {
+        let png = create_test_png(1, 1, &[i as u8, 0, 0, 255]);
+        let path = file_dir.path().join(format!("img{i}.png"));
+        std::fs::write(&path, &png).unwrap();
+        FingerprintedFile {
+          scanned: crate::model::ScannedFile {
+            path: path.clone(),
+            scan_root: file_dir.path().to_path_buf(),
+            size: png.len() as u64,
+            modified: std::time::SystemTime::now(),
+            file_type: crate::model::FileType::Image(
+              crate::model::ImageFormat::Png,
+            ),
+          },
+          blake3_hash: crate::fingerprint::compute_blake3(&path)
+            .unwrap(),
+          perceptual_hash: None,
+        }
+      })
+      .collect();
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      max_concurrent: 5,
+      use_batch_api: false,
+      ..Default::default()
+    };
+
+    let results =
+      analyze_batch(&ReverseOrderProvider, &files, &opts).await;
+
+    assert_eq!(results.len(), 5);
+    for (i, result) in results.iter().enumerate() {
+      let summary = &result.as_ref().unwrap().summary;
+      assert_eq!(
+        summary,
+        &format!("description of img{i}.png"),
+        "result {i} belongs to a different file"
+      );
+    }
   }
 
   #[test]
