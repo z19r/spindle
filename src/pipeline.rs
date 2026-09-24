@@ -648,19 +648,37 @@ async fn propose_once<P: AiProvider>(
   existing_labels: &[String],
   organized_context: &[(String, Vec<ContentDescription>)],
 ) -> Result<Vec<ProposedGroup>> {
-  if organized_context.is_empty() {
-    provider
-      .propose_groups_with_context(summaries, existing_labels)
-      .await
-  } else {
-    provider
-      .propose_groups_with_organized_context(
-        summaries,
-        existing_labels,
-        organized_context,
-      )
-      .await
+  // A garbled response can parse as groups with no members. Treat
+  // "placed nothing" as a failed call and try once more before giving
+  // up, so one bad generation doesn't unsort the whole run.
+  for attempt in 0..2 {
+    let groups = if organized_context.is_empty() {
+      provider
+        .propose_groups_with_context(summaries, existing_labels)
+        .await?
+    } else {
+      provider
+        .propose_groups_with_organized_context(
+          summaries,
+          existing_labels,
+          organized_context,
+        )
+        .await?
+    };
+    let placed = groups.iter().any(|g| !g.member_indices.is_empty());
+    if placed || summaries.is_empty() {
+      return Ok(groups);
+    }
+    tracing::warn!(
+      attempt = attempt + 1,
+      files = summaries.len(),
+      "Grouping response placed no files"
+    );
   }
+  anyhow::bail!(
+    "grouping placed none of {} files after retry",
+    summaries.len()
+  )
 }
 
 /// Large sets are grouped in topic-coherent batches. Labels produced
@@ -1511,6 +1529,115 @@ mod tests {
         member_notes: vec![],
       }])
     }
+  }
+
+  /// Returns member-less groups for the first `empty_calls` grouping
+  /// calls, then a proper grouping. Mimics a garbled model response.
+  struct FlakyGroupProvider {
+    empty_calls: usize,
+    calls: std::sync::atomic::AtomicUsize,
+  }
+
+  impl AiProvider for FlakyGroupProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      context: &DescribeContext,
+    ) -> anyhow::Result<ContentDescription> {
+      Ok(ContentDescription {
+        summary: format!("Description of {}", context.filename),
+        tags: vec![],
+        suggested_category: "photo".to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      })
+    }
+
+    async fn propose_groups(
+      &self,
+      files: &[FileSummary],
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      let n =
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+      let members = if n < self.empty_calls {
+        vec![]
+      } else {
+        files.iter().map(|f| f.index).collect()
+      };
+      Ok(vec![ProposedGroup {
+        label: "Everything".to_string(),
+        rationale: String::new(),
+        member_indices: members,
+        member_destinations: vec![],
+        member_notes: vec![],
+      }])
+    }
+  }
+
+  #[tokio::test]
+  async fn grouping_with_no_placements_is_retried_once() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = FlakyGroupProvider {
+      empty_calls: 1,
+      calls: Default::default(),
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    assert_eq!(result.plan.groups.len(), 1);
+    assert_eq!(result.plan.groups[0].label, "Everything");
+    assert_eq!(result.plan.groups[0].members.len(), 3);
+  }
+
+  #[tokio::test]
+  async fn grouping_with_no_placements_twice_falls_back() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = FlakyGroupProvider {
+      empty_calls: 5,
+      calls: Default::default(),
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    assert_eq!(result.plan.groups.len(), 1);
+    assert_eq!(result.plan.groups[0].label, "All Files");
+    let mut failed = false;
+    while let Ok(ev) = rx.try_recv() {
+      if matches!(ev, PipelineEvent::GroupingFailed { .. }) {
+        failed = true;
+      }
+    }
+    assert!(failed, "GroupingFailed event expected");
+    // Exactly one retry: two calls total.
+    assert_eq!(
+      provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+      2
+    );
   }
 
   #[test]
