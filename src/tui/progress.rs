@@ -8,13 +8,12 @@ use ratatui::{
 
 use crate::pipeline::PipelineEvent;
 
-// Matches the review screen's theme so the two feel like one app.
-const PURPLE: Color = Color::Rgb(125, 86, 244);
-const GREEN: Color = Color::Rgb(4, 181, 117);
-const WHITE: Color = Color::Rgb(250, 250, 250);
-const SUBTLE: Color = Color::Rgb(136, 136, 136);
-const CREAM: Color = Color::Rgb(202, 211, 245);
-const YELLOW: Color = Color::Rgb(249, 226, 175);
+// One palette with the review screen, so both read on light and dark
+// terminals alike (body text is the terminal's default foreground).
+use super::review::theme::{
+  AMBER as YELLOW, GREEN, PURPLE, SUBTLE, TEXT as CREAM,
+  TEXT as WHITE,
+};
 
 const SPINNER: [&str; 10] =
   ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -224,7 +223,7 @@ pub fn render_pipeline(frame: &mut Frame, state: &PipelineTuiState) {
       let ratio =
         (state.analyzed as f64 / total as f64).clamp(0.0, 1.0);
       let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(GREEN).bg(Color::Black))
+        .gauge_style(Style::default().fg(GREEN).bg(Color::Reset))
         .ratio(ratio)
         .label("");
       frame.render_widget(gauge, gauge_area);
