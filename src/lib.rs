@@ -2,6 +2,7 @@ pub mod ai;
 pub mod analyze;
 pub mod config;
 pub mod cost;
+pub mod eval;
 pub mod executor;
 pub mod fingerprint;
 pub mod group;

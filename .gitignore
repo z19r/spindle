@@ -10,3 +10,5 @@
 .whetstone/
 STACK-SETUP.md
 spindle-debug.log
+.tokensave/
+.claude/.headroom_wrap_*

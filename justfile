@@ -136,6 +136,10 @@ test-verbose:
 test-integration:
     cargo test --test integration_test
 
+# Grouping-quality eval against the real Claude API (needs ANTHROPIC_* env)
+eval:
+    SPINDLE_EVAL=1 cargo test --test eval_grouping -- --ignored --nocapture
+
 # Run tests with all features enabled
 test-all:
     cargo test --all-features
