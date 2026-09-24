@@ -62,7 +62,10 @@ pub async fn read_cache(
 ) -> Option<ContentDescription> {
   let path = cache_path(cache_dir, blake3_hash);
   let content = tokio::fs::read_to_string(&path).await.ok()?;
-  serde_json::from_str(&content).ok()
+  let cached: ContentDescription =
+    serde_json::from_str(&content).ok()?;
+  // A stale placeholder is worth retrying, not reusing.
+  (cached.source != DescriptionSource::Unanalyzed).then_some(cached)
 }
 
 pub async fn write_cache(
@@ -279,9 +282,16 @@ pub async fn analyze_file(
     describe_by_filename(file, &filename)
   };
 
-  let _ =
-    write_cache(&options.cache_dir, &file.blake3_hash, &description)
-      .await;
+  // Placeholders for content we could not analyze are never cached:
+  // installing ffmpeg (or fixing the file) must take effect next run.
+  if description.source != DescriptionSource::Unanalyzed {
+    let _ = write_cache(
+      &options.cache_dir,
+      &file.blake3_hash,
+      &description,
+    )
+    .await;
+  }
 
   Ok(description)
 }
@@ -1652,6 +1662,61 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn unanalyzed_descriptions_are_not_cached() {
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let file =
+      make_video_file(file_dir.path(), "clip.mp4", b"fake video");
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      use_ffmpeg: false,
+      ..Default::default()
+    };
+    struct UnusedProvider;
+    impl AiProvider for UnusedProvider {
+      async fn describe_image(
+        &self,
+        _: &[u8],
+        _: &str,
+        _: &DescribeContext,
+      ) -> Result<ContentDescription> {
+        panic!("not called without ffmpeg");
+      }
+      async fn propose_groups(
+        &self,
+        _: &[crate::model::FileSummary],
+      ) -> Result<Vec<crate::model::ProposedGroup>> {
+        Ok(vec![])
+      }
+    }
+
+    let result =
+      analyze_file(&UnusedProvider, &file, &opts).await.unwrap();
+    assert_eq!(result.source, DescriptionSource::Unanalyzed);
+
+    // Installing ffmpeg later must take effect, so nothing was cached.
+    assert!(read_cache(cache_dir.path(), &file.blake3_hash)
+      .await
+      .is_none());
+  }
+
+  #[tokio::test]
+  async fn cached_unanalyzed_placeholder_is_treated_as_a_miss() {
+    let cache_dir = TempDir::new().unwrap();
+    let hash = [7u8; 32];
+    let stale = ContentDescription {
+      summary: "Video file: x.mp4 (ffmpeg not found)".to_string(),
+      tags: vec![],
+      suggested_category: "other".to_string(),
+      confidence: 0.0,
+      source: DescriptionSource::Unanalyzed,
+    };
+    write_cache(cache_dir.path(), &hash, &stale).await.unwrap();
+
+    assert!(read_cache(cache_dir.path(), &hash).await.is_none());
+  }
+
+  #[tokio::test]
   async fn analyze_video_with_broken_ffmpeg_input_is_unanalyzed() {
     if !crate::video::ffmpeg_available() {
       eprintln!("ffmpeg not on PATH; skipping");
@@ -1692,7 +1757,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn analyze_video_file_caches_result() {
+  async fn analyze_video_placeholder_is_not_cached() {
     let cache_dir = TempDir::new().unwrap();
     let file_dir = TempDir::new().unwrap();
     let file =
@@ -1733,7 +1798,7 @@ mod tests {
 
     let cached =
       read_cache(cache_dir.path(), &file.blake3_hash).await;
-    assert!(cached.is_some());
+    assert!(cached.is_none(), "placeholder must not be cached");
   }
 
   fn make_document_file(
