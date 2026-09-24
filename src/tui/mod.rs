@@ -83,57 +83,32 @@ impl App {
   }
 }
 
-pub enum ProgressEvent {
-  SetStage(Stage),
-  SetTotal(usize),
-  FileProcessed(String),
-  Done,
+/// The ratatui terminal type the review screens draw into.
+pub type Term = Terminal<CrosstermBackend<io::Stdout>>;
+
+/// Raw mode plus the alternate screen, held for the whole run so the
+/// progress display flows straight into the review without the
+/// terminal flashing back to the shell in between. Dropping it
+/// restores the terminal, including on early error returns.
+pub struct TerminalSession {
+  pub terminal: Term,
 }
 
-pub fn run_progress(
-  mut rx: tokio::sync::mpsc::Receiver<ProgressEvent>,
-) -> Result<()> {
-  enable_raw_mode()?;
-  io::stdout().execute(EnterAlternateScreen)?;
-
-  let backend = CrosstermBackend::new(io::stdout());
-  let mut terminal = Terminal::new(backend)?;
-  let mut state = ProgressState::new(0);
-
-  loop {
-    terminal.draw(|frame| progress::render(frame, &state))?;
-
-    match rx.try_recv() {
-      Ok(ProgressEvent::SetStage(stage)) => state.set_stage(stage),
-      Ok(ProgressEvent::SetTotal(total)) => {
-        state = ProgressState::new(total)
-      }
-      Ok(ProgressEvent::FileProcessed(name)) => {
-        state.set_current_file(name);
-        state.increment();
-      }
-      Ok(ProgressEvent::Done) => break,
-      Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-        break
-      }
-      Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-    }
-
-    if event::poll(std::time::Duration::from_millis(50))? {
-      if let Event::Key(key) = event::read()? {
-        if key.code == KeyCode::Char('q')
-          || (key.code == KeyCode::Char('c')
-            && key.modifiers.contains(KeyModifiers::CONTROL))
-        {
-          break;
-        }
-      }
-    }
+impl TerminalSession {
+  pub fn enter() -> Result<Self> {
+    enable_raw_mode()?;
+    io::stdout().execute(EnterAlternateScreen)?;
+    let terminal =
+      Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    Ok(Self { terminal })
   }
+}
 
-  disable_raw_mode()?;
-  io::stdout().execute(LeaveAlternateScreen)?;
-  Ok(())
+impl Drop for TerminalSession {
+  fn drop(&mut self) {
+    let _ = disable_raw_mode();
+    let _ = io::stdout().execute(LeaveAlternateScreen);
+  }
 }
 
 /// Drive the pipeline phase inside the TUI: a stage checklist with
@@ -142,12 +117,8 @@ pub fn run_progress(
 /// Ctrl-C aborts the whole process.
 pub fn run_pipeline_progress(
   mut rx: tokio::sync::mpsc::Receiver<crate::pipeline::PipelineEvent>,
+  terminal: &mut Term,
 ) -> Result<()> {
-  enable_raw_mode()?;
-  io::stdout().execute(EnterAlternateScreen)?;
-
-  let backend = CrosstermBackend::new(io::stdout());
-  let mut terminal = Terminal::new(backend)?;
   let mut state = PipelineTuiState::default();
   let mut disconnected = false;
 
@@ -179,27 +150,22 @@ pub fn run_pipeline_progress(
         if key.code == KeyCode::Char('c')
           && key.modifiers.contains(KeyModifiers::CONTROL)
         {
-          disable_raw_mode()?;
-          io::stdout().execute(LeaveAlternateScreen)?;
+          // Restore the terminal by hand: process::exit skips Drop.
+          let _ = disable_raw_mode();
+          let _ = io::stdout().execute(LeaveAlternateScreen);
           std::process::exit(130);
         }
       }
     }
   }
 
-  disable_raw_mode()?;
-  io::stdout().execute(LeaveAlternateScreen)?;
   Ok(())
 }
 
 pub fn run_review(
   state: ReviewState,
+  terminal: &mut Term,
 ) -> Result<(ReviewAction, ReviewState)> {
-  enable_raw_mode()?;
-  io::stdout().execute(EnterAlternateScreen)?;
-
-  let backend = CrosstermBackend::new(io::stdout());
-  let mut terminal = Terminal::new(backend)?;
   let mut app = App::new_review(state);
 
   let result = loop {
@@ -229,9 +195,6 @@ pub fn run_review(
       }
     }
   };
-
-  disable_raw_mode()?;
-  io::stdout().execute(LeaveAlternateScreen)?;
 
   let review_state = match app.screen {
     Screen::Review(s) => *s,

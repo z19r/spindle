@@ -1252,3 +1252,11 @@ fn key_table_matches_pane_and_mode() {
     assert!(k.contains(&"\u{2423}") && k.contains(&"\u{23ce}"));
   }
 }
+
+#[test]
+fn banner_is_stored_for_the_header() {
+  let state = make_state();
+  assert_eq!(state.banner(), None);
+  let state = state.with_banner("2 groups · 5 moves");
+  assert_eq!(state.banner(), Some("2 groups · 5 moves"));
+}
