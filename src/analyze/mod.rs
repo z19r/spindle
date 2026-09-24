@@ -22,6 +22,9 @@ pub struct AnalyzeOptions {
   pub introspect_archives: bool,
   pub max_archive_files: usize,
   pub max_archive_file_size_mb: u64,
+  /// Extract video keyframes with ffmpeg. Callers set this from
+  /// `video::ffmpeg_available()`; tests turn it off.
+  pub use_ffmpeg: bool,
 }
 
 impl Default for AnalyzeOptions {
@@ -33,6 +36,7 @@ impl Default for AnalyzeOptions {
       introspect_archives: true,
       max_archive_files: 20,
       max_archive_file_size_mb: 50,
+      use_ffmpeg: false,
     }
   }
 }
@@ -257,7 +261,7 @@ pub async fn analyze_file(
     .to_string();
 
   let description = if file.scanned.file_type.is_video() {
-    analyze_video(provider, file, &filename).await?
+    analyze_video(provider, file, &filename, options).await?
   } else if file.scanned.file_type.is_image() {
     analyze_image(provider, file, &filename).await?
   } else if matches!(
@@ -420,6 +424,7 @@ async fn extract_and_analyze_archive(
     introspect_archives: false,
     max_archive_files: 0,
     max_archive_file_size_mb: 0,
+    use_ffmpeg: options.use_ffmpeg,
   };
 
   let mut results = Vec::new();
@@ -829,28 +834,45 @@ async fn prepare_image(
   .context("image preparation task failed")?
 }
 
-#[cfg(feature = "video")]
+/// Describe a video from up to three evenly spaced keyframes. Without
+/// ffmpeg (or when extraction fails) the file is marked unanalyzed
+/// rather than failed, so it stays in the plan with a clear note.
 async fn analyze_video(
   provider: &impl AiProvider,
   file: &FingerprintedFile,
   filename: &str,
+  options: &AnalyzeOptions,
 ) -> Result<ContentDescription> {
-  use crate::video;
-
   const MAX_KEYFRAMES: usize = 3;
 
-  let frames =
-    video::extract_keyframes(&file.scanned.path, MAX_KEYFRAMES)
-      .await
-      .with_context(|| {
-        format!("Failed to extract keyframes from {filename}")
-      })?;
-
-  if frames.is_empty() {
-    anyhow::bail!("No keyframes extracted from {filename}");
+  if !options.use_ffmpeg {
+    return Ok(unanalyzed_video(filename, "ffmpeg not found"));
   }
 
-  let context = DescribeContext {
+  let frames = match crate::video::extract_keyframes(
+    &file.scanned.path,
+    MAX_KEYFRAMES,
+  )
+  .await
+  {
+    Ok(frames) if !frames.is_empty() => frames,
+    Ok(_) => {
+      return Ok(unanalyzed_video(filename, "no keyframes extracted"))
+    }
+    Err(e) => {
+      tracing::warn!(
+        file = %filename,
+        error = %e,
+        "Keyframe extraction failed"
+      );
+      return Ok(unanalyzed_video(
+        filename,
+        "keyframe extraction failed",
+      ));
+    }
+  };
+
+  let frame_context = |ts: f64| DescribeContext {
     filename: filename.to_string(),
     file_type_label: format!(
       "{} (keyframe)",
@@ -858,13 +880,16 @@ async fn analyze_video(
     ),
     file_size: file.scanned.size,
     metadata_hint: Some(format!(
-      "Video keyframe at {:.1}s — describe the visual content/theme",
-      frames[0].timestamp_secs
+      "Video keyframe at {ts:.1}s — describe the visual content/theme"
     )),
   };
 
   let first_desc = provider
-    .describe_image(&frames[0].png_data, "image/png", &context)
+    .describe_image(
+      &frames[0].png_data,
+      "image/png",
+      &frame_context(frames[0].timestamp_secs),
+    )
     .await?;
 
   if frames.len() == 1 {
@@ -875,20 +900,12 @@ async fn analyze_video(
   let mut summaries = vec![first_desc.summary.clone()];
 
   for frame in &frames[1..] {
-    let ctx = DescribeContext {
-      filename: filename.to_string(),
-      file_type_label: format!(
-        "{} (keyframe)",
-        file.scanned.file_type.mime_type()
-      ),
-      file_size: file.scanned.size,
-      metadata_hint: Some(format!(
-        "Video keyframe at {:.1}s — describe the visual content/theme",
-        frame.timestamp_secs
-      )),
-    };
     if let Ok(desc) = provider
-      .describe_image(&frame.png_data, "image/png", &ctx)
+      .describe_image(
+        &frame.png_data,
+        "image/png",
+        &frame_context(frame.timestamp_secs),
+      )
       .await
     {
       summaries.push(desc.summary);
@@ -908,26 +925,19 @@ async fn analyze_video(
   })
 }
 
-#[cfg(not(feature = "video"))]
-async fn analyze_video(
-  _provider: &impl AiProvider,
-  file: &FingerprintedFile,
+fn unanalyzed_video(
   filename: &str,
-) -> Result<ContentDescription> {
-  tracing::warn!(
-    file = %filename,
-    "Video analysis requires the 'video' feature flag — skipping {}",
-    file.scanned.path.display()
-  );
-  Ok(ContentDescription {
+  reason: &str,
+) -> ContentDescription {
+  ContentDescription {
     summary: format!(
-      "Video file: {filename} (enable 'video' feature for content analysis)"
+      "Video file: {filename} ({reason} — content not analyzed)"
     ),
     tags: vec!["video".to_string(), "unanalyzed".to_string()],
     suggested_category: "other".to_string(),
     confidence: 0.0,
     source: DescriptionSource::Unanalyzed,
-  })
+  }
 }
 
 pub async fn analyze_batch(
@@ -1098,7 +1108,6 @@ mod tests {
   use std::time::SystemTime;
   use tempfile::TempDir;
 
-  #[cfg(not(feature = "video"))]
   use crate::model::VideoFormat;
   use crate::model::{FileType, ImageFormat, ScannedFile};
 
@@ -1500,7 +1509,6 @@ mod tests {
     assert_eq!(cached.unwrap().summary, "A sunset over the ocean");
   }
 
-  #[cfg(not(feature = "video"))]
   fn make_video_file(
     dir: &Path,
     name: &str,
@@ -1521,9 +1529,8 @@ mod tests {
     }
   }
 
-  #[cfg(not(feature = "video"))]
   #[tokio::test]
-  async fn analyze_video_without_feature_returns_placeholder() {
+  async fn analyze_video_without_ffmpeg_returns_unanalyzed() {
     let cache_dir = TempDir::new().unwrap();
     let file_dir = TempDir::new().unwrap();
     let file =
@@ -1558,12 +1565,132 @@ mod tests {
       analyze_file(&UnusedProvider, &file, &opts).await.unwrap();
 
     assert!(result.summary.contains("clip.mp4"));
-    assert!(result.summary.contains("video"));
+    assert!(result.summary.to_lowercase().contains("video"));
+    assert!(result.summary.contains("ffmpeg not found"));
     assert_eq!(result.confidence, 0.0);
+    assert_eq!(result.source, DescriptionSource::Unanalyzed);
     assert!(result.tags.contains(&"unanalyzed".to_string()));
   }
 
-  #[cfg(not(feature = "video"))]
+  /// Provider that records what it was asked to describe.
+  struct RecordingProvider {
+    calls: std::sync::Mutex<Vec<(String, String)>>,
+  }
+
+  impl AiProvider for RecordingProvider {
+    async fn describe_image(
+      &self,
+      data: &[u8],
+      mime_type: &str,
+      context: &DescribeContext,
+    ) -> Result<ContentDescription> {
+      assert!(!data.is_empty());
+      self.calls.lock().unwrap().push((
+        mime_type.to_string(),
+        context.file_type_label.clone(),
+      ));
+      Ok(ContentDescription {
+        summary: "a red frame".to_string(),
+        tags: vec!["red".to_string()],
+        suggested_category: "art".to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      })
+    }
+    async fn propose_groups(
+      &self,
+      _: &[crate::model::FileSummary],
+    ) -> Result<Vec<crate::model::ProposedGroup>> {
+      Ok(vec![])
+    }
+  }
+
+  #[tokio::test]
+  async fn analyze_video_with_ffmpeg_describes_a_keyframe() {
+    if !crate::video::ffmpeg_available() {
+      eprintln!("ffmpeg not on PATH; skipping");
+      return;
+    }
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let path = file_dir.path().join("red.mp4");
+    let status = std::process::Command::new("ffmpeg")
+      .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+      .arg("color=c=red:s=32x32:d=1")
+      .args(["-r", "5", "-pix_fmt", "yuv420p"])
+      .arg(&path)
+      .status()
+      .unwrap();
+    assert!(status.success());
+    let bytes = std::fs::read(&path).unwrap();
+    let mut file =
+      make_video_file(file_dir.path(), "red.mp4", &bytes);
+    file.scanned.size = bytes.len() as u64;
+
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      use_ffmpeg: true,
+      ..Default::default()
+    };
+    let provider = RecordingProvider {
+      calls: Default::default(),
+    };
+
+    let result = analyze_file(&provider, &file, &opts).await.unwrap();
+
+    assert_eq!(result.source, DescriptionSource::Ai);
+    // One description per extracted keyframe, joined.
+    assert!(
+      result.summary.starts_with("a red frame"),
+      "{}",
+      result.summary
+    );
+    let calls = provider.calls.lock().unwrap();
+    assert!(!calls.is_empty() && calls.len() <= 3);
+    assert_eq!(calls[0].0, "image/png");
+    assert!(calls[0].1.contains("keyframe"));
+  }
+
+  #[tokio::test]
+  async fn analyze_video_with_broken_ffmpeg_input_is_unanalyzed() {
+    if !crate::video::ffmpeg_available() {
+      eprintln!("ffmpeg not on PATH; skipping");
+      return;
+    }
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let file =
+      make_video_file(file_dir.path(), "junk.mp4", b"not a video");
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      use_ffmpeg: true,
+      ..Default::default()
+    };
+    struct UnusedProvider;
+    impl AiProvider for UnusedProvider {
+      async fn describe_image(
+        &self,
+        _: &[u8],
+        _: &str,
+        _: &DescribeContext,
+      ) -> Result<ContentDescription> {
+        panic!("must not be called for an undecodable video");
+      }
+      async fn propose_groups(
+        &self,
+        _: &[crate::model::FileSummary],
+      ) -> Result<Vec<crate::model::ProposedGroup>> {
+        Ok(vec![])
+      }
+    }
+
+    let result =
+      analyze_file(&UnusedProvider, &file, &opts).await.unwrap();
+
+    assert_eq!(result.source, DescriptionSource::Unanalyzed);
+    assert!(result.summary.contains("junk.mp4"));
+  }
+
   #[tokio::test]
   async fn analyze_video_file_caches_result() {
     let cache_dir = TempDir::new().unwrap();

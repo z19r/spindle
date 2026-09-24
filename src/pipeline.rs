@@ -443,6 +443,7 @@ async fn run_ai_pipeline<P: AiProvider>(
     introspect_archives: config.introspect_archives,
     max_archive_files: config.max_archive_files,
     max_archive_file_size_mb: config.max_archive_file_size_mb,
+    use_ffmpeg: crate::video::ffmpeg_available(),
   };
 
   let subset: Vec<_> =

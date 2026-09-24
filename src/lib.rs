@@ -13,5 +13,4 @@ pub mod plan;
 pub mod progress;
 pub mod scanner;
 pub mod tui;
-#[cfg(feature = "video")]
 pub mod video;
