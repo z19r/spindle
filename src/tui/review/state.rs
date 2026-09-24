@@ -127,9 +127,34 @@ impl ReviewState {
       diff_state: None,
       file_notes,
       banner: None,
+      descriptions: HashMap::new(),
     };
     state.update_image_preview();
     state
+  }
+
+  /// Attach what the model said about each file so the detail pane can
+  /// show the summary, tags, confidence and source.
+  pub fn with_descriptions(
+    mut self,
+    descriptions: &HashMap<usize, ContentDescription>,
+    files: &[FingerprintedFile],
+  ) -> Self {
+    for (idx, desc) in descriptions {
+      if let Some(f) = files.get(*idx) {
+        self
+          .descriptions
+          .insert(f.scanned.path.clone(), desc.clone());
+      }
+    }
+    self
+  }
+
+  pub fn description(
+    &self,
+    path: &Path,
+  ) -> Option<&ContentDescription> {
+    self.descriptions.get(path)
   }
 
   /// Show a one-line summary of the run in the header.

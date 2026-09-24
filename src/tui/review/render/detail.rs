@@ -122,6 +122,49 @@ pub(crate) fn render_detail_file(
       Line::from(""),
     ];
 
+    if let Some(desc) = state.description(&mv.from) {
+      lines.push(Line::from(Span::styled(
+        "  DESCRIPTION",
+        theme::label(),
+      )));
+      for text in wrap_text(&desc.summary, 60) {
+        lines.push(Line::from(vec![
+          Span::styled("  ", Style::default()),
+          Span::styled(text, theme::value()),
+        ]));
+      }
+      if !desc.tags.is_empty() {
+        lines.push(Line::from(vec![
+          Span::styled("  ", Style::default()),
+          Span::styled(desc.tags.join(", "), theme::dim()),
+        ]));
+      }
+      let (verdict, style) = match desc.source {
+        DescriptionSource::Ai => (
+          format!(
+            "confidence {:.2} (content analysed)",
+            desc.confidence
+          ),
+          if desc.confidence < 0.6 {
+            theme::warning()
+          } else {
+            theme::approved()
+          },
+        ),
+        DescriptionSource::Filename => (
+          "filename only — content not read".to_string(),
+          theme::warning(),
+        ),
+        DescriptionSource::Unanalyzed => {
+          ("not analysed".to_string(), theme::rejected())
+        }
+      };
+      lines.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(verdict, style),
+      ]));
+      lines.push(Line::from(""));
+    }
     if let Some(note) = state.file_note(&mv.from) {
       lines.push(Line::from(Span::styled("  NOTE", theme::label())));
       lines.push(Line::from(vec![

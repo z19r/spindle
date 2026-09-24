@@ -187,6 +187,7 @@ async fn main() -> Result<()> {
   )
   .with_file_metadata(&result.fingerprinted)
   .with_duplicates(&result.all_dupes, &result.fingerprinted)
+  .with_descriptions(&result.descriptions, &result.fingerprinted)
   .with_banner(&summary);
 
   let Some(mut session) = session else {
