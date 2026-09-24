@@ -430,7 +430,12 @@ impl ClaudeProvider {
       Some(group_output_config()),
     );
 
+    tracing::debug!(
+      prompt = %preview(&request_prompt_text(&request), 6000),
+      "Grouping prompt"
+    );
     let text = self.send_request(request).await?;
+    tracing::debug!(raw = %preview(&text, 6000), "Grouping reply");
 
     #[derive(Deserialize)]
     struct GroupResponse {
@@ -645,6 +650,21 @@ impl ClaudeProvider {
         .collect(),
     )
   }
+}
+
+/// The user-turn text of a request, for debug logging. Image blocks
+/// are skipped so a photo never lands in the log.
+fn request_prompt_text(request: &ApiRequest) -> String {
+  request
+    .messages
+    .iter()
+    .flat_map(|m| m.content.iter())
+    .filter_map(|c| match c {
+      ContentBlock::Text { text, .. } => Some(text.as_str()),
+      _ => None,
+    })
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 /// Normalise parsed groups: derive member indices from destinations and
@@ -967,6 +987,36 @@ mod tests {
     assert_eq!(
       groups["items"]["properties"]["members"]["minItems"],
       1
+    );
+  }
+
+  #[test]
+  fn request_prompt_text_keeps_text_blocks_only() {
+    let request = cached_api_request(
+      "m".to_string(),
+      10,
+      None,
+      vec![Message {
+        role: "user",
+        content: vec![
+          ContentBlock::Image {
+            source: ImageSource {
+              source_type: "base64",
+              media_type: "image/png".to_string(),
+              data: "AAAA".to_string(),
+            },
+          },
+          ContentBlock::Text {
+            text: "Organize these 2 files:".to_string(),
+            cache_control: None,
+          },
+        ],
+      }],
+      None,
+    );
+    assert_eq!(
+      request_prompt_text(&request),
+      "Organize these 2 files:"
     );
   }
 
