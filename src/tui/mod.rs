@@ -241,7 +241,6 @@ pub fn run_review(
       PathBuf::new(),
       None,
       ReviewMode::Organize,
-      None,
     ),
   };
 
@@ -269,7 +268,6 @@ mod tests {
       PathBuf::from("/out"),
       None,
       ReviewMode::Organize,
-      None,
     )
   }
 
@@ -350,7 +348,6 @@ mod tests {
       PathBuf::from("/out"),
       None,
       ReviewMode::Organize,
-      None,
     );
 
     state.handle_key(KeyCode::Char('j'));
@@ -483,7 +480,6 @@ mod tests {
       PathBuf::from("/out"),
       None,
       ReviewMode::Organize,
-      None,
     );
 
     state.handle_key(KeyCode::Char('k'));
@@ -520,7 +516,6 @@ mod tests {
       PathBuf::from("/out"),
       None,
       ReviewMode::Organize,
-      None,
     );
 
     state.handle_key(KeyCode::Char(' '));
@@ -574,7 +569,6 @@ mod tests {
       PathBuf::from("/out"),
       None,
       ReviewMode::Organize,
-      None,
     );
 
     state.handle_key(KeyCode::Down);

@@ -130,6 +130,50 @@ pub(crate) fn render_detail_file(
       ]));
       lines.push(Line::from(""));
     }
+    if let Some(info) = state.dupe_info(&mv.from) {
+      lines.push(Line::from(Span::styled(
+        "  DUPLICATE",
+        theme::label(),
+      )));
+      let what = match (info.is_canonical, info.kind) {
+        (true, _) => "has a copy at".to_string(),
+        (false, DuplicateType::Exact) => {
+          "byte-identical copy of".to_string()
+        }
+        (false, DuplicateType::NearDuplicate { distance }) => {
+          format!("perceptually similar (distance {distance}) to")
+        }
+        (false, DuplicateType::SimilarText { distance }) => {
+          format!("near-identical text (distance {distance}) to")
+        }
+        (false, DuplicateType::SimilarAudio { score }) => {
+          format!("same recording ({score}% match) as")
+        }
+        (false, DuplicateType::ArchiveMatch) => {
+          "archive already extracted at".to_string()
+        }
+      };
+      lines.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(what, theme::warning()),
+      ]));
+      lines.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+          info.partner.display().to_string(),
+          theme::path(),
+        ),
+      ]));
+      lines.push(Line::from(Span::styled(
+        if state.is_file_kept(state.selected, state.file_selected) {
+          "  kept — press space to stage it for deletion"
+        } else {
+          "  marked for deletion — press space to keep"
+        },
+        theme::dim(),
+      )));
+      lines.push(Line::from(""));
+    }
     lines.push(Line::from(Span::styled("  SOURCE", theme::label())));
     lines.push(Line::from(vec![
       Span::styled("  ", Style::default()),

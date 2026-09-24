@@ -10,54 +10,8 @@ pub(crate) fn render_footer(
     ReviewMode::Dupes => "Dupes",
   };
 
-  let can_swap = state.can_swap_mode();
   let keys: Vec<(&str, &str)> = match &state.mode {
-    Mode::Normal => match (state.focus, state.review_mode) {
-      (Pane::Groups, _) => {
-        let mut k = vec![("j/k", "navigate"), ("\u{2423}", "toggle")];
-        if state.review_mode == ReviewMode::Organize {
-          k.push(("r", "rename"));
-          k.push(("M", "merge"));
-        }
-        if can_swap {
-          k.push(("s", "mode"));
-        }
-        if state.review_mode == ReviewMode::Dupes {
-          k.push(("d", "diff"));
-        }
-        k.extend([
-          ("tab", "pane"),
-          ("x", "execute"),
-          ("?", "help"),
-          ("q", "quit"),
-        ]);
-        k
-      }
-      (Pane::Files, ReviewMode::Organize) => {
-        let mut k = vec![
-          ("j/k", "navigate"),
-          ("\u{23ce}", "select"),
-          ("\u{2423}", "preview"),
-          ("d", "remove"),
-          ("m", "move"),
-          ("n", "new group"),
-        ];
-        if can_swap {
-          k.push(("s", "mode"));
-        }
-        k.extend([("tab", "pane"), ("x", "execute")]);
-        k
-      }
-      (Pane::Files, ReviewMode::Dupes) => {
-        let mut k =
-          vec![("j/k", "navigate"), ("\u{2423}", "keep/delete")];
-        if can_swap {
-          k.push(("s", "mode"));
-        }
-        k.extend([("d", "diff"), ("tab", "pane"), ("x", "execute")]);
-        k
-      }
-    },
+    Mode::Normal => key_table(state.review_mode, Some(state.focus)),
     Mode::MoveToGroup { .. } => vec![
       ("j/k", "navigate"),
       ("\u{23ce}", "confirm"),
@@ -138,4 +92,51 @@ pub(crate) fn render_footer(
     );
 
   frame.render_widget(footer, area);
+}
+
+/// The one list of normal-mode keys. The footer shows the subset for
+/// the focused pane; the help modal shows everything (`pane: None`).
+pub(crate) fn key_table(
+  review_mode: ReviewMode,
+  pane: Option<Pane>,
+) -> Vec<(&'static str, &'static str)> {
+  let groups = pane != Some(Pane::Files);
+  let files = pane != Some(Pane::Groups);
+  let organize = review_mode == ReviewMode::Organize;
+
+  let mut k: Vec<(&str, &str)> = vec![("j/k", "navigate")];
+  match pane {
+    Some(Pane::Groups) => k.push(("\u{23ce}", "open files")),
+    Some(Pane::Files) => k.push(("\u{23ce}", "preview")),
+    None => k.push(("\u{23ce}", "open (files / preview)")),
+  }
+  match pane {
+    Some(Pane::Groups) => k.push(("\u{2423}", "approve")),
+    Some(Pane::Files) => k.push(("\u{2423}", "keep/delete")),
+    None => {
+      k.push(("\u{2423}", "toggle (approve group / keep file)"))
+    }
+  }
+  if organize && files {
+    k.extend([
+      ("v", "mark"),
+      ("m", "move"),
+      ("n", "new group"),
+      ("d", "remove"),
+      ("D", "diff with copy"),
+    ]);
+  }
+  if organize && groups {
+    k.extend([("r", "rename"), ("M", "merge")]);
+  }
+  if !organize {
+    k.push(("D", "diff"));
+  }
+  k.extend([
+    ("tab", "pane"),
+    ("x", "execute"),
+    ("?", "help"),
+    ("q", "quit"),
+  ]);
+  k
 }

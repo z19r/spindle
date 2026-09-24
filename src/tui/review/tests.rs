@@ -62,7 +62,6 @@ fn make_state_with_mode(mode: ReviewMode) -> ReviewState {
     PathBuf::from("/out"),
     None,
     mode,
-    None,
   )
 }
 
@@ -77,7 +76,6 @@ fn make_empty_review_state() -> ReviewState {
     PathBuf::from("/out"),
     None,
     ReviewMode::Organize,
-    None,
   )
 }
 
@@ -224,7 +222,6 @@ fn merge_with_a_single_group_is_a_noop() {
     PathBuf::from("/out"),
     None,
     ReviewMode::Organize,
-    None,
   );
   state.handle_key(KeyCode::Char('M'));
   assert_eq!(state.mode, Mode::Normal);
@@ -254,7 +251,6 @@ fn system_groups_come_first_and_start_unapproved() {
     PathBuf::from("/out"),
     None,
     ReviewMode::Organize,
-    None,
   );
   let labels: Vec<&str> =
     state.groups.iter().map(|g| g.label.as_str()).collect();
@@ -278,7 +274,6 @@ fn file_notes_are_looked_up_by_path_and_rendered() {
     PathBuf::from("/out"),
     None,
     ReviewMode::Organize,
-    None,
   );
   assert_eq!(state.file_note(Path::new("/dl/beach1.jpg")), None);
   assert_eq!(
@@ -567,7 +562,6 @@ fn move_to_group_noop_single_group() {
     PathBuf::from("/out"),
     None,
     ReviewMode::Organize,
-    None,
   );
   state.handle_key(KeyCode::Tab);
   state.handle_key(KeyCode::Char('m'));
@@ -715,7 +709,6 @@ fn d_noop_with_empty_file_list() {
     PathBuf::from("/out"),
     None,
     ReviewMode::Organize,
-    None,
   );
   state.handle_key(KeyCode::Tab);
   state.handle_key(KeyCode::Char('d'));
@@ -803,7 +796,6 @@ fn preview_none_when_no_files() {
     PathBuf::from("/out"),
     None,
     ReviewMode::Organize,
-    None,
   );
 
   assert!(!state.has_image_preview());
@@ -830,7 +822,6 @@ fn preview_none_for_video_extension() {
     PathBuf::from("/out"),
     None,
     ReviewMode::Organize,
-    None,
   );
 
   assert!(!state.has_image_preview());
@@ -912,31 +903,10 @@ fn toggle_file_keep_in_dupes_mode() {
 }
 
 #[test]
-fn space_in_files_does_not_toggle_keep_in_organize() {
-  let mut state = make_state();
-  state.handle_key(KeyCode::Tab);
-  state.handle_key(KeyCode::Char('j'));
-  assert!(state.is_file_kept(0, 1));
-  state.handle_key(KeyCode::Char(' '));
-  assert!(state.is_file_kept(0, 1));
-}
-
-#[test]
-fn enter_toggles_file_mark_in_organize() {
-  let mut state = make_state();
-  state.handle_key(KeyCode::Tab);
-  assert!(!state.is_file_marked(0, 0));
-  state.handle_key(KeyCode::Enter);
-  assert!(state.is_file_marked(0, 0));
-  state.handle_key(KeyCode::Enter);
-  assert!(!state.is_file_marked(0, 0));
-}
-
-#[test]
 fn marks_clear_on_group_navigation() {
   let mut state = make_state();
   state.handle_key(KeyCode::Tab);
-  state.handle_key(KeyCode::Enter);
+  state.handle_key(KeyCode::Char('v'));
   assert!(state.is_file_marked(0, 0));
   state.handle_key(KeyCode::Tab);
   state.handle_key(KeyCode::Char('j'));
@@ -947,9 +917,9 @@ fn marks_clear_on_group_navigation() {
 fn remove_marked_files_removes_multiple() {
   let mut state = make_state();
   state.handle_key(KeyCode::Tab);
-  state.handle_key(KeyCode::Enter);
+  state.handle_key(KeyCode::Char('v'));
   state.handle_key(KeyCode::Char('j'));
-  state.handle_key(KeyCode::Enter);
+  state.handle_key(KeyCode::Char('v'));
   assert_eq!(state.current_group_moves().len(), 2);
   state.handle_key(KeyCode::Char('d'));
   assert_eq!(state.current_group_moves().len(), 0);
@@ -959,9 +929,9 @@ fn remove_marked_files_removes_multiple() {
 fn move_marked_files_to_group() {
   let mut state = make_state();
   state.handle_key(KeyCode::Tab);
-  state.handle_key(KeyCode::Enter);
+  state.handle_key(KeyCode::Char('v'));
   state.handle_key(KeyCode::Char('j'));
-  state.handle_key(KeyCode::Enter);
+  state.handle_key(KeyCode::Char('v'));
   assert_eq!(state.current_group_moves().len(), 2);
   state.handle_key(KeyCode::Char('m'));
   state.handle_key(KeyCode::Enter);
@@ -1053,61 +1023,9 @@ fn mode_defaults_to_constructor_arg() {
 }
 
 #[test]
-fn s_key_toggles_mode() {
-  let mut state = ReviewState::new(
-    make_groups(),
-    make_moves(),
-    PathBuf::from("/out"),
-    None,
-    ReviewMode::Organize,
-    Some((
-      make_groups(),
-      make_moves(),
-      ReviewMode::Dupes,
-      vec![DuplicateType::Exact],
-    )),
-  );
-  assert_eq!(state.review_mode(), ReviewMode::Organize);
-  assert!(state.is_file_kept(0, 0));
-  assert!(state.is_file_kept(0, 1));
-
-  state.handle_key(KeyCode::Char('s'));
-  assert_eq!(state.review_mode(), ReviewMode::Dupes);
-  assert!(state.is_file_kept(0, 0));
-  assert!(!state.is_file_kept(0, 1));
-
-  state.handle_key(KeyCode::Char('s'));
-  assert_eq!(state.review_mode(), ReviewMode::Organize);
-  assert!(state.is_file_kept(0, 0));
-  assert!(state.is_file_kept(0, 1));
-}
-
-#[test]
-fn s_key_does_nothing_without_other_mode() {
-  let mut state = make_state();
-  assert_eq!(state.review_mode(), ReviewMode::Organize);
-
-  state.handle_key(KeyCode::Char('s'));
-  assert_eq!(state.review_mode(), ReviewMode::Organize);
-}
-
-#[test]
-fn organize_keys_disabled_in_dupes_mode() {
-  let mut state = make_dupes_state();
-  state.handle_key(KeyCode::Tab);
-  assert_eq!(state.focus(), Pane::Files);
-
-  state.handle_key(KeyCode::Char('m'));
-  assert_eq!(state.mode, Mode::Normal);
-
-  state.handle_key(KeyCode::Char('n'));
-  assert_eq!(state.mode, Mode::Normal);
-}
-
-#[test]
 fn d_opens_diff_view_in_dupes_mode() {
   let mut state = make_dupes_state();
-  state.handle_key(KeyCode::Char('d'));
+  state.handle_key(KeyCode::Char('D'));
   assert_eq!(state.mode, Mode::DiffView { compare_idx: 0 });
 
   state.handle_key(KeyCode::Esc);
@@ -1117,7 +1035,7 @@ fn d_opens_diff_view_in_dupes_mode() {
 #[test]
 fn diff_view_jk_cycles_files() {
   let mut state = make_dupes_state();
-  state.handle_key(KeyCode::Char('d'));
+  state.handle_key(KeyCode::Char('D'));
   assert_eq!(state.mode, Mode::DiffView { compare_idx: 0 });
 
   state.handle_key(KeyCode::Char('j'));
@@ -1137,7 +1055,7 @@ fn diff_view_jk_cycles_files() {
 #[test]
 fn diff_view_k_does_not_underflow() {
   let mut state = make_dupes_state();
-  state.handle_key(KeyCode::Char('d'));
+  state.handle_key(KeyCode::Char('D'));
   state.handle_key(KeyCode::Char('k'));
   assert_eq!(state.mode, Mode::DiffView { compare_idx: 0 });
 }
@@ -1145,37 +1063,10 @@ fn diff_view_k_does_not_underflow() {
 #[test]
 fn diff_view_d_toggles_back() {
   let mut state = make_dupes_state();
-  state.handle_key(KeyCode::Char('d'));
+  state.handle_key(KeyCode::Char('D'));
   assert_eq!(state.mode, Mode::DiffView { compare_idx: 0 });
-  state.handle_key(KeyCode::Char('d'));
+  state.handle_key(KeyCode::Char('D'));
   assert_eq!(state.mode, Mode::Normal);
-}
-
-#[test]
-fn dupe_types_preserved_across_mode_swap() {
-  let mut state = ReviewState::new(
-    make_groups(),
-    make_moves(),
-    PathBuf::from("/out"),
-    None,
-    ReviewMode::Organize,
-    Some((
-      make_groups(),
-      make_moves(),
-      ReviewMode::Dupes,
-      vec![DuplicateType::Exact],
-    )),
-  );
-  assert!(state.dupe_types.is_empty());
-
-  state.handle_key(KeyCode::Char('s'));
-  assert_eq!(state.review_mode(), ReviewMode::Dupes);
-  assert_eq!(state.dupe_types.len(), 1);
-  assert_eq!(state.dupe_types[0], DuplicateType::Exact);
-
-  state.handle_key(KeyCode::Char('s'));
-  assert_eq!(state.review_mode(), ReviewMode::Organize);
-  assert!(state.dupe_types.is_empty());
 }
 
 #[test]
@@ -1201,4 +1092,163 @@ fn d_noop_in_organize_files_pane() {
   state.handle_key(KeyCode::Char('d'));
   let moves_after = state.group_moves[0].len();
   assert_eq!(moves_before - 1, moves_after);
+}
+
+fn fp(path: &str) -> FingerprintedFile {
+  FingerprintedFile {
+    scanned: crate::model::ScannedFile {
+      path: PathBuf::from(path),
+      scan_root: PathBuf::from("/dl"),
+      size: 10,
+      modified: std::time::SystemTime::UNIX_EPOCH,
+      file_type: FileType::Image(crate::model::ImageFormat::Jpg),
+    },
+    blake3_hash: [0u8; 32],
+    perceptual_hash: None,
+  }
+}
+
+fn files() -> Vec<FingerprintedFile> {
+  make_moves()
+    .iter()
+    .map(|m| fp(m.from.to_str().unwrap()))
+    .collect()
+}
+
+fn state_with_dupes(sets: Vec<DuplicateSet>) -> ReviewState {
+  make_state().with_duplicates(&sets, &files())
+}
+
+#[test]
+fn space_toggles_keep_in_organize_files_pane() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Tab);
+  assert!(state.is_file_kept(0, 0));
+  state.handle_key(KeyCode::Char(' '));
+  assert!(!state.is_file_kept(0, 0));
+  assert_eq!(
+    state.files_to_delete(),
+    vec![PathBuf::from("/dl/beach1.jpg")]
+  );
+  // Deleted files never move.
+  assert!(state
+    .approved_moves()
+    .iter()
+    .all(|m| m.from != Path::new("/dl/beach1.jpg")));
+  state.handle_key(KeyCode::Char(' '));
+  assert!(state.is_file_kept(0, 0));
+}
+
+#[test]
+fn enter_opens_files_from_groups_and_preview_from_files() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Enter);
+  assert_eq!(state.focus, Pane::Files);
+  state.handle_key(KeyCode::Enter);
+  assert_eq!(state.mode, Mode::Preview);
+}
+
+#[test]
+fn v_marks_files_in_organize_only() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Char('v'));
+  assert!(state.is_file_marked(0, 0));
+  state.handle_key(KeyCode::Char('v'));
+  assert!(!state.is_file_marked(0, 0));
+
+  let mut dupes = make_dupes_state();
+  dupes.handle_key(KeyCode::Tab);
+  dupes.handle_key(KeyCode::Char('v'));
+  assert!(!dupes.is_file_marked(0, 0));
+}
+
+#[test]
+fn exact_duplicates_start_marked_for_deletion_and_badge_both_files() {
+  let state = state_with_dupes(vec![DuplicateSet {
+    canonical: 0,
+    duplicates: vec![1],
+    duplicate_type: DuplicateType::Exact,
+  }]);
+  assert!(state.is_file_kept(0, 0));
+  assert!(!state.is_file_kept(0, 1));
+  assert_eq!(
+    state.files_to_delete(),
+    vec![PathBuf::from("/dl/beach2.jpg")]
+  );
+  assert_eq!(state.approved_moves().len(), 4);
+
+  let canon = state.dupe_info(Path::new("/dl/beach1.jpg")).unwrap();
+  assert!(canon.is_canonical);
+  assert_eq!(canon.partner, PathBuf::from("/dl/beach2.jpg"));
+  let dup = state.dupe_info(Path::new("/dl/beach2.jpg")).unwrap();
+  assert!(!dup.is_canonical);
+  assert_eq!(dup.partner, PathBuf::from("/dl/beach1.jpg"));
+  assert_eq!(dup.kind, DuplicateType::Exact);
+}
+
+#[test]
+fn near_duplicates_stay_kept_until_the_user_decides() {
+  let state = state_with_dupes(vec![DuplicateSet {
+    canonical: 2,
+    duplicates: vec![3],
+    duplicate_type: DuplicateType::NearDuplicate { distance: 3 },
+  }]);
+  assert!(state.is_file_kept(1, 1));
+  assert!(state.files_to_delete().is_empty());
+  assert!(state.dupe_info(Path::new("/dl/cat2.jpg")).is_some());
+}
+
+#[test]
+fn shift_d_diffs_a_file_with_its_partner_in_another_group() {
+  let mut state = state_with_dupes(vec![DuplicateSet {
+    canonical: 0,
+    duplicates: vec![2],
+    duplicate_type: DuplicateType::NearDuplicate { distance: 2 },
+  }]);
+  // Cursor on cat1.jpg (group 1, file 0), whose partner is beach1.jpg
+  // in group 0.
+  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Char('D'));
+  assert!(matches!(state.mode, Mode::DiffView { .. }));
+  let ds = state.diff_state.as_ref().unwrap();
+  assert_eq!(ds.primary_path, Some(PathBuf::from("/dl/beach1.jpg")));
+  assert_eq!(ds.secondary_path, Some(PathBuf::from("/dl/cat1.jpg")));
+}
+
+#[test]
+fn shift_d_without_a_partner_does_nothing() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Char('D'));
+  assert_eq!(state.mode, Mode::Normal);
+}
+
+#[test]
+fn key_table_matches_pane_and_mode() {
+  let keys = |m, p| {
+    key_table(m, p)
+      .into_iter()
+      .map(|(k, _)| k)
+      .collect::<Vec<_>>()
+  };
+  let groups = keys(ReviewMode::Organize, Some(Pane::Groups));
+  assert!(groups.contains(&"r") && groups.contains(&"M"));
+  assert!(!groups.contains(&"v") && !groups.contains(&"m"));
+  let files = keys(ReviewMode::Organize, Some(Pane::Files));
+  assert!(
+    files.contains(&"v")
+      && files.contains(&"D")
+      && files.contains(&"d")
+  );
+  assert!(!files.contains(&"r"));
+  let all = keys(ReviewMode::Organize, None);
+  assert!(all.contains(&"r") && all.contains(&"v"));
+  let dupes = keys(ReviewMode::Dupes, Some(Pane::Files));
+  assert!(dupes.contains(&"D") && !dupes.contains(&"m"));
+  for k in [&groups, &files, &all, &dupes] {
+    assert!(k.contains(&"x") && k.contains(&"?") && k.contains(&"q"));
+    assert!(k.contains(&"\u{2423}") && k.contains(&"\u{23ce}"));
+  }
 }
