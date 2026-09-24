@@ -124,6 +124,9 @@ pub struct PipelineResult {
   pub all_dupes: Vec<DuplicateSet>,
   /// New candidates that are byte-identical to already-organized files.
   pub organized_duplicates: Vec<OrganizedDuplicate>,
+  /// What the model (or the filename fallback) said about each analyzed
+  /// file, by fingerprinted index. Empty with `--no-ai`.
+  pub descriptions: HashMap<usize, ContentDescription>,
 }
 
 pub async fn run<P: AiProvider>(
@@ -166,6 +169,7 @@ pub async fn run<P: AiProvider>(
       fingerprinted: vec![],
       all_dupes: vec![],
       organized_duplicates,
+      descriptions: HashMap::new(),
     });
   }
 
@@ -247,14 +251,17 @@ pub async fn run<P: AiProvider>(
     })
     .await;
 
-  let proposed_groups = if config.no_ai {
-    vec![ProposedGroup {
-      label: "All Files".to_string(),
-      rationale: "AI analysis skipped".to_string(),
-      member_indices: (0..fingerprinted.len()).collect(),
-      member_destinations: vec![],
-      member_notes: vec![],
-    }]
+  let (proposed_groups, descriptions) = if config.no_ai {
+    (
+      vec![ProposedGroup {
+        label: "All Files".to_string(),
+        rationale: "AI analysis skipped".to_string(),
+        member_indices: (0..fingerprinted.len()).collect(),
+        member_destinations: vec![],
+        member_notes: vec![],
+      }],
+      HashMap::new(),
+    )
   } else {
     let existing_labels: Vec<String> = ledger
       .as_ref()
@@ -316,6 +323,7 @@ pub async fn run<P: AiProvider>(
     fingerprinted,
     all_dupes,
     organized_duplicates,
+    descriptions,
   })
 }
 
@@ -385,7 +393,8 @@ async fn run_ai_pipeline<P: AiProvider>(
   organized_context: &[(String, Vec<ContentDescription>)],
   config: &PipelineConfig,
   tx: &mpsc::Sender<PipelineEvent>,
-) -> Result<Vec<ProposedGroup>> {
+) -> Result<(Vec<ProposedGroup>, HashMap<usize, ContentDescription>)>
+{
   let size_cap = config.max_file_size_mb * BYTES_PER_MB;
   let mut files_to_analyze: Vec<(usize, &FingerprintedFile)> =
     Vec::new();
@@ -515,6 +524,10 @@ async fn run_ai_pipeline<P: AiProvider>(
     }
   }
 
+  let descriptions: HashMap<usize, ContentDescription> = summaries
+    .iter()
+    .map(|s| (s.index, s.description.clone()))
+    .collect();
   let succeeded = summaries.len();
   let failed = failed_files.len();
 
@@ -595,11 +608,9 @@ async fn run_ai_pipeline<P: AiProvider>(
   {
     tracing::info!("Reused cached grouping (no Claude call)");
     let groups = validate_and_report(groups, tx).await;
-    return Ok(add_unsorted(
-      groups,
-      &summaries,
-      skipped,
-      failed_notes,
+    return Ok((
+      add_unsorted(groups, &summaries, skipped, failed_notes),
+      descriptions,
     ));
   }
 
@@ -651,7 +662,10 @@ async fn run_ai_pipeline<P: AiProvider>(
     }
   };
   let groups = validate_and_report(groups, tx).await;
-  Ok(add_unsorted(groups, &summaries, skipped, failed_notes))
+  Ok((
+    add_unsorted(groups, &summaries, skipped, failed_notes),
+    descriptions,
+  ))
 }
 
 /// Run label validation and tell the progress display what changed.
@@ -2631,6 +2645,43 @@ mod tests {
     assert!(seen[0].1.contains(
       &"other.png|user filed under: Personal/Recipes".to_string()
     ));
+  }
+
+  #[tokio::test]
+  async fn result_carries_descriptions_for_analyzed_files_only() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+    config.taxonomy = vec![];
+    config.max_files = 2;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&FakeProvider, &config, tx).await.unwrap();
+
+    assert_eq!(result.descriptions.len(), 2);
+    for (idx, desc) in &result.descriptions {
+      let name = result.fingerprinted[*idx]
+        .scanned
+        .path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+      assert_eq!(desc.summary, format!("Description of {name}"));
+    }
+
+    config.no_ai = true;
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&FakeProvider, &config, tx).await.unwrap();
+    assert!(result.descriptions.is_empty());
   }
 
   #[test]

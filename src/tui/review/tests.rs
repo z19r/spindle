@@ -1260,3 +1260,56 @@ fn banner_is_stored_for_the_header() {
   let state = state.with_banner("2 groups · 5 moves");
   assert_eq!(state.banner(), Some("2 groups · 5 moves"));
 }
+
+#[test]
+fn descriptions_are_looked_up_by_path_and_rendered() {
+  let desc = ContentDescription {
+    summary: "Lease agreement for 418 Maple St".to_string(),
+    tags: vec!["lease".to_string(), "housing".to_string()],
+    suggested_category: "legal".to_string(),
+    confidence: 0.55,
+    source: DescriptionSource::Ai,
+  };
+  let state = make_state()
+    .with_descriptions(&HashMap::from([(1usize, desc)]), &files());
+  assert!(state.description(Path::new("/dl/beach1.jpg")).is_none());
+  assert_eq!(
+    state
+      .description(Path::new("/dl/beach2.jpg"))
+      .map(|d| d.confidence),
+    Some(0.55)
+  );
+
+  let mut state = state;
+  state.focus = Pane::Files;
+  state.file_selected = 1;
+  let text: String = render_detail_file(&state)
+    .iter()
+    .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+    .collect();
+  assert!(
+    text.contains("Lease agreement for 418 Maple St"),
+    "{text}"
+  );
+  assert!(text.contains("lease, housing"), "{text}");
+  assert!(text.contains("confidence 0.55"), "{text}");
+}
+
+#[test]
+fn filename_only_descriptions_say_so() {
+  let desc = ContentDescription {
+    summary: "software installer: x.dmg".to_string(),
+    tags: vec![],
+    suggested_category: "software".to_string(),
+    confidence: 0.5,
+    source: DescriptionSource::Filename,
+  };
+  let mut state = make_state()
+    .with_descriptions(&HashMap::from([(0usize, desc)]), &files());
+  state.focus = Pane::Files;
+  let text: String = render_detail_file(&state)
+    .iter()
+    .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+    .collect();
+  assert!(text.contains("filename only"), "{text}");
+}

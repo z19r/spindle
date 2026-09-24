@@ -17,8 +17,8 @@ use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 
 use crate::model::{
-  DuplicateSet, DuplicateType, FileGroup, FileMove, FileType,
-  FingerprintedFile,
+  ContentDescription, DescriptionSource, DuplicateSet, DuplicateType,
+  FileGroup, FileMove, FileType, FingerprintedFile,
 };
 
 mod keys;
@@ -125,6 +125,8 @@ pub struct ReviewState {
   dupe_info: HashMap<PathBuf, DupeInfo>,
   /// One-line run summary shown in the header.
   banner: Option<String>,
+  /// Model descriptions by source path (organize mode).
+  descriptions: HashMap<PathBuf, ContentDescription>,
   dupe_types: Vec<DuplicateType>,
   diff_state: Option<DiffState>,
   /// Per-file explanation (from `FileGroup::member_notes`), keyed by
