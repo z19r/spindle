@@ -146,6 +146,8 @@ pub enum Mode {
   Normal,
   MoveToGroup { cursor: usize },
   NewGroup { input: String, cursor_pos: usize },
+  RenameGroup { input: String, cursor_pos: usize },
+  MergeInto { cursor: usize },
   ConfirmRemove,
   ConfirmExecute,
   DiffView { compare_idx: usize },
@@ -219,6 +221,16 @@ pub struct ReviewState {
   file_metadata: HashMap<PathBuf, (String, u64)>,
   dupe_types: Vec<DuplicateType>,
   diff_state: Option<DiffState>,
+  /// Per-file explanation (from `FileGroup::member_notes`), keyed by
+  /// source path so it survives moves between groups.
+  file_notes: HashMap<PathBuf, String>,
+}
+
+/// Groups the pipeline creates for files it could not place. Shown
+/// first and left unapproved so nothing surprising moves.
+fn is_system_group(group: &FileGroup) -> bool {
+  group.label == crate::pipeline::UNSORTED_LABEL
+    || group.label == "Needs Review"
 }
 
 impl ReviewState {
@@ -236,6 +248,37 @@ impl ReviewState {
       Vec<DuplicateType>,
     )>,
   ) -> Self {
+    // Notes are keyed by fingerprinted index; moves line up with
+    // `members` in order, so pair them positionally once, by path.
+    let mut file_notes: HashMap<PathBuf, String> = HashMap::new();
+    for g in &groups {
+      let group_paths: Vec<&PathBuf> = moves
+        .iter()
+        .filter(|m| m.group_id == g.id)
+        .map(|m| &m.from)
+        .collect();
+      for note in &g.member_notes {
+        if let Some(pos) =
+          g.members.iter().position(|&i| i == note.index)
+        {
+          if let Some(path) = group_paths.get(pos) {
+            file_notes.insert((*path).clone(), note.note.clone());
+          }
+        }
+      }
+    }
+
+    // System groups (Unsorted, Needs Review) first so the user sees
+    // what the plan could not place before approving anything.
+    let (mut groups, rest): (Vec<FileGroup>, Vec<FileGroup>) =
+      if mode == ReviewMode::Organize {
+        groups.into_iter().partition(is_system_group)
+      } else {
+        (Vec::new(), groups)
+      };
+    let system_count = groups.len();
+    groups.extend(rest);
+
     let len = groups.len();
     let next_group_id = groups
       .iter()
@@ -253,6 +296,8 @@ impl ReviewState {
           .collect()
       })
       .collect();
+    let approved: Vec<bool> =
+      (0..len).map(|i| i >= system_count).collect();
 
     let file_keep: Vec<Vec<bool>> =
       Self::init_file_keep(&group_moves, mode);
@@ -284,7 +329,7 @@ impl ReviewState {
 
     let mut state = Self {
       groups,
-      approved: vec![true; len],
+      approved,
       selected: 0,
       file_selected: 0,
       focus: Pane::Groups,
@@ -304,9 +349,15 @@ impl ReviewState {
       file_metadata: HashMap::new(),
       dupe_types: Vec::new(),
       diff_state: None,
+      file_notes,
     };
     state.update_image_preview();
     state
+  }
+
+  /// Why the pipeline put this file where it did, if it said.
+  pub fn file_note(&self, path: &Path) -> Option<&str> {
+    self.file_notes.get(path).map(String::as_str)
   }
 
   pub fn set_dupe_types(&mut self, types: Vec<DuplicateType>) {
@@ -804,7 +855,10 @@ impl ReviewState {
     match &self.mode {
       Mode::Normal => self.handle_normal_key(code),
       Mode::MoveToGroup { .. } => self.handle_move_to_group_key(code),
-      Mode::NewGroup { .. } => self.handle_new_group_key(code),
+      Mode::MergeInto { .. } => self.handle_merge_key(code),
+      Mode::NewGroup { .. } | Mode::RenameGroup { .. } => {
+        self.handle_text_input_key(code)
+      }
       Mode::ConfirmRemove => self.handle_confirm_remove_key(code),
       Mode::ConfirmExecute => self.handle_confirm_execute_key(code),
       Mode::DiffView { .. } => self.handle_diff_view_key(code),
@@ -937,6 +991,16 @@ impl ReviewState {
         self.enter_new_group();
       }
 
+      KeyCode::Char('r')
+        if self.review_mode == ReviewMode::Organize =>
+      {
+        self.enter_rename();
+      }
+      KeyCode::Char('M')
+        if self.review_mode == ReviewMode::Organize =>
+      {
+        self.enter_merge();
+      }
       KeyCode::Char('s') if self.other_mode_data.is_some() => {
         let cached = self.other_mode_data.take().unwrap();
         let current = ModeData {
@@ -1021,52 +1085,86 @@ impl ReviewState {
     }
   }
 
-  fn handle_new_group_key(&mut self, code: KeyCode) {
-    let (input, cursor_pos) = match &self.mode {
+  /// Shared line editor for the NewGroup and RenameGroup prompts.
+  fn handle_text_input_key(&mut self, code: KeyCode) {
+    let (input, cursor_pos, rename) = match &self.mode {
       Mode::NewGroup { input, cursor_pos } => {
-        (input.clone(), *cursor_pos)
+        (input.clone(), *cursor_pos, false)
+      }
+      Mode::RenameGroup { input, cursor_pos } => {
+        (input.clone(), *cursor_pos, true)
       }
       _ => return,
+    };
+    let rebuild = |input: String, cursor_pos: usize| {
+      if rename {
+        Mode::RenameGroup { input, cursor_pos }
+      } else {
+        Mode::NewGroup { input, cursor_pos }
+      }
     };
 
     match code {
       KeyCode::Char(c) => {
         let mut new_input = input;
         new_input.insert(cursor_pos, c);
-        self.mode = Mode::NewGroup {
-          input: new_input,
-          cursor_pos: cursor_pos + 1,
-        };
+        self.mode = rebuild(new_input, cursor_pos + 1);
       }
       KeyCode::Backspace if cursor_pos > 0 => {
         let mut new_input = input;
         new_input.remove(cursor_pos - 1);
-        self.mode = Mode::NewGroup {
-          input: new_input,
-          cursor_pos: cursor_pos - 1,
-        };
+        self.mode = rebuild(new_input, cursor_pos - 1);
       }
       KeyCode::Left if cursor_pos > 0 => {
-        self.mode = Mode::NewGroup {
-          input,
-          cursor_pos: cursor_pos - 1,
-        };
+        self.mode = rebuild(input, cursor_pos - 1);
       }
       KeyCode::Right => {
         let max = input.len();
         if cursor_pos < max {
-          self.mode = Mode::NewGroup {
-            input,
-            cursor_pos: cursor_pos + 1,
-          };
+          self.mode = rebuild(input, cursor_pos + 1);
         }
       }
       KeyCode::Enter => {
-        self.confirm_new_group(input);
+        if rename {
+          self.confirm_rename(input);
+        } else {
+          self.confirm_new_group(input);
+        }
       }
       KeyCode::Esc => {
         self.mode = Mode::Normal;
       }
+      _ => {}
+    }
+  }
+
+  fn handle_merge_key(&mut self, code: KeyCode) {
+    let cursor = match &self.mode {
+      Mode::MergeInto { cursor } => *cursor,
+      _ => return,
+    };
+    let target_count = self.move_target_groups().len();
+    if target_count == 0 {
+      self.mode = Mode::Normal;
+      return;
+    }
+    match code {
+      KeyCode::Char('j') | KeyCode::Down => {
+        self.mode = Mode::MergeInto {
+          cursor: (cursor + 1) % target_count,
+        };
+      }
+      KeyCode::Char('k') | KeyCode::Up => {
+        self.mode = Mode::MergeInto {
+          cursor: if cursor == 0 {
+            target_count - 1
+          } else {
+            cursor - 1
+          },
+        };
+      }
+      KeyCode::Enter => self.merge_current_into(cursor),
+      KeyCode::Esc => self.mode = Mode::Normal,
       _ => {}
     }
   }
@@ -1252,6 +1350,86 @@ impl ReviewState {
       self.file_selected = self.file_selected.min(src_count - 1);
       self.mode = Mode::Normal;
     }
+  }
+
+  /// Absolute destination directory of a group. Pipeline groups carry
+  /// an absolute `suggested_path`; TUI-created ones a relative slug.
+  fn group_dir(&self, idx: usize) -> PathBuf {
+    let p = &self.groups[idx].suggested_path;
+    if p.is_absolute() {
+      p.clone()
+    } else {
+      self.output_dir.join(p)
+    }
+  }
+
+  fn enter_rename(&mut self) {
+    if self.selected >= self.groups.len() {
+      return;
+    }
+    let input = self.groups[self.selected].label.clone();
+    let cursor_pos = input.len();
+    self.mode = Mode::RenameGroup { input, cursor_pos };
+  }
+
+  /// Relabel the current group and point every one of its moves at the
+  /// new folder, keeping any sub-path under the old one.
+  fn confirm_rename(&mut self, input: String) {
+    let name = input.trim().to_string();
+    if name.is_empty() {
+      return;
+    }
+    let old_dir = self.group_dir(self.selected);
+    let new_dir = self
+      .output_dir
+      .join(crate::group::sanitize_folder_name(&name));
+    for mv in &mut self.group_moves[self.selected] {
+      let rel: PathBuf = mv
+        .to
+        .strip_prefix(&old_dir)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| {
+          PathBuf::from(mv.from.file_name().unwrap_or_default())
+        });
+      mv.to = new_dir.join(rel);
+    }
+    let group = &mut self.groups[self.selected];
+    group.label = name;
+    group.suggested_path = new_dir;
+    self.mode = Mode::Normal;
+  }
+
+  fn enter_merge(&mut self) {
+    if self.groups.len() < 2 {
+      return;
+    }
+    self.mode = Mode::MergeInto { cursor: 0 };
+  }
+
+  /// Move every file of the current group into the picked one and drop
+  /// the now-empty source group.
+  fn merge_current_into(&mut self, cursor: usize) {
+    let targets = self.move_target_groups();
+    let Some(&(dest_idx, _)) = targets.get(cursor) else {
+      self.mode = Mode::Normal;
+      return;
+    };
+    let dest_group_id = self.groups[dest_idx].id;
+    let dest_dir = self.group_dir(dest_idx);
+
+    let moves = std::mem::take(&mut self.group_moves[self.selected]);
+    let keeps = std::mem::take(&mut self.file_keep[self.selected]);
+    for (mut mv, kept) in moves.into_iter().zip(keeps) {
+      let filename =
+        PathBuf::from(mv.from.file_name().unwrap_or_default());
+      mv.group_id = dest_group_id;
+      mv.to = dest_dir.join(filename);
+      self.group_moves[dest_idx].push(mv);
+      self.file_keep[dest_idx].push(kept);
+    }
+    self.clear_marks();
+    self.delete_current_group();
+    self.mode = Mode::Normal;
   }
 
   fn enter_new_group(&mut self) {
@@ -1519,6 +1697,8 @@ fn render_help_modal(frame: &mut Frame, state: &ReviewState) {
         ("m", "move file(s) to another group"),
         ("n", "move file(s) to a new group"),
         ("d", "remove file(s) from the plan"),
+        ("r", "rename the current group"),
+        ("M", "merge the current group into another"),
       ],
       &mut lines,
     ),
@@ -1681,11 +1861,37 @@ fn render_middle_panel(
 ) {
   match &state.mode {
     Mode::Normal => render_file_list(frame, area, state),
-    Mode::MoveToGroup { cursor } => {
-      render_group_picker(frame, area, state, *cursor)
-    }
-    Mode::NewGroup { input, cursor_pos } => {
-      render_new_group_input(frame, area, state, input, *cursor_pos)
+    Mode::MoveToGroup { cursor } => render_group_picker(
+      frame,
+      area,
+      state,
+      *cursor,
+      "Move to\u{2026}",
+    ),
+    Mode::MergeInto { cursor } => render_group_picker(
+      frame,
+      area,
+      state,
+      *cursor,
+      "Merge into\u{2026}",
+    ),
+    Mode::NewGroup { input, cursor_pos } => render_new_group_input(
+      frame,
+      area,
+      state,
+      input,
+      *cursor_pos,
+      "New Group",
+    ),
+    Mode::RenameGroup { input, cursor_pos } => {
+      render_new_group_input(
+        frame,
+        area,
+        state,
+        input,
+        *cursor_pos,
+        "Rename Group",
+      )
     }
     Mode::ConfirmRemove => render_confirm_remove(frame, area, state),
     Mode::DiffView { .. }
@@ -2382,8 +2588,9 @@ fn render_group_picker(
   area: Rect,
   state: &ReviewState,
   cursor: usize,
+  title: &str,
 ) {
-  let block = panel_block("Move to\u{2026}", true);
+  let block = panel_block(title, true);
   let targets = state.move_target_groups();
 
   if targets.is_empty() {
@@ -2447,9 +2654,15 @@ fn render_new_group_input(
   _state: &ReviewState,
   input: &str,
   cursor_pos: usize,
+  title: &str,
 ) {
-  let block = panel_block("New Group", true);
-  let slug = input.trim().to_lowercase().replace(' ', "_");
+  let block = panel_block(title, true);
+  let slug = crate::group::sanitize_folder_name(input.trim());
+  let slug = if input.trim().is_empty() {
+    String::new()
+  } else {
+    slug
+  };
 
   let mut input_spans: Vec<Span> = Vec::new();
   input_spans.push(Span::styled("  ", Style::default()));
@@ -2557,10 +2770,11 @@ fn render_detail(
       render_detail_file(state)
     }
     Mode::Normal => render_detail_group(state),
-    Mode::MoveToGroup { cursor } => {
+    Mode::MoveToGroup { cursor } | Mode::MergeInto { cursor } => {
       render_detail_move_target(state, *cursor)
     }
-    Mode::NewGroup { input, .. } => {
+    Mode::NewGroup { input, .. }
+    | Mode::RenameGroup { input, .. } => {
       render_detail_new_group(state, input)
     }
     Mode::ConfirmRemove | Mode::ConfirmExecute | Mode::Help => {
@@ -2648,6 +2862,14 @@ fn render_detail_file(state: &ReviewState) -> Vec<Line<'static>> {
       Line::from(""),
     ];
 
+    if let Some(note) = state.file_note(&mv.from) {
+      lines.push(Line::from(Span::styled("  NOTE", theme::label())));
+      lines.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(note.to_string(), theme::warning()),
+      ]));
+      lines.push(Line::from(""));
+    }
     lines.push(Line::from(Span::styled("  SOURCE", theme::label())));
     lines.push(Line::from(vec![
       Span::styled("  ", Style::default()),
@@ -3133,6 +3355,10 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &ReviewState) {
     Mode::Normal => match (state.focus, state.review_mode) {
       (Pane::Groups, _) => {
         let mut k = vec![("j/k", "navigate"), ("\u{2423}", "toggle")];
+        if state.review_mode == ReviewMode::Organize {
+          k.push(("r", "rename"));
+          k.push(("M", "merge"));
+        }
         if can_swap {
           k.push(("s", "mode"));
         }
@@ -3177,13 +3403,18 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &ReviewState) {
       ("\u{23ce}", "confirm"),
       ("esc", "cancel"),
     ],
-    Mode::NewGroup { .. } => {
+    Mode::NewGroup { .. } | Mode::RenameGroup { .. } => {
       vec![
         ("type", "name"),
         ("\u{23ce}", "confirm"),
         ("esc", "cancel"),
       ]
     }
+    Mode::MergeInto { .. } => vec![
+      ("j/k", "navigate"),
+      ("\u{23ce}", "merge"),
+      ("esc", "cancel"),
+    ],
     Mode::ConfirmRemove => {
       vec![("y", "delete group"), ("n", "keep"), ("esc", "cancel")]
     }
@@ -3359,6 +3590,216 @@ mod tests {
 
   fn make_dupes_state() -> ReviewState {
     make_state_with_mode(ReviewMode::Dupes)
+  }
+
+  fn type_text(state: &mut ReviewState, text: &str) {
+    for c in text.chars() {
+      state.handle_key(KeyCode::Char(c));
+    }
+  }
+
+  #[test]
+  fn r_opens_rename_prefilled_with_the_label() {
+    let mut state = make_state();
+    state.handle_key(KeyCode::Char('r'));
+    assert_eq!(
+      state.mode,
+      Mode::RenameGroup {
+        input: "Beach".to_string(),
+        cursor_pos: 5
+      }
+    );
+  }
+
+  #[test]
+  fn rename_updates_label_path_and_every_move() {
+    let mut state = make_state();
+    state.handle_key(KeyCode::Char('r'));
+    for _ in 0..5 {
+      state.handle_key(KeyCode::Backspace);
+    }
+    type_text(&mut state, "Sea Days");
+    state.handle_key(KeyCode::Enter);
+
+    assert_eq!(state.mode, Mode::Normal);
+    assert_eq!(state.groups[0].label, "Sea Days");
+    assert_eq!(
+      state.groups[0].suggested_path,
+      PathBuf::from("/out/sea_days")
+    );
+    assert_eq!(state.group_moves[0].len(), 2);
+    for mv in &state.group_moves[0] {
+      assert_eq!(mv.to.parent().unwrap(), Path::new("/out/sea_days"));
+      assert_eq!(mv.to.file_name(), mv.from.file_name());
+      assert_eq!(mv.group_id, 0);
+    }
+    // Other groups untouched.
+    assert_eq!(state.groups[1].label, "Cats");
+    assert!(state.group_moves[1]
+      .iter()
+      .all(|m| m.to.starts_with("/out/cats")));
+  }
+
+  #[test]
+  fn rename_keeps_nested_destinations() {
+    let mut state = make_state();
+    state.group_moves[0][1].to =
+      PathBuf::from("/out/beach/raw/beach2.jpg");
+    state.handle_key(KeyCode::Char('r'));
+    type_text(&mut state, " Days");
+    state.handle_key(KeyCode::Enter);
+    assert_eq!(
+      state.group_moves[0][1].to,
+      PathBuf::from("/out/beach_days/raw/beach2.jpg")
+    );
+  }
+
+  #[test]
+  fn rename_esc_cancels_and_empty_name_is_ignored() {
+    let mut state = make_state();
+    state.handle_key(KeyCode::Char('r'));
+    for _ in 0..5 {
+      state.handle_key(KeyCode::Backspace);
+    }
+    state.handle_key(KeyCode::Enter);
+    assert!(matches!(state.mode, Mode::RenameGroup { .. }));
+    state.handle_key(KeyCode::Esc);
+    assert_eq!(state.mode, Mode::Normal);
+    assert_eq!(state.groups[0].label, "Beach");
+  }
+
+  #[test]
+  fn rename_and_merge_are_disabled_in_dupes_mode() {
+    let mut state = make_dupes_state();
+    state.handle_key(KeyCode::Char('r'));
+    assert_eq!(state.mode, Mode::Normal);
+    state.handle_key(KeyCode::Char('M'));
+    assert_eq!(state.mode, Mode::Normal);
+  }
+
+  #[test]
+  fn shift_m_merges_the_current_group_into_the_picked_one() {
+    let mut state = make_state();
+    state.handle_key(KeyCode::Char('M'));
+    assert_eq!(state.mode, Mode::MergeInto { cursor: 0 });
+    state.handle_key(KeyCode::Enter);
+
+    assert_eq!(state.mode, Mode::Normal);
+    assert_eq!(state.groups.len(), 1);
+    assert_eq!(state.groups[0].label, "Cats");
+    assert_eq!(state.group_moves[0].len(), 5);
+    assert_eq!(state.file_keep[0].len(), 5);
+    assert_eq!(state.selected, 0);
+    let beach = state.group_moves[0]
+      .iter()
+      .find(|m| m.from.ends_with("beach1.jpg"))
+      .unwrap();
+    assert_eq!(beach.to, PathBuf::from("/out/cats/beach1.jpg"));
+    assert_eq!(beach.group_id, 1);
+  }
+
+  #[test]
+  fn merge_picker_navigates_and_esc_cancels() {
+    let mut state = make_state();
+    state.groups.push(FileGroup {
+      id: 2,
+      label: "Dogs".to_string(),
+      rationale: String::new(),
+      members: vec![],
+      member_destinations: vec![],
+      suggested_path: PathBuf::from("dogs"),
+      member_notes: vec![],
+    });
+    state.approved.push(true);
+    state.group_moves.push(vec![]);
+    state.file_keep.push(vec![]);
+    state.file_marked.push(HashSet::new());
+
+    state.handle_key(KeyCode::Char('M'));
+    state.handle_key(KeyCode::Char('j'));
+    assert_eq!(state.mode, Mode::MergeInto { cursor: 1 });
+    state.handle_key(KeyCode::Esc);
+    assert_eq!(state.mode, Mode::Normal);
+    assert_eq!(state.groups.len(), 3);
+  }
+
+  #[test]
+  fn merge_with_a_single_group_is_a_noop() {
+    let mut state = ReviewState::new(
+      make_groups().into_iter().take(1).collect(),
+      make_moves().into_iter().take(2).collect(),
+      PathBuf::from("/out"),
+      None,
+      ReviewMode::Organize,
+      None,
+    );
+    state.handle_key(KeyCode::Char('M'));
+    assert_eq!(state.mode, Mode::Normal);
+  }
+
+  #[test]
+  fn system_groups_come_first_and_start_unapproved() {
+    let mut groups = make_groups();
+    groups.push(FileGroup {
+      id: 2,
+      label: crate::pipeline::UNSORTED_LABEL.to_string(),
+      rationale: "leftovers".to_string(),
+      members: vec![5],
+      member_destinations: vec![],
+      suggested_path: PathBuf::from("unsorted"),
+      member_notes: vec![],
+    });
+    let mut moves = make_moves();
+    moves.push(FileMove {
+      from: PathBuf::from("/dl/odd.bin"),
+      to: PathBuf::from("/out/unsorted/odd.bin"),
+      group_id: 2,
+    });
+    let state = ReviewState::new(
+      groups,
+      moves,
+      PathBuf::from("/out"),
+      None,
+      ReviewMode::Organize,
+      None,
+    );
+    let labels: Vec<&str> =
+      state.groups.iter().map(|g| g.label.as_str()).collect();
+    assert_eq!(labels, vec!["Unsorted", "Beach", "Cats"]);
+    assert_eq!(state.approved, vec![false, true, true]);
+    assert_eq!(state.group_moves[0].len(), 1);
+    assert!(state.group_moves[0][0].from.ends_with("odd.bin"));
+    assert_eq!(state.group_moves[1].len(), 2);
+  }
+
+  #[test]
+  fn file_notes_are_looked_up_by_path_and_rendered() {
+    let mut groups = make_groups();
+    groups[0].member_notes = vec![crate::model::MemberNote {
+      index: 1,
+      note: "not placed by grouping".to_string(),
+    }];
+    let mut state = ReviewState::new(
+      groups,
+      make_moves(),
+      PathBuf::from("/out"),
+      None,
+      ReviewMode::Organize,
+      None,
+    );
+    assert_eq!(state.file_note(Path::new("/dl/beach1.jpg")), None);
+    assert_eq!(
+      state.file_note(Path::new("/dl/beach2.jpg")),
+      Some("not placed by grouping")
+    );
+
+    state.focus = Pane::Files;
+    state.file_selected = 1;
+    let text: String = render_detail_file(&state)
+      .iter()
+      .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+      .collect();
+    assert!(text.contains("not placed by grouping"), "{text}");
   }
 
   #[test]

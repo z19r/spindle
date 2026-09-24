@@ -28,7 +28,7 @@ pub fn build_groups(
 /// becomes "work/acme_corp/website_redesign" — a real directory tree.
 /// Empty segments and traversal (".", "..") are dropped, so the result can
 /// never escape the output directory.
-fn sanitize_folder_name(label: &str) -> String {
+pub fn sanitize_folder_name(label: &str) -> String {
   let segments: Vec<String> = label
     .replace('\\', "/")
     .split('/')
