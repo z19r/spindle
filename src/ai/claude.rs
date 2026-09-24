@@ -553,6 +553,35 @@ impl ClaudeProvider {
   }
 }
 
+/// Normalise parsed groups: derive member indices from destinations and
+/// log the raw reply when the model placed nothing, which otherwise
+/// looks like a healthy response with empty groups.
+fn finish_groups(
+  groups: Vec<ProposedGroup>,
+  raw: &str,
+) -> Vec<ProposedGroup> {
+  let groups: Vec<ProposedGroup> = groups
+    .into_iter()
+    .map(|mut g| {
+      if !g.member_destinations.is_empty()
+        && g.member_indices.is_empty()
+      {
+        g.member_indices =
+          g.member_destinations.iter().map(|m| m.index).collect();
+      }
+      g
+    })
+    .collect();
+  if groups.iter().all(|g| g.member_indices.is_empty()) {
+    tracing::warn!(
+      groups = groups.len(),
+      raw = %preview(raw, 4000),
+      "Grouping response placed no files"
+    );
+  }
+  groups
+}
+
 /// Extract the JSON text payload from a successful API response,
 /// rejecting truncated responses.
 fn response_text(api_response: ApiResponse) -> Result<String> {
@@ -764,21 +793,7 @@ impl AiProvider for ClaudeProvider {
         )
       })?;
 
-    let groups = response
-      .groups
-      .into_iter()
-      .map(|mut g| {
-        if !g.member_destinations.is_empty()
-          && g.member_indices.is_empty()
-        {
-          g.member_indices =
-            g.member_destinations.iter().map(|m| m.index).collect();
-        }
-        g
-      })
-      .collect();
-
-    Ok(groups)
+    Ok(finish_groups(response.groups, &text))
   }
 
   async fn propose_groups_with_organized_context(
@@ -840,21 +855,7 @@ impl AiProvider for ClaudeProvider {
         )
       })?;
 
-    let groups = response
-      .groups
-      .into_iter()
-      .map(|mut g| {
-        if !g.member_destinations.is_empty()
-          && g.member_indices.is_empty()
-        {
-          g.member_indices =
-            g.member_destinations.iter().map(|m| m.index).collect();
-        }
-        g
-      })
-      .collect();
-
-    Ok(groups)
+    Ok(finish_groups(response.groups, &text))
   }
 }
 

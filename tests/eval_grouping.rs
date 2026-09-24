@@ -75,6 +75,13 @@ fn print_groups(placements: &[Placement], expected: &ExpectedSet) {
 #[ignore = "real API; run via `just eval`"]
 async fn grouping_quality_meets_floor() {
   dotenvy::dotenv().ok();
+  let _ = tracing_subscriber::fmt()
+    .with_env_filter(
+      tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "spindle=warn".into()),
+    )
+    .with_test_writer()
+    .try_init();
   if std::env::var("SPINDLE_EVAL").as_deref() != Ok("1") {
     eprintln!("SPINDLE_EVAL != 1; skipping real-API eval");
     return;
