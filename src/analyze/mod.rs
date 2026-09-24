@@ -284,13 +284,6 @@ fn describe_by_filename(
   file: &FingerprintedFile,
   filename: &str,
 ) -> ContentDescription {
-  let category = match file.scanned.file_type {
-    crate::model::FileType::Document(_) => "document",
-    crate::model::FileType::Audio(_) => "audio",
-    crate::model::FileType::Archive(_) => "archive",
-    _ => "other",
-  };
-
   let ext = file
     .scanned
     .path
@@ -298,9 +291,26 @@ fn describe_by_filename(
     .and_then(|e| e.to_str())
     .unwrap_or("unknown");
 
+  // (kind shown in the summary, tag, suggested_category)
+  let (kind, tag, category) = match file.scanned.file_type {
+    crate::model::FileType::Document(_) => {
+      ("document", "document", "document")
+    }
+    crate::model::FileType::Audio(_) => ("audio", "audio", "audio"),
+    crate::model::FileType::Archive(_) => {
+      ("archive", "archive", "archive")
+    }
+    crate::model::FileType::Installer(_) => {
+      ("software installer", "installer", "software")
+    }
+    crate::model::FileType::Video(_) => ("video", "video", "other"),
+    crate::model::FileType::Image(_) => ("image", "image", "other"),
+    crate::model::FileType::Other => ("other", "other", "other"),
+  };
+
   ContentDescription {
-    summary: format!("{category} file: {filename}"),
-    tags: vec![category.to_string(), ext.to_string()],
+    summary: format!("{kind}: {filename}"),
+    tags: vec![tag.to_string(), ext.to_string()],
     suggested_category: category.to_string(),
     confidence: 0.5,
     source: DescriptionSource::Filename,
@@ -592,11 +602,80 @@ async fn extract_document_text(
     | Df::Xml
     | Df::Html
     | Df::Yaml
-    | Df::Toml => read_text_excerpt(&file.scanned.path).await,
+    | Df::Toml
+    | Df::Svg
+    | Df::Code => read_text_excerpt(&file.scanned.path).await,
     Df::Docx => extract_docx_text(&file.scanned.path).await,
+    Df::Xlsx => {
+      extract_zip_text(
+        &file.scanned.path,
+        &["xl/sharedStrings.xml", "xl/worksheets/"],
+      )
+      .await
+    }
+    Df::Pptx => {
+      extract_zip_text(&file.scanned.path, &["ppt/slides/slide"])
+        .await
+    }
+    Df::Odt | Df::Ods => {
+      extract_zip_text(&file.scanned.path, &["content.xml"]).await
+    }
+    Df::Epub => {
+      extract_zip_text(
+        &file.scanned.path,
+        &[".xhtml", ".html", ".htm"],
+      )
+      .await
+    }
     Df::Rtf => extract_rtf_text(&file.scanned.path).await,
     Df::Doc => None,
   }
+}
+
+/// Text from the XML/HTML entries of a zip container (xlsx, pptx, odt,
+/// ods, epub). An entry matches when its name starts with, or ends
+/// with, one of `needles`. Entries are read in archive order until the
+/// excerpt budget is spent.
+async fn extract_zip_text(
+  path: &std::path::Path,
+  needles: &'static [&'static str],
+) -> Option<String> {
+  let path = path.to_path_buf();
+  tokio::task::spawn_blocking(move || {
+    use std::io::Read;
+    let file = std::fs::File::open(&path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let names: Vec<String> = (0..archive.len())
+      .filter_map(|i| {
+        archive.by_index(i).ok().map(|e| e.name().to_string())
+      })
+      .filter(|n| {
+        needles.iter().any(|k| n.starts_with(k) || n.ends_with(k))
+      })
+      .collect();
+    let budget = 4 * MAX_TEXT_EXCERPT_BYTES as u64;
+    let mut out = String::new();
+    for name in names {
+      if out.len() as u64 >= budget {
+        break;
+      }
+      let Ok(entry) = archive.by_name(&name) else {
+        continue;
+      };
+      let mut xml = String::new();
+      if entry.take(budget).read_to_string(&mut xml).is_err() {
+        continue;
+      }
+      let text = strip_docx_xml(&xml);
+      if !text.trim().is_empty() {
+        out.push_str(text.trim());
+        out.push('\n');
+      }
+    }
+    (!out.trim().is_empty()).then(|| truncate_to_excerpt(out))
+  })
+  .await
+  .ok()?
 }
 
 /// docx is a zip: the body text lives in `word/document.xml`.
@@ -633,8 +712,36 @@ fn strip_docx_xml(xml: &str) -> String {
       }
       '>' => {
         in_tag = false;
-        if tag == "/w:p" && !out.ends_with('\n') {
+        let name = tag.trim_start_matches('/');
+        let closing = tag.starts_with('/');
+        // Paragraph-like closers become newlines; cell-like closers a
+        // space, so spreadsheet values don't run together.
+        if closing
+          && matches!(
+            name,
+            "w:p"
+              | "a:p"
+              | "text:p"
+              | "text:h"
+              | "p"
+              | "div"
+              | "li"
+              | "tr"
+              | "row"
+              | "h1"
+              | "h2"
+              | "h3"
+              | "h4"
+              | "title"
+          )
+          && !out.ends_with('\n')
+        {
           out.push('\n');
+        } else if closing
+          && matches!(name, "si" | "c" | "t" | "a:t" | "td" | "th")
+          && !out.ends_with([' ', '\n'])
+        {
+          out.push(' ');
         }
       }
       _ if in_tag => tag.push(c),
@@ -1963,6 +2070,84 @@ mod tests {
     let text = extract_docx_text(&path).await.unwrap();
 
     assert!(text.contains("QUARTERLY REPORT for Acme Corp"));
+  }
+
+  fn zip_bytes(entries: &[(&str, &str)]) -> Vec<u8> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+      let mut w = zip::ZipWriter::new(&mut buf);
+      for (name, body) in entries {
+        w.start_file(*name, zip::write::SimpleFileOptions::default())
+          .unwrap();
+        std::io::Write::write_all(&mut w, body.as_bytes()).unwrap();
+      }
+      w.finish().unwrap();
+    }
+    buf.into_inner()
+  }
+
+  #[tokio::test]
+  async fn extracts_text_from_office_and_ebook_containers() {
+    use crate::model::DocumentFormat as D;
+    let dir = TempDir::new().unwrap();
+    let cases: Vec<(&str, D, Vec<u8>, &str)> = vec![
+      (
+        "budget.xlsx",
+        D::Xlsx,
+        zip_bytes(&[
+          ("xl/sharedStrings.xml", "<sst><si><t>Q4 launch budget</t></si><si><t>paid ads</t></si></sst>"),
+          ("xl/worksheets/sheet1.xml", "<worksheet><row><c><v>12000</v></c></row></worksheet>"),
+        ]),
+        "Q4 launch budget",
+      ),
+      (
+        "deck.pptx",
+        D::Pptx,
+        zip_bytes(&[("ppt/slides/slide1.xml", "<p:sld><a:p><a:r><a:t>Website redesign kickoff</a:t></a:r></a:p></p:sld>")]),
+        "Website redesign kickoff",
+      ),
+      (
+        "letter.odt",
+        D::Odt,
+        zip_bytes(&[("content.xml", "<office:document-content><text:p>Dear Globex hiring team</text:p></office:document-content>")]),
+        "Dear Globex hiring team",
+      ),
+      (
+        "novel.epub",
+        D::Epub,
+        zip_bytes(&[
+          ("mimetype", "application/epub+zip"),
+          ("OEBPS/chapter1.xhtml", "<html><body><h1>Chapter One</h1><p>It was a dark and stormy night.</p></body></html>"),
+        ]),
+        "dark and stormy night",
+      ),
+    ];
+    for (name, format, bytes, expect) in cases {
+      let file = make_document_file(dir.path(), name, &bytes, format);
+      let text =
+        extract_document_text(&file).await.unwrap_or_default();
+      assert!(text.contains(expect), "{name}: {text:?}");
+    }
+  }
+
+  #[test]
+  fn filename_fallback_names_installers() {
+    let dir = TempDir::new().unwrap();
+    let mut file =
+      make_test_file(dir.path(), "Spindle-1.2.dmg", b"x");
+    file.scanned.file_type =
+      FileType::Installer(crate::model::InstallerFormat::Dmg);
+
+    let desc = describe_by_filename(&file, "Spindle-1.2.dmg");
+
+    assert_eq!(desc.source, DescriptionSource::Filename);
+    assert!(
+      desc.summary.to_lowercase().contains("installer"),
+      "{}",
+      desc.summary
+    );
+    assert_eq!(desc.suggested_category, "software");
+    assert!(desc.tags.iter().any(|t| t == "installer"));
   }
 
   #[test]

@@ -85,8 +85,9 @@ pub struct CliArgs {
   #[arg(long)]
   pub undo_log: Option<PathBuf>,
 
-  /// Filter by file type category (image, video, audio, document, archive).
-  /// Aliases: photo, movie, music, pdf, zip, etc. Comma-separated or repeated.
+  /// Filter by file type category (image, video, audio, document, archive,
+  /// installer). Aliases: photo, movie, music, pdf, zip, app, etc.
+  /// Comma-separated or repeated.
   #[arg(
     short = 't',
     long = "type",
