@@ -140,8 +140,13 @@ pub fn route_system_prompt(areas: &[Area]) -> String {
   let mut prompt = String::from(
     "You are sorting files into a fixed set of top-level folders \
      (areas). Assign EVERY file to exactly one area by its index. \
-     Judge by subject and purpose, never by file type. When a file \
-     could fit two areas, pick the one a person would look in first.\n\n\
+     Judge by subject and purpose, never by file type. Files that \
+     belong to one event, trip, project, pet, or matter MUST share an \
+     area: a trip's photos, video, itinerary and hotel receipt go \
+     together, as do a project's notes, mockups and screenshots. Look \
+     across the whole list for such clusters before assigning. When a \
+     file could fit two areas, pick the one a person would look in \
+     first.\n\n\
      Areas:\n",
   );
   for area in areas {
@@ -193,6 +198,7 @@ mod tests {
     assert!(system.contains("- Work: jobs and clients"));
     assert!(system.contains("- Finance: taxes, bills"));
     assert!(system.contains("exactly one area"));
+    assert!(system.contains("MUST share an area"));
 
     let files = vec![FileSummary {
       index: 4,
