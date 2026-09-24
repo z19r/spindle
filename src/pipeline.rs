@@ -803,21 +803,36 @@ async fn propose_once<P: AiProvider>(
       }
       Err(err) => return Err(err),
     };
-    let placed = groups.iter().any(|g| !g.member_indices.is_empty());
-    if placed || summaries.is_empty() {
+    // A reply that places well under half the files is the third
+    // degenerate shape: valid JSON, one or two members, the rest
+    // silently dropped. Retry it like the others.
+    let placed: std::collections::HashSet<usize> = groups
+      .iter()
+      .flat_map(|g| g.member_indices.iter().copied())
+      .collect();
+    let enough = summaries.is_empty()
+      || placed.len() * 2 >= summaries.len()
+      || (!placed.is_empty()
+        && summaries.len() < MIN_FILES_FOR_COVERAGE_CHECK);
+    if enough {
       return Ok(groups);
     }
     tracing::warn!(
       attempt = attempt + 1,
       files = summaries.len(),
-      "Grouping response placed no files"
+      placed = placed.len(),
+      "Grouping response placed too few files"
     );
   }
   anyhow::bail!(
-    "grouping placed none of {} files after retry",
+    "grouping placed too few of {} files after retry",
     summaries.len()
   )
 }
+
+/// Below this many files a sparse reply is plausible (two files, one
+/// group), so only an empty reply counts as degenerate.
+const MIN_FILES_FOR_COVERAGE_CHECK: usize = 4;
 
 /// Large sets are grouped in topic-coherent batches. Labels produced
 /// by earlier batches feed later ones (so they reuse folders instead
@@ -1920,6 +1935,115 @@ mod tests {
         member_notes: vec![],
       }])
     }
+  }
+
+  /// Places only the first file on the first `sparse_calls` calls.
+  struct SparseThenFullProvider {
+    sparse_calls: usize,
+    calls: std::sync::atomic::AtomicUsize,
+  }
+
+  impl AiProvider for SparseThenFullProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      context: &DescribeContext,
+    ) -> anyhow::Result<ContentDescription> {
+      Ok(ContentDescription {
+        summary: format!("Description of {}", context.filename),
+        tags: vec![],
+        suggested_category: "photo".to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      })
+    }
+
+    async fn propose_groups(
+      &self,
+      files: &[FileSummary],
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      let n =
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+      let members: Vec<usize> = if n < self.sparse_calls {
+        files.iter().take(1).map(|f| f.index).collect()
+      } else {
+        files.iter().map(|f| f.index).collect()
+      };
+      Ok(vec![ProposedGroup {
+        label: "Everything".to_string(),
+        rationale: String::new(),
+        member_indices: members,
+        member_destinations: vec![],
+        member_notes: vec![],
+      }])
+    }
+  }
+
+  #[tokio::test]
+  async fn sparse_placement_is_retried_once() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    for i in 0..5 {
+      fs::write(
+        source.path().join(format!("f{i}.png")),
+        create_test_png(i as u8 * 40, 0, 0),
+      )
+      .unwrap();
+    }
+    let provider = SparseThenFullProvider {
+      sparse_calls: 1,
+      calls: Default::default(),
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+    config.taxonomy = vec![];
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    assert_eq!(labels_of(&result), vec!["Everything"]);
+    assert_eq!(result.plan.groups[0].members.len(), 5);
+    assert_eq!(
+      provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+      2
+    );
+  }
+
+  #[tokio::test]
+  async fn sparse_reply_for_a_tiny_set_is_accepted() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = SparseThenFullProvider {
+      sparse_calls: 5,
+      calls: Default::default(),
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+    config.taxonomy = vec![];
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    assert_eq!(
+      provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+      1
+    );
   }
 
   #[tokio::test]

@@ -24,6 +24,11 @@ const GROUP_AREA_MAX_TOKENS: u32 = 8_192;
 const DEFAULT_REQUEST_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(300);
 
+/// A streaming reply that sends nothing for this long is treated as
+/// stalled and retried.
+const DEFAULT_IDLE_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(60);
+
 fn http_client(timeout: std::time::Duration) -> Client {
   Client::builder()
     .timeout(timeout)
@@ -33,6 +38,7 @@ fn http_client(timeout: std::time::Duration) -> Client {
 
 pub struct ClaudeProvider {
   client: Client,
+  idle_timeout: std::time::Duration,
   api_key: String,
   /// Model for the grouping call (the hard reasoning step).
   model: String,
@@ -109,6 +115,17 @@ struct ApiRequest {
   /// proxies/models that ignore it.
   #[serde(skip_serializing_if = "Option::is_none")]
   output_config: Option<serde_json::Value>,
+  /// Read the reply as server-sent events so a stalled connection or a
+  /// looping generation is caught within seconds.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  stream: Option<bool>,
+}
+
+impl ApiRequest {
+  fn streaming(mut self) -> Self {
+    self.stream = Some(true);
+    self
+  }
 }
 
 /// `output_config.format` payload constraining the response to
@@ -230,6 +247,7 @@ fn cached_api_request(
     system,
     messages,
     output_config,
+    stream: None,
   }
 }
 
@@ -289,6 +307,7 @@ impl ClaudeProvider {
     let model = model.into();
     Self {
       client: http_client(DEFAULT_REQUEST_TIMEOUT),
+      idle_timeout: DEFAULT_IDLE_TIMEOUT,
       api_key: api_key.into(),
       describe_model: model.clone(),
       model,
@@ -321,6 +340,13 @@ impl ClaudeProvider {
   pub fn with_timeout(self, timeout: std::time::Duration) -> Self {
     let mut this = self;
     this.client = http_client(timeout);
+    this
+  }
+
+  /// Treat a streaming reply as stalled after `idle` without bytes.
+  pub fn with_idle_timeout(self, idle: std::time::Duration) -> Self {
+    let mut this = self;
+    this.idle_timeout = idle;
     this
   }
 
@@ -404,6 +430,23 @@ impl ClaudeProvider {
         anyhow::bail!("Claude API error ({}): {}", status, body);
       }
 
+      // Proxies and mocks may ignore `stream`; only parse events when
+      // the server actually sent them.
+      let is_event_stream = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.starts_with("text/event-stream"))
+        .unwrap_or(false);
+      if request.stream == Some(true) && is_event_stream {
+        let reply = collect_sse_text(
+          response.bytes_stream(),
+          self.idle_timeout,
+        )
+        .await?;
+        return finish_text(reply.text, reply.stop_reason.as_deref());
+      }
+
       let api_response: ApiResponse = response
         .json()
         .await
@@ -436,7 +479,8 @@ impl ClaudeProvider {
         }],
       }],
       Some(group_output_config()),
-    );
+    )
+    .streaming();
 
     tracing::debug!(
       prompt = %preview(&request_prompt_text(&request), 6000),
@@ -707,16 +751,19 @@ fn finish_groups(
 /// Extract the JSON text payload from a successful API response,
 /// rejecting truncated responses.
 fn response_text(api_response: ApiResponse) -> Result<String> {
-  let truncated =
-    api_response.stop_reason.as_deref() == Some("max_tokens");
-
   let raw = api_response
     .content
     .into_iter()
     .find_map(|block| block.text)
     .context("No text content in Claude API response")?;
+  finish_text(raw, api_response.stop_reason.as_deref())
+}
 
-  if truncated {
+fn finish_text(
+  raw: String,
+  stop_reason: Option<&str>,
+) -> Result<String> {
+  if stop_reason == Some("max_tokens") {
     return Err(
       DegenerateReply(format!(
         "reply truncated at max_tokens ({} bytes): {}",
@@ -726,8 +773,130 @@ fn response_text(api_response: ApiResponse) -> Result<String> {
       .into(),
     );
   }
-
+  if raw.trim().is_empty() {
+    anyhow::bail!("No text content in Claude API response");
+  }
   Ok(extract_json(&raw))
+}
+
+/// Text and stop reason assembled from a streamed reply.
+#[derive(Debug)]
+struct StreamedReply {
+  text: String,
+  stop_reason: Option<String>,
+}
+
+/// Assemble the text of a Messages API SSE stream. Fails as a
+/// `DegenerateReply` when nothing arrives for `idle` or when the text
+/// starts repeating itself, so a looping generation is cut off early.
+async fn collect_sse_text<S, B, E>(
+  stream: S,
+  idle: std::time::Duration,
+) -> Result<StreamedReply>
+where
+  S: futures::Stream<Item = std::result::Result<B, E>>,
+  B: AsRef<[u8]>,
+  E: std::fmt::Display,
+{
+  use futures::StreamExt;
+  let mut stream = std::pin::pin!(stream);
+  let mut buffer = String::new();
+  let mut reply = StreamedReply {
+    text: String::new(),
+    stop_reason: None,
+  };
+  let mut checked_at = 0usize;
+
+  loop {
+    let next = match tokio::time::timeout(idle, stream.next()).await {
+      Ok(next) => next,
+      Err(_) => {
+        return Err(
+          DegenerateReply(format!(
+            "no bytes for {}s ({} bytes received)",
+            idle.as_secs(),
+            reply.text.len()
+          ))
+          .into(),
+        );
+      }
+    };
+    let chunk = match next {
+      Some(Ok(chunk)) => chunk,
+      Some(Err(e)) => anyhow::bail!("Stream read failed: {e}"),
+      None => break,
+    };
+    buffer.push_str(&String::from_utf8_lossy(chunk.as_ref()));
+
+    while let Some(pos) = buffer.find("\n\n") {
+      let event = buffer[..pos].to_string();
+      buffer.drain(..pos + 2);
+      for line in event.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+          continue;
+        };
+        let Ok(value) =
+          serde_json::from_str::<serde_json::Value>(data.trim())
+        else {
+          continue;
+        };
+        match value["type"].as_str() {
+          Some("content_block_delta") => {
+            if let Some(t) = value["delta"]["text"].as_str() {
+              reply.text.push_str(t);
+            }
+          }
+          Some("message_delta") => {
+            if let Some(r) = value["delta"]["stop_reason"].as_str() {
+              reply.stop_reason = Some(r.to_string());
+            }
+          }
+          Some("error") => {
+            anyhow::bail!(
+              "Claude API stream error: {}",
+              value["error"]["message"].as_str().unwrap_or("unknown")
+            );
+          }
+          _ => {}
+        }
+      }
+    }
+
+    if reply.text.len() >= checked_at + 1024 {
+      checked_at = reply.text.len();
+      if looks_degenerate(&reply.text) {
+        return Err(
+          DegenerateReply(format!(
+            "repetition loop after {} bytes: {}",
+            reply.text.len(),
+            preview(&reply.text, 200)
+          ))
+          .into(),
+        );
+      }
+    }
+  }
+  Ok(reply)
+}
+
+/// True when the tail of `text` is one short unit repeated many times,
+/// the signature of a model stuck in a loop.
+fn looks_degenerate(text: &str) -> bool {
+  const TAIL: usize = 600;
+  const MIN_REPEATS: usize = 40;
+  let bytes = text.as_bytes();
+  if bytes.len() < TAIL {
+    return false;
+  }
+  let tail = &bytes[bytes.len() - TAIL..];
+  (1..=12).any(|unit| {
+    let pattern = &tail[TAIL - unit..];
+    let repeats = tail
+      .rchunks_exact(unit)
+      .take_while(|c| *c == pattern)
+      .count();
+    repeats >= MIN_REPEATS && repeats * unit >= TAIL / 2
+  })
 }
 
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
@@ -904,7 +1073,8 @@ impl AiProvider for ClaudeProvider {
         }],
       }],
       Some(route_output_config(areas)),
-    );
+    )
+    .streaming();
     let text = self.send_request(request).await?;
 
     #[derive(Deserialize)]
@@ -1021,6 +1191,123 @@ mod tests {
       groups["items"]["properties"]["members"]["minItems"],
       1
     );
+  }
+
+  fn sse(events: &[serde_json::Value]) -> String {
+    events
+      .iter()
+      .map(|e| format!("event: {}\ndata: {}\n\n", e["type"], e))
+      .collect()
+  }
+
+  #[tokio::test]
+  async fn grouping_reads_a_streamed_reply() {
+    let server = MockServer::start().await;
+    let body = sse(&[
+      serde_json::json!({"type":"message_start","message":{}}),
+      serde_json::json!({"type":"content_block_start","index":0}),
+      serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"{\"groups\":[{\"label\":\"Work\","}}),
+      serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"\"rationale\":\"r\",\"members\":[{\"index\":0,\"dest_name\":\"a\"}]}]}"}}),
+      serde_json::json!({"type":"content_block_stop","index":0}),
+      serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+      serde_json::json!({"type":"message_stop"}),
+    ]);
+    Mock::given(method("POST"))
+      .and(path("/v1/messages"))
+      .respond_with(
+        ResponseTemplate::new(200)
+          .set_body_raw(body.into_bytes(), "text/event-stream"),
+      )
+      .expect(1)
+      .mount(&server)
+      .await;
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-sonnet-4-6".to_string(),
+      0,
+    )
+    .with_base_url(server.uri());
+
+    let groups = provider.propose_groups(&[]).await.unwrap();
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].label, "Work");
+    assert_eq!(groups[0].member_indices, vec![0]);
+  }
+
+  #[tokio::test]
+  async fn streamed_max_tokens_is_degenerate() {
+    let body = sse(&[
+      serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"{\"groups\":["}}),
+      serde_json::json!({"type":"message_delta","delta":{"stop_reason":"max_tokens"}}),
+    ]);
+    let stream =
+      futures::stream::iter(vec![Ok::<_, String>(body.into_bytes())]);
+    let reply =
+      collect_sse_text(stream, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+    let err = finish_text(reply.text, reply.stop_reason.as_deref())
+      .unwrap_err();
+    assert!(
+      err.downcast_ref::<DegenerateReply>().is_some(),
+      "{err:#}"
+    );
+  }
+
+  #[tokio::test]
+  async fn idle_stream_is_degenerate() {
+    use futures::StreamExt;
+    let head = sse(&[
+      serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"{"}}),
+    ]);
+    let stream =
+      futures::stream::iter(vec![Ok::<_, String>(head.into_bytes())])
+        .chain(futures::stream::pending());
+    let err =
+      collect_sse_text(stream, std::time::Duration::from_millis(50))
+        .await
+        .unwrap_err();
+    let e =
+      err.downcast_ref::<DegenerateReply>().expect("degenerate");
+    assert!(e.0.contains("no bytes"), "{}", e.0);
+  }
+
+  #[tokio::test]
+  async fn repetition_loop_is_cut_off_early() {
+    let filler = " ---".repeat(600);
+    let body = sse(&[
+      serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"{\"groups\":[{\"label\":\"x\",\"rationale\":\"a"}}),
+      serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":filler}}),
+      serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":filler}}),
+      serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+    ]);
+    let chunks: Vec<std::result::Result<Vec<u8>, String>> = body
+      .as_bytes()
+      .chunks(512)
+      .map(|c| Ok(c.to_vec()))
+      .collect();
+    let err = collect_sse_text(
+      futures::stream::iter(chunks),
+      std::time::Duration::from_secs(5),
+    )
+    .await
+    .unwrap_err();
+    let e =
+      err.downcast_ref::<DegenerateReply>().expect("degenerate");
+    assert!(e.0.contains("repetition loop"), "{}", e.0);
+  }
+
+  #[test]
+  fn looks_degenerate_only_for_long_repeats() {
+    assert!(!looks_degenerate("short"));
+    let healthy = "{\"groups\":[{\"label\":\"Work/Acme\",\"rationale\":\"notes and mockups for the redesign\"}]}".repeat(12);
+    assert!(!looks_degenerate(&healthy));
+    let looping =
+      format!("{{\"rationale\":\"x{}", " ---".repeat(200));
+    assert!(looks_degenerate(&looping));
+    let dashes = format!("abc{}", "-".repeat(700));
+    assert!(looks_degenerate(&dashes));
   }
 
   #[tokio::test]
