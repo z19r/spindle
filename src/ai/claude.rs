@@ -123,6 +123,7 @@ fn group_output_config() -> serde_json::Value {
         "properties": {
           "groups": {
             "type": "array",
+            "minItems": 1,
             "items": {
               "type": "object",
               "properties": {
@@ -130,6 +131,7 @@ fn group_output_config() -> serde_json::Value {
                 "rationale": {"type": "string"},
                 "members": {
                   "type": "array",
+                  "minItems": 1,
                   "items": {
                     "type": "object",
                     "properties": {
@@ -863,6 +865,19 @@ impl AiProvider for ClaudeProvider {
 mod tests {
   use super::*;
   use crate::model::DescriptionSource;
+
+  /// The grammar must forbid a group with no members and a reply with
+  /// no groups: both parsed fine yet placed nothing in real runs.
+  #[test]
+  fn group_schema_requires_at_least_one_group_and_member() {
+    let cfg = group_output_config();
+    let groups = &cfg["format"]["schema"]["properties"]["groups"];
+    assert_eq!(groups["minItems"], 1);
+    assert_eq!(
+      groups["items"]["properties"]["members"]["minItems"],
+      1
+    );
+  }
 
   #[test]
   fn api_request_serializes_prompt_caching_fields() {
