@@ -180,6 +180,7 @@ pub fn rainbow_bar(ratio: f64, width: usize) -> String {
 pub struct PipelineProgress {
   analyzed: usize,
   total: usize,
+  batch_hinted: bool,
 }
 
 impl PipelineProgress {
@@ -222,6 +223,13 @@ impl PipelineProgress {
           "Estimated cost: ${:.4} for {} files.",
           estimated_usd, file_count,
         );
+        if *estimated_usd >= 1.0 && !self.batch_hinted {
+          self.batch_hinted = true;
+          println!(
+            "  (tip: --batch halves this via the Batch API; results \
+             take minutes to hours)"
+          );
+        }
       }
       PipelineEvent::AnalysisStarted { file_count, cached } => {
         self.total = *file_count;
