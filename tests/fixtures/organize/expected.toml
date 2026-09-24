@@ -1,0 +1,264 @@
+# Ground truth for tests/eval_grouping.rs. `group` is the expected
+# folder; the scorer only checks that files sharing a group land
+# together and that the first label segment matches `area` (or one
+# of `alt_areas` when a reasonable organizer could file it elsewhere).
+
+# --- Work: Acme Corp website redesign ---
+[[file]]
+path = "Desktop/Screenshot 2024-03-02 at 10.12.44.png"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+
+[[file]]
+path = "Desktop/homepage_mockup_v3.png"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+
+[[file]]
+path = "Documents/redesign_kickoff_notes.md"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+
+[[file]]
+path = "Documents/redesign_sitemap.md"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+
+[[file]]
+path = "Downloads/redesign_assets.zip"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+
+# --- Work: Q4 launch ---
+[[file]]
+path = "Desktop/q4_launch_timeline.png"
+group = "Work/Q4 Launch"
+area = "Work"
+
+[[file]]
+path = "Documents/q4_launch_plan.md"
+group = "Work/Q4 Launch"
+area = "Work"
+
+[[file]]
+path = "Documents/q4_launch_budget.csv"
+group = "Work/Q4 Launch"
+area = "Work"
+
+[[file]]
+path = "Documents/q4_standup_2024-10-02.md"
+group = "Work/Q4 Launch"
+area = "Work"
+
+[[file]]
+path = "Downloads/Q4_Launch_Plan_v2.md"
+group = "Work/Q4 Launch"
+area = "Work"
+
+# --- Hawaii trip 2023 (photos, video, itinerary, receipt) ---
+[[file]]
+path = "Desktop/IMG_4021.jpg"
+group = "Photos/2023/Hawaii Trip"
+area = "Photos"
+alt_areas = ["Personal", "Travel"]
+
+[[file]]
+path = "Desktop/IMG_4022.jpg"
+group = "Photos/2023/Hawaii Trip"
+area = "Photos"
+alt_areas = ["Personal", "Travel"]
+
+[[file]]
+path = "Documents/hawaii_itinerary.md"
+group = "Photos/2023/Hawaii Trip"
+area = "Photos"
+alt_areas = ["Personal", "Travel"]
+
+[[file]]
+path = "Documents/hawaii_hotel_receipt.txt"
+group = "Photos/2023/Hawaii Trip"
+area = "Photos"
+alt_areas = ["Personal", "Travel", "Finance"]
+
+[[file]]
+path = "Downloads/hawaii_snorkel_molokini_2023.mp4"
+group = "Photos/2023/Hawaii Trip"
+area = "Photos"
+alt_areas = ["Personal", "Travel", "Media"]
+
+# --- Biscuit the dog ---
+[[file]]
+path = "Desktop/biscuit_park.jpg"
+group = "Photos/Pets/Biscuit"
+area = "Photos"
+alt_areas = ["Personal", "Pets"]
+
+[[file]]
+path = "Desktop/biscuit_beach.jpg"
+group = "Photos/Pets/Biscuit"
+area = "Photos"
+alt_areas = ["Personal", "Pets"]
+
+[[file]]
+path = "Downloads/biscuit_fetch.mp4"
+group = "Photos/Pets/Biscuit"
+area = "Photos"
+alt_areas = ["Personal", "Pets", "Media"]
+
+# --- Recipes ---
+[[file]]
+path = "Desktop/grandma_lasagna.md"
+group = "Personal/Recipes"
+area = "Personal"
+alt_areas = ["Recipes", "Food"]
+
+[[file]]
+path = "Desktop/sourdough_notes.md"
+group = "Personal/Recipes"
+area = "Personal"
+alt_areas = ["Recipes", "Food"]
+
+# --- Apartment lease ---
+[[file]]
+path = "Documents/lease_agreement_2024.txt"
+group = "Legal/Apartment Lease"
+area = "Legal"
+alt_areas = ["Personal", "Housing", "Home"]
+
+[[file]]
+path = "Documents/lease_renewal_notice_2025.txt"
+group = "Legal/Apartment Lease"
+area = "Legal"
+alt_areas = ["Personal", "Housing", "Home"]
+
+[[file]]
+path = "Documents/move_in_inspection.csv"
+group = "Legal/Apartment Lease"
+area = "Legal"
+alt_areas = ["Personal", "Housing", "Home"]
+
+[[file]]
+path = "Downloads/lease_agreement_2024 (1).txt"
+group = "Legal/Apartment Lease"
+area = "Legal"
+alt_areas = ["Personal", "Housing", "Home"]
+
+# --- Smith v. Jones ---
+[[file]]
+path = "Documents/smith_v_jones_complaint.txt"
+group = "Legal/Smith v Jones"
+area = "Legal"
+
+[[file]]
+path = "Documents/smith_v_jones_discovery_request.txt"
+group = "Legal/Smith v Jones"
+area = "Legal"
+
+# --- Taxes 2023 ---
+[[file]]
+path = "Documents/2023_w2_acme.txt"
+group = "Finance/Taxes/2023"
+area = "Finance"
+alt_areas = ["Taxes"]
+
+[[file]]
+path = "Documents/1099-int-chase-2023.txt"
+group = "Finance/Taxes/2023"
+area = "Finance"
+alt_areas = ["Taxes"]
+
+[[file]]
+path = "Documents/turbotax_receipt_2023.txt"
+group = "Finance/Taxes/2023"
+area = "Finance"
+alt_areas = ["Taxes"]
+
+# --- Household bills ---
+[[file]]
+path = "Documents/globex_electric_2024-08.md"
+group = "Finance/Bills"
+area = "Finance"
+alt_areas = ["Personal", "Home", "Housing", "Utilities"]
+
+[[file]]
+path = "Documents/globex_gas_2024-08.md"
+group = "Finance/Bills"
+area = "Finance"
+alt_areas = ["Personal", "Home", "Housing", "Utilities"]
+
+[[file]]
+path = "Documents/comcast_bill_2024-08.txt"
+group = "Finance/Bills"
+area = "Finance"
+alt_areas = ["Personal", "Home", "Housing", "Utilities"]
+
+# --- Health ---
+[[file]]
+path = "Documents/bloodwork_results_2024.txt"
+group = "Health"
+area = "Health"
+alt_areas = ["Personal", "Medical"]
+
+[[file]]
+path = "Documents/dentist_invoice_2024.txt"
+group = "Health"
+area = "Health"
+alt_areas = ["Personal", "Medical", "Finance"]
+
+# --- Software installers ---
+[[file]]
+path = "Downloads/Spindle-1.2.dmg"
+group = "Software/Installers"
+area = "Software"
+alt_areas = ["Downloads", "Apps", "Applications"]
+
+[[file]]
+path = "Downloads/node-v20.10.0.pkg"
+group = "Software/Installers"
+area = "Software"
+alt_areas = ["Downloads", "Apps", "Applications"]
+
+[[file]]
+path = "Downloads/setup_vlc.exe"
+group = "Software/Installers"
+area = "Software"
+alt_areas = ["Downloads", "Apps", "Applications"]
+
+# --- Podcasts ---
+[[file]]
+path = "Downloads/podcast_ep12_rust_async.mp3"
+group = "Media/Podcasts"
+area = "Media"
+alt_areas = ["Audio", "Podcasts", "Reference"]
+
+[[file]]
+path = "Downloads/podcast_ep13_tokio_internals.mp3"
+group = "Media/Podcasts"
+area = "Media"
+alt_areas = ["Audio", "Podcasts", "Reference"]
+
+# --- Job search ---
+[[file]]
+path = "Downloads/resume_2024.txt"
+group = "Personal/Job Search"
+area = "Personal"
+alt_areas = ["Work", "Career"]
+
+[[file]]
+path = "Downloads/cover_letter_globex.txt"
+group = "Personal/Job Search"
+area = "Personal"
+alt_areas = ["Work", "Career"]
+
+# --- Rust reference notes ---
+[[file]]
+path = "Downloads/rust_async_cheatsheet.md"
+group = "Reference/Rust"
+area = "Reference"
+alt_areas = ["Work", "Personal", "Tech", "Programming", "Learning"]
+
+[[file]]
+path = "Downloads/tokio_notes.md"
+group = "Reference/Rust"
+area = "Reference"
+alt_areas = ["Work", "Personal", "Tech", "Programming", "Learning"]

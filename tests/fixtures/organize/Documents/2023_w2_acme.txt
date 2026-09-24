@@ -1,0 +1,4 @@
+Form W-2 Wage and Tax Statement 2023
+Employer: Acme Corp, 100 Industrial Way, Portland OR
+Employee: Jordan Alvarez  SSN: ***-**-4821
+Box 1 Wages: 84,300.00   Box 2 Federal tax withheld: 11,204.00
