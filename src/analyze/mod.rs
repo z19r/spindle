@@ -192,6 +192,89 @@ pub async fn read_cached_grouping(
   Some(groups)
 }
 
+const ROUTE_CACHE_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedRouting {
+  version: u32,
+  entries: Vec<CachedRoute>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedRoute {
+  blake3_hex: String,
+  area: String,
+}
+
+fn route_cache_path(cache_dir: &Path, key: &str) -> PathBuf {
+  cache_dir.join(format!("routes.{key}.v{ROUTE_CACHE_VERSION}.json"))
+}
+
+/// Read a cached routing and remap it onto the current indices, one
+/// index per cached entry (duplicates share a hash). `None` on miss or
+/// when an entry has no unconsumed index.
+pub async fn read_cached_routing(
+  cache_dir: &Path,
+  key: &str,
+  hash_to_indices: &HashMap<String, Vec<usize>>,
+) -> Option<Vec<crate::model::RoutedFile>> {
+  let path = route_cache_path(cache_dir, key);
+  let content = tokio::fs::read_to_string(&path).await.ok()?;
+  let cached: CachedRouting = serde_json::from_str(&content).ok()?;
+  if cached.version != ROUTE_CACHE_VERSION {
+    return None;
+  }
+  let mut remaining: HashMap<
+    &str,
+    std::collections::VecDeque<usize>,
+  > = hash_to_indices
+    .iter()
+    .map(|(hex, idxs)| (hex.as_str(), idxs.iter().copied().collect()))
+    .collect();
+  let mut out = Vec::with_capacity(cached.entries.len());
+  for entry in cached.entries {
+    let index =
+      remaining.get_mut(entry.blake3_hex.as_str())?.pop_front()?;
+    out.push(crate::model::RoutedFile {
+      index,
+      area: entry.area,
+    });
+  }
+  Some(out)
+}
+
+pub async fn write_cached_routing(
+  cache_dir: &Path,
+  key: &str,
+  routed: &[crate::model::RoutedFile],
+  index_to_hash: &HashMap<usize, String>,
+) -> Result<()> {
+  let cached = CachedRouting {
+    version: ROUTE_CACHE_VERSION,
+    entries: routed
+      .iter()
+      .filter_map(|r| {
+        index_to_hash.get(&r.index).map(|hex| CachedRoute {
+          blake3_hex: hex.clone(),
+          area: r.area.clone(),
+        })
+      })
+      .collect(),
+  };
+  tokio::fs::create_dir_all(cache_dir)
+    .await
+    .with_context(|| {
+      format!("Failed to create cache dir: {}", cache_dir.display())
+    })?;
+  let path = route_cache_path(cache_dir, key);
+  let json = serde_json::to_string_pretty(&cached)
+    .context("Failed to serialize routing")?;
+  tokio::fs::write(&path, json).await.with_context(|| {
+    format!("Failed to write routing cache: {}", path.display())
+  })?;
+  Ok(())
+}
+
 /// Persist a grouping in content-addressed form for future runs.
 pub async fn write_cached_grouping(
   cache_dir: &Path,

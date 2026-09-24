@@ -1,12 +1,12 @@
 use std::fmt::Write;
 
-use crate::model::FileSummary;
+use crate::model::{Area, FileSummary};
 
 use super::DescribeContext;
 
 const DESCRIBE_RESPONSE_INSTRUCTIONS: &str = "Focus on the SUBJECT and THEME of the content, not the file format.\nA photo, video, PDF, and spreadsheet about the same topic should get similar tags.\n\nBe SPECIFIC enough that similar files can be told apart later:\n- Photos: say WHO is in the frame (how many people, adults/children, selfie vs posed vs candid), any pets and their species, the setting, and the activity or event. Two photos of the same person must get DIFFERENT descriptions when the companions, pets, location, or activity differ.\n- Documents: identify the document TYPE (contract, court filing, invoice, letter, medical record, ...), the parties or organizations involved, and any case numbers, matter names, account numbers, or dates. Two legal documents from different cases must be distinguishable from their summaries alone.\n- Screenshots: name the app or site shown and what is happening in it.\n\nRespond in JSON:\n{\n  \"summary\": \"1-2 sentence description specific to THIS file's subject\",\n  \"tags\": [\"5-8 tags, most specific first (e.g. 'couple-photo', 'smith-v-jones', 'golden-retriever'), ending with general ones (e.g. 'pets', 'legal')\"],\n  \"suggested_category\": \"travel|nature|food|work|family|pets|sports|entertainment|art|science|tech|finance|health|education|events|vehicles|architecture|legal|other\",\n  \"confidence\": 0.0-1.0\n}";
 
-const GROUP_RESPONSE_INSTRUCTIONS: &str = "Respond in JSON:\n{\n  \"groups\": [\n    {\n      \"label\": \"Work/Acme Corp/Website Redesign\",\n      \"rationale\": \"...\",\n      \"members\": [\n        { \"index\": 0, \"dest_name\": \"contract.pdf\" },\n        { \"index\": 3, \"dest_name\": \"mockups/home.png\" }\n      ]\n    }\n  ]\n}\n\nRules:\n- A file can only be in one group\n- Groups should have at least 2 members\n- The \"label\" CAN be a nested folder path using \"/\" to build a real directory tree, where each \"/\" becomes a subdirectory. Use nesting whenever a natural hierarchy exists (it usually does) — a flat single-level label is also fine when it doesn't. Good nested labels: \"Work/Acme Corp/Website Redesign\", \"Photos/2023/Hawaii Trip\", \"Finance/Taxes/2023\", \"Legal/Smith v. Jones\".\n- When you do nest, go from general to specific: the top level is a broad area (Work, Photos, Finance, Legal, Personal), and deeper levels narrow by client/project, year/event, or matter/case. Use as many levels as the content clearly supports — commonly 2-3. Don't invent hierarchy that isn't there, and don't bury a lone file under deep folders.\n- Prefer SPECIFIC groups over broad catch-alls. \"Alex & Katy\", \"Selfies\", and \"Dog Photos\" are better than one \"Personal Photos\" bucket. \"Smith v. Jones Lawsuit\" and \"Apartment Lease\" are better than one \"Legal Documents\" bucket.\n- Split a broad theme whenever the summaries/tags distinguish sub-subjects: different people pictured, different pets, different cases or matters, different trips or events. Prefer expressing that split as deeper label levels (e.g. \"Photos/Pets/Dogs\" vs \"Photos/Pets/Cats\").\n- Use dest_name sub-paths to organize even further WITHIN a group (e.g. \"raw/beach.jpg\") when members share a group but differ in sub-subject\n- Files that don't fit any group can be omitted\n- NEVER group by file type — group by subject, theme, or context\n- A .jpg, .mp4, .pdf, and .csv can all belong in the same group if they share a topic\n- For each member, dest_name is the filename or sub-path to use inside the group folder\n- Preserve source subfolder prefixes in dest_name ONLY when they add meaningful context\n- Drop misleading or redundant subfolder prefixes (e.g. a cat photo in \"porn/\" → just the filename)\n- dest_name must always end with the original file's name and extension\n";
+const GROUP_RESPONSE_INSTRUCTIONS: &str = "Respond in JSON:\n{\n  \"groups\": [\n    {\n      \"label\": \"Work/Acme Corp/Website Redesign\",\n      \"rationale\": \"...\",\n      \"members\": [\n        { \"index\": 0, \"dest_name\": \"contract.pdf\" },\n        { \"index\": 3, \"dest_name\": \"mockups/home.png\" }\n      ]\n    }\n  ]\n}\n\nRules:\n- A file can only be in one group\n- EVERY file must be placed in exactly one group. Prefer groups of 2+ files; a file with no companions may sit directly under the broad area (e.g. \"Finance/Bills\") — never in a folder made only of its own name\n- NEVER use file-type words as folder names (PDFs, Documents, Images, Files, Misc, Other)\n- The \"label\" CAN be a nested folder path using \"/\" to build a real directory tree, where each \"/\" becomes a subdirectory. Use nesting whenever a natural hierarchy exists (it usually does) — a flat single-level label is also fine when it doesn't. Good nested labels: \"Work/Acme Corp/Website Redesign\", \"Photos/2023/Hawaii Trip\", \"Finance/Taxes/2023\", \"Legal/Smith v. Jones\".\n- When you do nest, go from general to specific: the top level is a broad area (Work, Photos, Finance, Legal, Personal), and deeper levels narrow by client/project, year/event, or matter/case. Use as many levels as the content clearly supports — commonly 2-3. Don't invent hierarchy that isn't there, and don't bury a lone file under deep folders.\n- Prefer SPECIFIC groups over broad catch-alls. \"Alex & Katy\", \"Selfies\", and \"Dog Photos\" are better than one \"Personal Photos\" bucket. \"Smith v. Jones Lawsuit\" and \"Apartment Lease\" are better than one \"Legal Documents\" bucket.\n- Split a broad theme whenever the summaries/tags distinguish sub-subjects: different people pictured, different pets, different cases or matters, different trips or events. Prefer expressing that split as deeper label levels (e.g. \"Photos/Pets/Dogs\" vs \"Photos/Pets/Cats\").\n- Use dest_name sub-paths to organize even further WITHIN a group (e.g. \"raw/beach.jpg\") when members share a group but differ in sub-subject\n- NEVER group by file type — group by subject, theme, or context\n- A .jpg, .mp4, .pdf, and .csv can all belong in the same group if they share a topic\n- For each member, dest_name is the filename or sub-path to use inside the group folder\n- Preserve source subfolder prefixes in dest_name ONLY when they add meaningful context\n- Drop misleading or redundant subfolder prefixes (e.g. a cat photo in \"porn/\" → just the filename)\n- dest_name must always end with the original file's name and extension\n";
 
 pub fn describe_system_prompt() -> &'static str {
   "You are helping organize a messy folder. \
@@ -135,11 +135,97 @@ pub fn build_group_prompt(files: &[FileSummary]) -> String {
   )
 }
 
+/// Stage-one prompt: assign every file to one top-level area.
+pub fn route_system_prompt(areas: &[Area]) -> String {
+  let mut prompt = String::from(
+    "You are sorting files into a fixed set of top-level folders \
+     (areas). Assign EVERY file to exactly one area by its index. \
+     Judge by subject and purpose, never by file type. When a file \
+     could fit two areas, pick the one a person would look in first.\n\n\
+     Areas:\n",
+  );
+  for area in areas {
+    let _ = writeln!(prompt, "- {}: {}", area.name, area.description);
+  }
+  prompt.push_str(
+    "\nRespond in JSON: {\"assignments\": [{\"index\": 0, \"area\": \"Work\"}, ...]}",
+  );
+  prompt
+}
+
+pub fn route_user_prompt(files: &[FileSummary]) -> String {
+  let mut prompt = format!("Assign these {} files:\n", files.len());
+  for file in files {
+    let _ = writeln!(
+      prompt,
+      "[{}] {} — {}",
+      file.index, file.filename, file.description.summary
+    );
+  }
+  prompt
+}
+
+/// Stage-two constraint: every label lives under one area.
+pub fn group_area_note(area: &Area) -> String {
+  format!(
+    "\nAll of these files belong to the top-level area \"{name}\" \
+     ({desc}). Every group \"label\" MUST start with \"{name}/\" and \
+     then name the sub-folder(s) beneath it. Do not repeat the area \
+     name inside the sub-folder.\n",
+    name = area.name,
+    desc = area.description,
+  )
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
   use crate::model::ContentDescription;
   use crate::model::DescriptionSource;
+
+  #[test]
+  fn route_prompts_list_areas_and_files() {
+    let areas = vec![
+      Area::new("Work", "jobs and clients"),
+      Area::new("Finance", "taxes, bills"),
+    ];
+    let system = route_system_prompt(&areas);
+    assert!(system.contains("- Work: jobs and clients"));
+    assert!(system.contains("- Finance: taxes, bills"));
+    assert!(system.contains("exactly one area"));
+
+    let files = vec![FileSummary {
+      index: 4,
+      filename: "w2.txt".to_string(),
+      source_path: "Documents/w2.txt".to_string(),
+      description: ContentDescription {
+        summary: "2023 W-2 from Acme".to_string(),
+        tags: vec![],
+        suggested_category: "finance".to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      },
+      metadata_hint: String::new(),
+    }];
+    let user = route_user_prompt(&files);
+    assert!(user.contains("[4] w2.txt — 2023 W-2 from Acme"));
+  }
+
+  #[test]
+  fn area_note_demands_the_prefix() {
+    let note =
+      group_area_note(&Area::new("Legal", "contracts, leases"));
+    assert!(note.contains("MUST start with \"Legal/\""));
+    assert!(note.contains("contracts, leases"));
+  }
+
+  #[test]
+  fn group_rules_forbid_omitting_files_and_type_words() {
+    let system = group_system_prompt();
+    assert!(!system.contains("can be omitted"));
+    assert!(system.contains("EVERY file must be placed"));
+    assert!(system.contains("NEVER use file-type words"));
+  }
 
   #[test]
   fn describe_prompt_includes_filename() {

@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use crate::ai::AiProvider;
 use crate::analyze::{
   analyze_batch, group_cache_key, read_cache, read_cached_grouping,
-  write_cached_grouping, AnalyzeOptions,
+  read_cached_routing, write_cached_grouping, write_cached_routing,
+  AnalyzeOptions,
 };
 use crate::cost::estimate_cost;
 use crate::fingerprint::{
@@ -18,8 +19,9 @@ use crate::fingerprint::{
 use crate::group::build_groups;
 use crate::ledger::{Ledger, OrganizedDuplicate};
 use crate::model::{
-  ContentDescription, DuplicateSet, FileSummary, FingerprintedFile,
-  MemberNote, ProposedGroup, ReorgPlan,
+  Area, ContentDescription, DuplicateSet, FileSummary,
+  FingerprintedFile, MemberNote, ProposedGroup, ReorgPlan,
+  RoutedFile,
 };
 use crate::model::{DescriptionSource, FileCategory};
 use crate::plan::propose_plan;
@@ -62,6 +64,12 @@ pub enum PipelineEvent {
   GroupingFailed {
     error: String,
   },
+  /// Stage-one routing finished: how many areas received files and how
+  /// many files had no usable area (grouped without a constraint).
+  RoutingComplete {
+    areas_used: usize,
+    unrouted: usize,
+  },
   /// What deterministic label validation changed (see
   /// `group::validate`).
   LabelsNormalised {
@@ -101,6 +109,8 @@ pub struct PipelineConfig {
   pub model: String,
   /// Model id used for per-file descriptions.
   pub describe_model: String,
+  /// Top-level areas for two-stage grouping. Empty = single stage.
+  pub taxonomy: Vec<Area>,
 }
 
 #[derive(Debug)]
@@ -532,7 +542,12 @@ async fn run_ai_pipeline<P: AiProvider>(
     }
   }
 
-  let cache_key = group_cache_key(&summary_hashes, existing_labels);
+  // The taxonomy shapes the result, so it salts the cache key too.
+  let mut cache_salt: Vec<String> = existing_labels.to_vec();
+  cache_salt.extend(
+    config.taxonomy.iter().map(|a| format!("area:{}", a.name)),
+  );
+  let cache_key = group_cache_key(&summary_hashes, &cache_salt);
   if let Some(groups) = read_cached_grouping(
     &config.cache_dir,
     &cache_key,
@@ -550,11 +565,20 @@ async fn run_ai_pipeline<P: AiProvider>(
     ));
   }
 
-  let groups = match propose_groups_batched(
+  let two_stage = TwoStage {
+    areas: &config.taxonomy,
+    cache_dir: &config.cache_dir,
+    summary_hashes: &summary_hashes,
+    hash_to_indices: &hash_to_indices,
+    index_to_hash: &index_to_hash,
+  };
+  let groups = match propose_groups_two_stage(
     provider,
     &summaries,
     existing_labels,
     organized_context,
+    &two_stage,
+    tx,
   )
   .await
   {
@@ -691,12 +715,22 @@ async fn propose_once<P: AiProvider>(
   summaries: &[FileSummary],
   existing_labels: &[String],
   organized_context: &[(String, Vec<ContentDescription>)],
+  area: Option<&Area>,
 ) -> Result<Vec<ProposedGroup>> {
   // A garbled response can parse as groups with no members. Treat
   // "placed nothing" as a failed call and try once more before giving
   // up, so one bad generation doesn't unsort the whole run.
   for attempt in 0..2 {
-    let groups = if organized_context.is_empty() {
+    let groups = if let Some(area) = area {
+      provider
+        .propose_groups_in_area(
+          summaries,
+          area,
+          existing_labels,
+          organized_context,
+        )
+        .await?
+    } else if organized_context.is_empty() {
       provider
         .propose_groups_with_context(summaries, existing_labels)
         .await?
@@ -733,6 +767,7 @@ async fn propose_groups_batched<P: AiProvider>(
   summaries: &[FileSummary],
   existing_labels: &[String],
   organized_context: &[(String, Vec<ContentDescription>)],
+  area: Option<&Area>,
 ) -> Result<Vec<ProposedGroup>> {
   if summaries.len() <= MAX_GROUPING_BATCH {
     return propose_once(
@@ -740,6 +775,7 @@ async fn propose_groups_batched<P: AiProvider>(
       summaries,
       existing_labels,
       organized_context,
+      area,
     )
     .await;
   }
@@ -757,7 +793,7 @@ async fn propose_groups_batched<P: AiProvider>(
 
   for chunk in ordered.chunks(MAX_GROUPING_BATCH) {
     let groups =
-      propose_once(provider, chunk, &labels, organized_context)
+      propose_once(provider, chunk, &labels, organized_context, area)
         .await?;
     for group in groups {
       if !labels.contains(&group.label) {
@@ -784,6 +820,186 @@ async fn propose_groups_batched<P: AiProvider>(
       .filter_map(|label| merged.remove(&label))
       .collect(),
   )
+}
+
+/// Files per routing call; short lines, so this stays well inside the
+/// cheap model's comfort zone.
+const ROUTE_BATCH: usize = 200;
+
+/// Everything stage one needs besides the provider.
+struct TwoStage<'a> {
+  areas: &'a [Area],
+  cache_dir: &'a std::path::Path,
+  summary_hashes: &'a [[u8; 32]],
+  hash_to_indices: &'a HashMap<String, Vec<usize>>,
+  index_to_hash: &'a HashMap<usize, String>,
+}
+
+/// Stage one routes every file to a configured area (cached by content
+/// set + taxonomy); stage two groups within each area so labels share
+/// a top level and related files never straddle a batch boundary.
+/// Routing failure or an empty taxonomy falls back to single-stage.
+async fn propose_groups_two_stage<P: AiProvider>(
+  provider: &P,
+  summaries: &[FileSummary],
+  existing_labels: &[String],
+  organized_context: &[(String, Vec<ContentDescription>)],
+  stage: &TwoStage<'_>,
+  tx: &mpsc::Sender<PipelineEvent>,
+) -> Result<Vec<ProposedGroup>> {
+  if stage.areas.is_empty() || summaries.is_empty() {
+    return propose_groups_batched(
+      provider,
+      summaries,
+      existing_labels,
+      organized_context,
+      None,
+    )
+    .await;
+  }
+
+  let area_salt: Vec<String> = stage
+    .areas
+    .iter()
+    .map(|a| format!("route:{}", a.name))
+    .collect();
+  let route_key = group_cache_key(stage.summary_hashes, &area_salt);
+  let routed = match read_cached_routing(
+    stage.cache_dir,
+    &route_key,
+    stage.hash_to_indices,
+  )
+  .await
+  {
+    Some(routed) => {
+      tracing::info!("Reused cached routing (no Claude call)");
+      routed
+    }
+    None => match route_all(provider, summaries, stage.areas).await {
+      Ok(routed) => {
+        let _ = write_cached_routing(
+          stage.cache_dir,
+          &route_key,
+          &routed,
+          stage.index_to_hash,
+        )
+        .await;
+        routed
+      }
+      Err(err) => {
+        tracing::warn!(
+          error = %format!("{err:#}"),
+          "Routing failed; grouping in a single stage"
+        );
+        return propose_groups_batched(
+          provider,
+          summaries,
+          existing_labels,
+          organized_context,
+          None,
+        )
+        .await;
+      }
+    },
+  };
+
+  // Bucket summaries by area, in taxonomy order. Unknown or missing
+  // areas are grouped afterwards without a constraint.
+  let area_of: HashMap<usize, &Area> = routed
+    .iter()
+    .filter_map(|r| {
+      let key = crate::eval::normalize_segment(&r.area);
+      stage
+        .areas
+        .iter()
+        .find(|a| crate::eval::normalize_segment(&a.name) == key)
+        .map(|a| (r.index, a))
+    })
+    .collect();
+  let mut buckets: Vec<(&Area, Vec<FileSummary>)> =
+    stage.areas.iter().map(|a| (a, Vec::new())).collect();
+  let mut unrouted: Vec<FileSummary> = Vec::new();
+  for summary in summaries {
+    match area_of.get(&summary.index) {
+      Some(area) => {
+        if let Some((_, files)) =
+          buckets.iter_mut().find(|(a, _)| a.name == area.name)
+        {
+          files.push(summary.clone());
+        }
+      }
+      None => unrouted.push(summary.clone()),
+    }
+  }
+  let areas_used =
+    buckets.iter().filter(|(_, f)| !f.is_empty()).count();
+  let _ = tx
+    .send(PipelineEvent::RoutingComplete {
+      areas_used,
+      unrouted: unrouted.len(),
+    })
+    .await;
+
+  let mut labels: Vec<String> = existing_labels.to_vec();
+  let mut all = Vec::new();
+  for (area, files) in
+    buckets.into_iter().filter(|(_, f)| !f.is_empty())
+  {
+    let groups = propose_groups_batched(
+      provider,
+      &files,
+      &labels,
+      organized_context,
+      Some(area),
+    )
+    .await?;
+    for mut group in groups {
+      group.label = ensure_area_prefix(&group.label, area);
+      if !labels.contains(&group.label) {
+        labels.push(group.label.clone());
+      }
+      all.push(group);
+    }
+  }
+  if !unrouted.is_empty() {
+    let groups = propose_groups_batched(
+      provider,
+      &unrouted,
+      &labels,
+      organized_context,
+      None,
+    )
+    .await?;
+    all.extend(groups);
+  }
+  Ok(all)
+}
+
+async fn route_all<P: AiProvider>(
+  provider: &P,
+  summaries: &[FileSummary],
+  areas: &[Area],
+) -> Result<Vec<RoutedFile>> {
+  let mut routed = Vec::with_capacity(summaries.len());
+  for chunk in summaries.chunks(ROUTE_BATCH) {
+    routed.extend(provider.route_files(chunk, areas).await?);
+  }
+  Ok(routed)
+}
+
+/// `Work/Acme` stays; `Acme` becomes `Work/Acme`; `work / acme` keeps
+/// its spelling but is recognised as already prefixed.
+fn ensure_area_prefix(label: &str, area: &Area) -> String {
+  let first = label.split('/').next().unwrap_or("").trim();
+  if crate::eval::normalize_segment(first)
+    == crate::eval::normalize_segment(&area.name)
+  {
+    label.to_string()
+  } else if label.trim().is_empty() {
+    area.name.clone()
+  } else {
+    format!("{}/{}", area.name, label.trim())
+  }
 }
 
 /// Pull low-confidence placements out of their groups into a visible
@@ -981,10 +1197,15 @@ mod tests {
       .map(|i| summary(i, 0.9))
       .collect();
 
-    let groups =
-      propose_groups_batched(&OneLabelProvider, &summaries, &[], &[])
-        .await
-        .unwrap();
+    let groups = propose_groups_batched(
+      &OneLabelProvider,
+      &summaries,
+      &[],
+      &[],
+      None,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].member_indices.len(), summaries.len());
@@ -1027,6 +1248,7 @@ mod tests {
       ledger_path: None,
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
+      taxonomy: vec![],
     };
 
     // First run populates both the description and grouping caches.
@@ -1077,6 +1299,7 @@ mod tests {
       ledger_path,
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
+      taxonomy: crate::model::default_areas(),
     }
   }
 
@@ -1319,6 +1542,7 @@ mod tests {
       ledger_path: None,
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
+      taxonomy: vec![],
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -1376,6 +1600,7 @@ mod tests {
       ledger_path: None,
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
+      taxonomy: vec![],
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -1748,6 +1973,8 @@ mod tests {
       None,
     );
     config.no_ai = false;
+    // LabelProvider cannot route; single-stage keeps the raw labels.
+    config.taxonomy = vec![];
 
     let (tx, mut rx) = mpsc::channel(64);
     let result = run(&provider, &config, tx).await.unwrap();
@@ -1832,6 +2059,7 @@ mod tests {
       None,
     );
     config.no_ai = false;
+    config.taxonomy = vec![];
 
     let (tx, _rx) = mpsc::channel(64);
     let result = run(&MiscProvider, &config, tx).await.unwrap();
@@ -1852,6 +2080,260 @@ mod tests {
       .collect();
     assert!(notes.contains(&crate::group::validate::TYPE_ONLY_NOTE));
     assert!(notes.contains(&"not placed by grouping"));
+  }
+
+  /// Routes `keep*` files to Work and everything else to Personal,
+  /// then groups whatever it is given into one "Stuff" group. Counts
+  /// calls so cache behaviour can be asserted.
+  struct RoutingProvider {
+    route_calls: std::sync::atomic::AtomicUsize,
+    group_calls: std::sync::atomic::AtomicUsize,
+    route_result: RouteBehaviour,
+  }
+
+  enum RouteBehaviour {
+    ByName,
+    Fail,
+    Unknown,
+  }
+
+  impl RoutingProvider {
+    fn new(route_result: RouteBehaviour) -> Self {
+      Self {
+        route_calls: Default::default(),
+        group_calls: Default::default(),
+        route_result,
+      }
+    }
+    fn calls(&self) -> (usize, usize) {
+      use std::sync::atomic::Ordering::SeqCst;
+      (self.route_calls.load(SeqCst), self.group_calls.load(SeqCst))
+    }
+  }
+
+  impl AiProvider for RoutingProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      context: &DescribeContext,
+    ) -> anyhow::Result<ContentDescription> {
+      Ok(ContentDescription {
+        summary: format!("Description of {}", context.filename),
+        tags: vec![],
+        suggested_category: "photo".to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      })
+    }
+
+    async fn route_files(
+      &self,
+      files: &[FileSummary],
+      _areas: &[Area],
+    ) -> anyhow::Result<Vec<RoutedFile>> {
+      self
+        .route_calls
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+      match self.route_result {
+        RouteBehaviour::Fail => anyhow::bail!("routing exploded"),
+        RouteBehaviour::Unknown => Ok(
+          files
+            .iter()
+            .map(|f| RoutedFile {
+              index: f.index,
+              area: "Bogus".to_string(),
+            })
+            .collect(),
+        ),
+        RouteBehaviour::ByName => Ok(
+          files
+            .iter()
+            .map(|f| RoutedFile {
+              index: f.index,
+              area: if f.filename.starts_with("keep") {
+                "Work".to_string()
+              } else {
+                "Personal".to_string()
+              },
+            })
+            .collect(),
+        ),
+      }
+    }
+
+    async fn propose_groups(
+      &self,
+      files: &[FileSummary],
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      self
+        .group_calls
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+      Ok(vec![ProposedGroup {
+        label: "Stuff".to_string(),
+        rationale: String::new(),
+        member_indices: files.iter().map(|f| f.index).collect(),
+        member_destinations: vec![],
+        member_notes: vec![],
+      }])
+    }
+  }
+
+  fn labels_of(result: &PipelineResult) -> Vec<String> {
+    let mut v: Vec<String> =
+      result.plan.groups.iter().map(|g| g.label.clone()).collect();
+    v.sort();
+    v
+  }
+
+  #[tokio::test]
+  async fn two_stage_grouping_prefixes_labels_with_the_routed_area() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = RoutingProvider::new(RouteBehaviour::ByName);
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    // "Personal/Stuff" holds one file, so validation folds it to the
+    // area itself.
+    assert_eq!(labels_of(&result), vec!["Personal", "Work/Stuff"]);
+    let work = result
+      .plan
+      .groups
+      .iter()
+      .find(|g| g.label == "Work/Stuff")
+      .unwrap();
+    assert_eq!(work.members.len(), 2);
+    // One routing call, one grouping call per area.
+    assert_eq!(provider.calls(), (1, 2));
+
+    let mut routed = None;
+    while let Ok(ev) = rx.try_recv() {
+      if let PipelineEvent::RoutingComplete {
+        areas_used,
+        unrouted,
+      } = ev
+      {
+        routed = Some((areas_used, unrouted));
+      }
+    }
+    assert_eq!(routed, Some((2, 0)));
+  }
+
+  #[tokio::test]
+  async fn routing_failure_falls_back_to_single_stage() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = RoutingProvider::new(RouteBehaviour::Fail);
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    assert_eq!(labels_of(&result), vec!["Stuff"]);
+    assert_eq!(provider.calls(), (1, 1));
+  }
+
+  #[tokio::test]
+  async fn unknown_area_names_are_grouped_without_a_constraint() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = RoutingProvider::new(RouteBehaviour::Unknown);
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    assert_eq!(labels_of(&result), vec!["Stuff"]);
+    let mut routed = None;
+    while let Ok(ev) = rx.try_recv() {
+      if let PipelineEvent::RoutingComplete {
+        areas_used,
+        unrouted,
+      } = ev
+      {
+        routed = Some((areas_used, unrouted));
+      }
+    }
+    assert_eq!(routed, Some((0, 3)));
+  }
+
+  #[tokio::test]
+  async fn second_run_reuses_cached_routing_and_grouping() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let first = RoutingProvider::new(RouteBehaviour::ByName);
+    let (tx, _rx) = mpsc::channel(64);
+    let a = run(&first, &config, tx).await.unwrap();
+    assert_eq!(first.calls(), (1, 2));
+
+    let second = RoutingProvider::new(RouteBehaviour::Fail);
+    let (tx, _rx) = mpsc::channel(64);
+    let b = run(&second, &config, tx).await.unwrap();
+    assert_eq!(second.calls(), (0, 0), "everything came from cache");
+    assert_eq!(labels_of(&a), labels_of(&b));
+  }
+
+  #[tokio::test]
+  async fn empty_taxonomy_groups_in_a_single_stage() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = RoutingProvider::new(RouteBehaviour::ByName);
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+    config.taxonomy = vec![];
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_eq!(labels_of(&result), vec!["Stuff"]);
+    assert_eq!(provider.calls(), (0, 1));
   }
 
   #[test]
@@ -2036,6 +2518,7 @@ mod tests {
       ledger_path: None,
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
+      taxonomy: vec![],
     };
 
     let (tx, _rx) = mpsc::channel(64);
@@ -2082,6 +2565,7 @@ mod tests {
       ledger_path: None,
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
+      taxonomy: vec![],
     };
 
     let (tx, _rx) = mpsc::channel(64);
@@ -2124,6 +2608,7 @@ mod tests {
       ledger_path: None,
       model: "claude-opus-5".to_string(),
       describe_model: "claude-haiku-4-5".to_string(),
+      taxonomy: vec![],
     };
 
     let (tx, mut rx) = mpsc::channel(64);

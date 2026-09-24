@@ -86,7 +86,8 @@ impl PipelineTuiState {
       PipelineEvent::GroupingFailed { error } => {
         self.grouping_error = Some(error.clone());
       }
-      PipelineEvent::LabelsNormalised { .. } => {}
+      PipelineEvent::LabelsNormalised { .. }
+      | PipelineEvent::RoutingComplete { .. } => {}
       PipelineEvent::PlanReady => {
         self.plan_ready = true;
       }
