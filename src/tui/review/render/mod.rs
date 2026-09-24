@@ -25,9 +25,9 @@ pub fn render(frame: &mut Frame, state: &mut ReviewState) {
   render_header(frame, outer[0], state);
 
   let body = Layout::horizontal([
-    Constraint::Percentage(22),
-    Constraint::Percentage(38),
-    Constraint::Percentage(40),
+    Constraint::Percentage(30),
+    Constraint::Percentage(35),
+    Constraint::Percentage(35),
   ])
   .split(outer[1]);
 
