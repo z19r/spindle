@@ -126,9 +126,20 @@ impl ReviewState {
       dupe_types: Vec::new(),
       diff_state: None,
       file_notes,
+      banner: None,
     };
     state.update_image_preview();
     state
+  }
+
+  /// Show a one-line summary of the run in the header.
+  pub fn with_banner(mut self, text: impl Into<String>) -> Self {
+    self.banner = Some(text.into());
+    self
+  }
+
+  pub fn banner(&self) -> Option<&str> {
+    self.banner.as_deref()
   }
 
   /// Why the pipeline put this file where it did, if it said.

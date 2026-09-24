@@ -123,6 +123,8 @@ pub struct ReviewState {
   file_metadata: HashMap<PathBuf, (String, u64)>,
   /// Duplicate relationships by source path (organize mode).
   dupe_info: HashMap<PathBuf, DupeInfo>,
+  /// One-line run summary shown in the header.
+  banner: Option<String>,
   dupe_types: Vec<DuplicateType>,
   diff_state: Option<DiffState>,
   /// Per-file explanation (from `FileGroup::member_notes`), keyed by

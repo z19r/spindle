@@ -24,7 +24,9 @@ use spindle::model::{
 use spindle::pipeline::{self, PipelineConfig, PipelineEvent};
 use spindle::progress::{self, PipelineProgress};
 use spindle::scanner::{scan_directories_filtered, ScanOptions};
-use spindle::tui::{self, ReviewAction, ReviewMode, ReviewState};
+use spindle::tui::{
+  self, ReviewAction, ReviewMode, ReviewState, TerminalSession,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -105,63 +107,67 @@ async fn main() -> Result<()> {
 
   let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(64);
 
-  // Full TUI progress in a real terminal; plain line output when
-  // piped or redirected.
-  let use_tui = std::io::stdout().is_terminal();
-  let event_handle: tokio::task::JoinHandle<Result<()>> = if use_tui {
-    tokio::task::spawn_blocking(move || {
-      tui::run_pipeline_progress(rx)
-    })
+  // One terminal session covers progress and review, so the screen
+  // never flashes back to the shell between them. Piped or redirected
+  // output gets plain lines instead.
+  let session = if std::io::stdout().is_terminal() {
+    Some(TerminalSession::enter()?)
   } else {
-    tokio::spawn(async move {
+    None
+  };
+  let event_handle: tokio::task::JoinHandle<(
+    Option<TerminalSession>,
+    Result<()>,
+  )> = match session {
+    Some(mut session) => tokio::task::spawn_blocking(move || {
+      let outcome =
+        tui::run_pipeline_progress(rx, &mut session.terminal);
+      (Some(session), outcome)
+    }),
+    None => tokio::spawn(async move {
       let mut progress = PipelineProgress::new();
       while let Some(event) = rx.recv().await {
         progress.handle_event(&event);
       }
-      Ok(())
-    })
+      (None, Ok(()))
+    }),
   };
 
-  // Join the progress task before propagating pipeline errors so the
-  // terminal is restored first.
   let pipeline_result =
     pipeline::run(&provider, &pipeline_config, tx).await;
-  match event_handle.await {
-    Ok(Ok(())) => {}
-    Ok(Err(e)) => {
-      tracing::warn!(error = %e, "Progress display failed")
+  let session = match event_handle.await {
+    Ok((session, Ok(()))) => session,
+    Ok((session, Err(e))) => {
+      tracing::warn!(error = %e, "Progress display failed");
+      session
     }
     Err(e) => {
-      tracing::error!(error = %e, "Event handler task panicked")
+      tracing::error!(error = %e, "Event handler task panicked");
+      None
     }
-  }
-  let result = pipeline_result?;
+  };
+  // Restore the terminal before any error or plain output reaches it.
+  let result = match pipeline_result {
+    Ok(result) => result,
+    Err(e) => {
+      drop(session);
+      return Err(e);
+    }
+  };
 
   let plan = &result.plan;
-
-  println!(
-    "\nPlan: {} groups, {} moves, {} duplicates ({} reclaimable).",
+  let summary = format!(
+    "{} groups · {} moves · {} duplicates ({} reclaimable)",
     plan.stats.groups_created,
     plan.moves.len(),
     plan.stats.duplicates_found,
     format_bytes(plan.stats.space_to_reclaim),
   );
 
-  if !result.organized_duplicates.is_empty() {
-    println!(
-      "\n{} new file(s) are identical to already-organized content:",
-      result.organized_duplicates.len()
-    );
-    for dup in &result.organized_duplicates {
-      println!(
-        "  {} ↔ {}",
-        dup.path.display(),
-        dup.organized_at.display()
-      );
-    }
-  }
-
   if plan.groups.is_empty() {
+    drop(session);
+    println!("\nPlan: {summary}.");
+    print_organized_duplicates(&result);
     println!("Nothing to organize.");
     return Ok(());
   }
@@ -176,8 +182,21 @@ async fn main() -> Result<()> {
     ReviewMode::Organize,
   )
   .with_file_metadata(&result.fingerprinted)
-  .with_duplicates(&result.all_dupes, &result.fingerprinted);
-  let (action, review_state) = tui::run_review(review_state)?;
+  .with_duplicates(&result.all_dupes, &result.fingerprinted)
+  .with_banner(&summary);
+
+  let Some(mut session) = session else {
+    anyhow::bail!(
+      "Interactive review needs a terminal. Run spindle in a \
+       terminal, or use --dry-run there to see the plan."
+    );
+  };
+  let review = tui::run_review(review_state, &mut session.terminal);
+  drop(session);
+  let (action, review_state) = review?;
+
+  println!("\nPlan: {summary}.");
+  print_organized_duplicates(&result);
 
   match action {
     ReviewAction::Quit => {
@@ -194,6 +213,23 @@ async fn main() -> Result<()> {
       groups: &plan.groups,
     });
   execute_review(&cli, &config, &review_state, recording)
+}
+
+fn print_organized_duplicates(result: &pipeline::PipelineResult) {
+  if result.organized_duplicates.is_empty() {
+    return;
+  }
+  println!(
+    "\n{} new file(s) are identical to already-organized content:",
+    result.organized_duplicates.len()
+  );
+  for dup in &result.organized_duplicates {
+    println!(
+      "  {} ↔ {}",
+      dup.path.display(),
+      dup.organized_at.display()
+    );
+  }
 }
 
 fn run_undo(cli: &CliArgs) -> Result<()> {
@@ -351,7 +387,10 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
   )
   .with_file_metadata(&fingerprinted);
   review_state.set_dupe_types(dupe_types);
-  let (action, review_state) = tui::run_review(review_state)?;
+  let mut session = TerminalSession::enter()?;
+  let review = tui::run_review(review_state, &mut session.terminal);
+  drop(session);
+  let (action, review_state) = review?;
 
   match action {
     ReviewAction::Quit => {
