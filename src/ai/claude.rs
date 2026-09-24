@@ -10,6 +10,18 @@ use super::{
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
+/// Upper bound on one API call. Grouping replies can legitimately take
+/// a minute or two; anything beyond this is a stall worth retrying.
+const DEFAULT_REQUEST_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(300);
+
+fn http_client(timeout: std::time::Duration) -> Client {
+  Client::builder()
+    .timeout(timeout)
+    .build()
+    .unwrap_or_else(|_| Client::new())
+}
+
 pub struct ClaudeProvider {
   client: Client,
   api_key: String,
@@ -235,7 +247,7 @@ impl ClaudeProvider {
   ) -> Self {
     let model = model.into();
     Self {
-      client: Client::new(),
+      client: http_client(DEFAULT_REQUEST_TIMEOUT),
       api_key: api_key.into(),
       describe_model: model.clone(),
       model,
@@ -260,6 +272,14 @@ impl ClaudeProvider {
   ) -> Self {
     let mut this = self;
     this.poll_interval = interval;
+    this
+  }
+
+  /// Give up on a single API call after `timeout`; the call is then
+  /// retried like any other transport error.
+  pub fn with_timeout(self, timeout: std::time::Duration) -> Self {
+    let mut this = self;
+    this.client = http_client(timeout);
     this
   }
 
@@ -905,6 +925,54 @@ mod tests {
 
   use wiremock::matchers::{header, method, path};
   use wiremock::{Mock, MockServer, ResponseTemplate};
+
+  /// A stalled API reply must not hang the run: the request times out,
+  /// is retried like any transport error, and finally fails loudly.
+  #[tokio::test]
+  async fn stalled_response_times_out_and_is_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+      .and(path("/v1/messages"))
+      .respond_with(
+        ResponseTemplate::new(200)
+          .set_delay(std::time::Duration::from_millis(400))
+          .set_body_json(serde_json::json!({"content": []})),
+      )
+      .expect(2)
+      .mount(&server)
+      .await;
+
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-sonnet-4-6".to_string(),
+      1,
+    )
+    .with_base_url(server.uri())
+    .with_timeout(std::time::Duration::from_millis(50));
+
+    let ctx = DescribeContext {
+      filename: "red.png".to_string(),
+      file_type_label: "PNG".to_string(),
+      file_size: 100,
+      metadata_hint: None,
+    };
+    let started = std::time::Instant::now();
+    let err = provider
+      .describe_image(&[0xFF, 0x00, 0x00], "image/png", &ctx)
+      .await
+      .unwrap_err();
+
+    assert!(
+      format!("{err:#}").to_lowercase().contains("timed out")
+        || format!("{err:#}").to_lowercase().contains("timeout"),
+      "{err:#}"
+    );
+    // Two attempts of 50 ms plus one 1 s backoff, never the 800 ms of
+    // two full stalled replies plus backoff.
+    assert!(
+      started.elapsed() < std::time::Duration::from_millis(1800)
+    );
+  }
 
   #[tokio::test]
   async fn describe_image_sends_correct_headers() {
