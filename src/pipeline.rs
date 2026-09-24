@@ -62,6 +62,13 @@ pub enum PipelineEvent {
   GroupingFailed {
     error: String,
   },
+  /// What deterministic label validation changed (see
+  /// `group::validate`).
+  LabelsNormalised {
+    merged: usize,
+    collapsed: usize,
+    rewritten: usize,
+  },
   GroupingComplete {
     group_count: usize,
     /// Files placed in the `Unsorted` group rather than a real one.
@@ -533,6 +540,7 @@ async fn run_ai_pipeline<P: AiProvider>(
   .await
   {
     tracing::info!("Reused cached grouping (no Claude call)");
+    let groups = validate_and_report(groups, tx).await;
     return Ok(add_unsorted(
       groups,
       &summaries,
@@ -578,7 +586,26 @@ async fn run_ai_pipeline<P: AiProvider>(
       }]
     }
   };
+  let groups = validate_and_report(groups, tx).await;
   Ok(add_unsorted(groups, &summaries, skipped, failed_notes))
+}
+
+/// Run label validation and tell the progress display what changed.
+async fn validate_and_report(
+  groups: Vec<ProposedGroup>,
+  tx: &mpsc::Sender<PipelineEvent>,
+) -> Vec<ProposedGroup> {
+  let (groups, n) = crate::group::validate::validate_groups(groups);
+  if n != crate::group::validate::Normalisation::default() {
+    let _ = tx
+      .send(PipelineEvent::LabelsNormalised {
+        merged: n.merged,
+        collapsed: n.collapsed,
+        rewritten: n.rewritten,
+      })
+      .await;
+  }
+  groups
 }
 
 /// Label of the catch-all group for files the plan would otherwise
@@ -615,6 +642,22 @@ fn add_unsorted(
       .chain(skipped)
       .map(|(index, note)| MemberNote { index, note }),
   );
+  // Validation may already have produced an Unsorted group (type-word
+  // labels); fold everything into one.
+  if let Some(pos) =
+    groups.iter().position(|g| g.label == UNSORTED_LABEL)
+  {
+    let existing = groups.remove(pos);
+    notes.extend(existing.member_notes);
+    for index in existing.member_indices {
+      if !notes.iter().any(|n| n.index == index) {
+        notes.push(MemberNote {
+          index,
+          note: "not placed by grouping".to_string(),
+        });
+      }
+    }
+  }
   if notes.is_empty() {
     return groups;
   }
@@ -1638,6 +1681,176 @@ mod tests {
       provider.calls.load(std::sync::atomic::Ordering::SeqCst),
       2
     );
+  }
+
+  /// Returns whatever labels it is constructed with, one file each in
+  /// order, cycling when there are more files than labels.
+  struct LabelProvider {
+    labels: Vec<&'static str>,
+  }
+
+  impl AiProvider for LabelProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      context: &DescribeContext,
+    ) -> anyhow::Result<ContentDescription> {
+      Ok(ContentDescription {
+        summary: format!("Description of {}", context.filename),
+        tags: vec![],
+        suggested_category: "photo".to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      })
+    }
+
+    async fn propose_groups(
+      &self,
+      files: &[FileSummary],
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      Ok(
+        self
+          .labels
+          .iter()
+          .enumerate()
+          .map(|(i, label)| ProposedGroup {
+            label: label.to_string(),
+            rationale: String::new(),
+            member_indices: files
+              .iter()
+              .enumerate()
+              .filter(|(j, _)| j % self.labels.len() == i)
+              .map(|(_, f)| f.index)
+              .collect(),
+            member_destinations: vec![],
+            member_notes: vec![],
+          })
+          .collect(),
+      )
+    }
+  }
+
+  #[tokio::test]
+  async fn labels_are_validated_and_the_event_reports_it() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = LabelProvider {
+      labels: vec!["Work/Acme Corp/PDFs", "work / acme-corp"],
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    let labels: Vec<&str> = result
+      .plan
+      .groups
+      .iter()
+      .map(|g| g.label.as_str())
+      .collect();
+    assert_eq!(labels, vec!["Work/Acme Corp"]);
+    assert_eq!(result.plan.groups[0].members.len(), 3);
+
+    let mut normalised = None;
+    while let Ok(ev) = rx.try_recv() {
+      if let PipelineEvent::LabelsNormalised {
+        merged,
+        collapsed,
+        rewritten,
+      } = ev
+      {
+        normalised = Some((merged, collapsed, rewritten));
+      }
+    }
+    assert_eq!(normalised, Some((1, 0, 2)));
+  }
+
+  #[tokio::test]
+  async fn type_word_only_labels_join_unsorted_with_a_note() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    // "Misc" carries no subject; "Kept" places only two files, so the
+    // third is unplaced. Both must land in ONE Unsorted group.
+    struct MiscProvider;
+    impl AiProvider for MiscProvider {
+      async fn describe_image(
+        &self,
+        _: &[u8],
+        _: &str,
+        context: &DescribeContext,
+      ) -> anyhow::Result<ContentDescription> {
+        Ok(ContentDescription {
+          summary: format!("Description of {}", context.filename),
+          tags: vec![],
+          suggested_category: "photo".to_string(),
+          confidence: 0.9,
+          source: DescriptionSource::Ai,
+        })
+      }
+      async fn propose_groups(
+        &self,
+        files: &[FileSummary],
+      ) -> anyhow::Result<Vec<ProposedGroup>> {
+        let mut idx: Vec<usize> =
+          files.iter().map(|f| f.index).collect();
+        idx.sort_unstable();
+        Ok(vec![
+          ProposedGroup {
+            label: "Misc".to_string(),
+            rationale: String::new(),
+            member_indices: vec![idx[0]],
+            member_destinations: vec![],
+            member_notes: vec![],
+          },
+          ProposedGroup {
+            label: "Kept".to_string(),
+            rationale: String::new(),
+            member_indices: vec![idx[1]],
+            member_destinations: vec![],
+            member_notes: vec![],
+          },
+        ])
+      }
+    }
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&MiscProvider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    let unsorted: Vec<&crate::model::FileGroup> = result
+      .plan
+      .groups
+      .iter()
+      .filter(|g| g.label == UNSORTED_LABEL)
+      .collect();
+    assert_eq!(unsorted.len(), 1, "exactly one Unsorted group");
+    assert_eq!(unsorted[0].members.len(), 2);
+    let notes: Vec<&str> = unsorted[0]
+      .member_notes
+      .iter()
+      .map(|n| n.note.as_str())
+      .collect();
+    assert!(notes.contains(&crate::group::validate::TYPE_ONLY_NOTE));
+    assert!(notes.contains(&"not placed by grouping"));
   }
 
   #[test]

@@ -279,6 +279,18 @@ impl PipelineProgress {
       PipelineEvent::GroupingComplete { group_count, .. } => {
         tracing::info!(group_count, "Semantic grouping complete");
       }
+      PipelineEvent::LabelsNormalised {
+        merged,
+        collapsed,
+        rewritten,
+      } => {
+        tracing::info!(
+          merged,
+          collapsed,
+          rewritten,
+          "Normalised group labels"
+        );
+      }
       PipelineEvent::PlanReady => {
         tracing::debug!("Plan ready for review");
       }
