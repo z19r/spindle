@@ -57,6 +57,24 @@ export ANTHROPIC_API_KEY=sk-ant-...
 To route through a proxy, set `ANTHROPIC_BASE_URL`, pass `--api-base-url`,
 or set `base_url` under `[ai]` in the config file.
 
+### Top-level folders
+
+Grouping runs in two stages: every file is first routed to one of your
+top-level areas, then grouped into sub-folders within that area. The default
+areas are Work, Personal, Finance, Legal, Health, Photos, Media, Software and
+Reference. Override them under `[taxonomy]`:
+
+```toml
+[taxonomy]
+areas = [
+  { name = "Work", description = "clients, projects, meetings" },
+  { name = "Home", description = "family, house, bills, recipes" },
+  { name = "Archive", description = "anything old worth keeping" },
+]
+```
+
+An empty list (`areas = []`) groups in a single stage with no fixed top level.
+
 ## Development
 
 ```bash

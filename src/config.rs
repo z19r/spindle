@@ -141,6 +141,24 @@ pub struct Config {
   pub duplicates: DuplicateConfig,
   #[serde(default)]
   pub matching: MatchingConfig,
+  #[serde(default)]
+  pub taxonomy: TaxonomyConfig,
+}
+
+/// Top-level areas files are routed into before grouping. An empty
+/// list disables routing and groups in a single stage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaxonomyConfig {
+  #[serde(default = "crate::model::default_areas")]
+  pub areas: Vec<crate::model::Area>,
+}
+
+impl Default for TaxonomyConfig {
+  fn default() -> Self {
+    Self {
+      areas: crate::model::default_areas(),
+    }
+  }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,6 +349,7 @@ impl Config {
         ai: AiConfig::default(),
         duplicates: DuplicateConfig::default(),
         matching: MatchingConfig::default(),
+        taxonomy: TaxonomyConfig::default(),
       }
     };
 
@@ -516,6 +535,7 @@ near_duplicate_threshold = 12
       ai: AiConfig::default(),
       duplicates: DuplicateConfig::default(),
       matching: MatchingConfig::default(),
+      taxonomy: TaxonomyConfig::default(),
     };
 
     let result = config.api_key();
@@ -531,6 +551,7 @@ near_duplicate_threshold = 12
       ai: AiConfig::default(),
       duplicates: DuplicateConfig::default(),
       matching: MatchingConfig::default(),
+      taxonomy: TaxonomyConfig::default(),
     };
     config.ai.api_key = Some("sk-my-key".to_string());
 
