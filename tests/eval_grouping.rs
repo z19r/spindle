@@ -18,7 +18,7 @@ use spindle::pipeline::{self, PipelineConfig, PipelineEvent};
 /// that drops below it is a regression.
 const FLOOR: f64 = 0.85;
 /// Floor for the large fixture; raised once a baseline is recorded.
-const LARGE_FLOOR: f64 = 0.0;
+const LARGE_FLOOR: f64 = 0.80;
 
 fn fixtures_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -13,11 +13,15 @@ use super::{
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
-/// Reply budget for a full (single-stage) grouping call.
+/// Largest reply budget for any grouping call.
 const GROUP_MAX_TOKENS: u32 = 32_768;
-/// Reply budget for one area's grouping. A looping reply then fails
-/// in seconds instead of minutes.
-const GROUP_AREA_MAX_TOKENS: u32 = 8_192;
+
+/// Reply budget for a grouping call over `files` files: room for each
+/// member line plus rationales, tight enough that a looping reply
+/// fails in seconds rather than minutes.
+fn group_reply_budget(files: usize) -> u32 {
+  (3_000 + 450 * files as u32).min(GROUP_MAX_TOKENS)
+}
 
 /// Upper bound on one API call. Grouping replies can legitimately take
 /// a minute or two; anything beyond this is a stall worth retrying.
@@ -444,6 +448,13 @@ impl ClaudeProvider {
           self.idle_timeout,
         )
         .await?;
+        tracing::debug!(
+          bytes = reply.text.len(),
+          output_tokens = ?reply.output_tokens,
+          max_tokens = request.max_tokens,
+          stop_reason = ?reply.stop_reason,
+          "Streamed reply complete"
+        );
         return finish_text(reply.text, reply.stop_reason.as_deref());
       }
 
@@ -784,6 +795,7 @@ fn finish_text(
 struct StreamedReply {
   text: String,
   stop_reason: Option<String>,
+  output_tokens: Option<u64>,
 }
 
 /// Assemble the text of a Messages API SSE stream. Fails as a
@@ -804,6 +816,7 @@ where
   let mut reply = StreamedReply {
     text: String::new(),
     stop_reason: None,
+    output_tokens: None,
   };
   let mut checked_at = 0usize;
 
@@ -849,6 +862,10 @@ where
           Some("message_delta") => {
             if let Some(r) = value["delta"]["stop_reason"].as_str() {
               reply.stop_reason = Some(r.to_string());
+            }
+            if let Some(n) = value["usage"]["output_tokens"].as_u64()
+            {
+              reply.output_tokens = Some(n);
             }
           }
           Some("error") => {
@@ -1127,11 +1144,7 @@ impl AiProvider for ClaudeProvider {
       super::group_existing_groups_note(hints.existing_labels),
       super::group_corrections_note(hints.renames),
     );
-    let budget = if hints.area.is_some() {
-      GROUP_AREA_MAX_TOKENS
-    } else {
-      GROUP_MAX_TOKENS
-    };
+    let budget = group_reply_budget(files.len());
     self.send_group_request(user_prompt, budget).await
   }
 
@@ -1296,6 +1309,13 @@ mod tests {
     let e =
       err.downcast_ref::<DegenerateReply>().expect("degenerate");
     assert!(e.0.contains("repetition loop"), "{}", e.0);
+  }
+
+  #[test]
+  fn group_reply_budget_scales_with_files_and_caps() {
+    assert_eq!(group_reply_budget(5), 5_250);
+    assert_eq!(group_reply_budget(35), 18_750);
+    assert_eq!(group_reply_budget(200), GROUP_MAX_TOKENS);
   }
 
   #[test]

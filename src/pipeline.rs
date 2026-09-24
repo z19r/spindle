@@ -1031,15 +1031,15 @@ async fn propose_groups_two_stage<P: AiProvider>(
   for (area, files) in
     buckets.into_iter().filter(|(_, f)| !f.is_empty())
   {
-    let groups = propose_groups_batched(
+    let groups = propose_area_resilient(
       provider,
       &files,
       &labels,
       organized_context,
-      Some(area),
+      area,
       stage.renames,
     )
-    .await?;
+    .await;
     for mut group in groups {
       group.label = ensure_area_prefix(&group.label, area);
       if !labels.contains(&group.label) {
@@ -1061,6 +1061,73 @@ async fn propose_groups_two_stage<P: AiProvider>(
     all.extend(groups);
   }
   Ok(all)
+}
+
+/// Files per call below which a failing area is no longer split.
+const MIN_SPLIT: usize = 8;
+
+/// Group one area, but never let it sink the run: a call that still
+/// fails after its retry is split in half and each half tried on its
+/// own; files whose half also fails are left unplaced (they surface in
+/// Unsorted) while every other area proceeds.
+async fn propose_area_resilient<P: AiProvider>(
+  provider: &P,
+  files: &[FileSummary],
+  labels: &[String],
+  organized_context: &[(String, Vec<ContentDescription>)],
+  area: &Area,
+  renames: &[(String, String)],
+) -> Vec<ProposedGroup> {
+  match propose_groups_batched(
+    provider,
+    files,
+    labels,
+    organized_context,
+    Some(area),
+    renames,
+  )
+  .await
+  {
+    Ok(groups) => groups,
+    Err(err) if files.len() >= MIN_SPLIT => {
+      tracing::warn!(
+        area = %area.name,
+        files = files.len(),
+        error = %format!("{err:#}"),
+        "Area grouping failed; splitting in half"
+      );
+      let (a, b) = files.split_at(files.len() / 2);
+      let mut out = Vec::new();
+      let mut labels: Vec<String> = labels.to_vec();
+      for half in [a, b] {
+        let groups = Box::pin(propose_area_resilient(
+          provider,
+          half,
+          &labels,
+          organized_context,
+          area,
+          renames,
+        ))
+        .await;
+        for g in &groups {
+          if !labels.contains(&g.label) {
+            labels.push(g.label.clone());
+          }
+        }
+        out.extend(groups);
+      }
+      out
+    }
+    Err(err) => {
+      tracing::warn!(
+        area = %area.name,
+        files = files.len(),
+        error = %format!("{err:#}"),
+        "Area grouping failed; leaving its files unplaced"
+      );
+      Vec::new()
+    }
+  }
 }
 
 async fn route_all<P: AiProvider>(
@@ -2806,6 +2873,146 @@ mod tests {
     let (tx, _rx) = mpsc::channel(64);
     let result = run(&FakeProvider, &config, tx).await.unwrap();
     assert!(result.descriptions.is_empty());
+  }
+
+  /// Routes everything to Work; grouping fails for calls larger than
+  /// `max_ok` files (like a reply that cannot fit its budget).
+  struct BigCallsFailProvider {
+    max_ok: usize,
+    calls: std::sync::atomic::AtomicUsize,
+  }
+
+  impl AiProvider for BigCallsFailProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      context: &DescribeContext,
+    ) -> anyhow::Result<ContentDescription> {
+      Ok(ContentDescription {
+        summary: format!("Description of {}", context.filename),
+        tags: vec![],
+        suggested_category: "photo".to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      })
+    }
+
+    async fn route_files(
+      &self,
+      files: &[FileSummary],
+      _areas: &[Area],
+    ) -> anyhow::Result<Vec<RoutedFile>> {
+      Ok(
+        files
+          .iter()
+          .map(|f| RoutedFile {
+            index: f.index,
+            area: if f.filename.starts_with("w") {
+              "Work".to_string()
+            } else {
+              "Personal".to_string()
+            },
+          })
+          .collect(),
+      )
+    }
+
+    async fn propose_groups(
+      &self,
+      files: &[FileSummary],
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+      if files.len() > self.max_ok {
+        return Err(
+          crate::ai::DegenerateReply("too big to fit".to_string())
+            .into(),
+        );
+      }
+      Ok(vec![ProposedGroup {
+        label: format!("Chunk of {}", files.len()),
+        rationale: String::new(),
+        member_indices: files.iter().map(|f| f.index).collect(),
+        member_destinations: vec![],
+        member_notes: vec![],
+      }])
+    }
+  }
+
+  fn write_pngs(dir: &std::path::Path, prefix: &str, n: usize) {
+    for i in 0..n {
+      fs::write(
+        dir.join(format!("{prefix}{i:02}.png")),
+        create_test_png(i as u8 * 7, prefix.len() as u8, 1),
+      )
+      .unwrap();
+    }
+  }
+
+  #[tokio::test]
+  async fn a_failing_area_is_split_until_its_calls_fit() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_pngs(source.path(), "w", 16);
+    write_pngs(source.path(), "p", 3);
+    let provider = BigCallsFailProvider {
+      max_ok: 5,
+      calls: Default::default(),
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    let labels = labels_of(&result);
+    assert!(labels.iter().all(|l| l != UNSORTED_LABEL), "{labels:?}");
+    assert!(
+      labels.contains(&"Work/Chunk of 4".to_string()),
+      "{labels:?}"
+    );
+    assert!(
+      labels.contains(&"Personal/Chunk of 3".to_string()),
+      "{labels:?}"
+    );
+  }
+
+  #[tokio::test]
+  async fn an_area_that_keeps_failing_lands_in_unsorted_without_sinking_the_run(
+  ) {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_pngs(source.path(), "w", 6);
+    write_pngs(source.path(), "p", 3);
+    let provider = BigCallsFailProvider {
+      max_ok: 3,
+      calls: Default::default(),
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    let unsorted = unsorted_group(&result);
+    assert_eq!(unsorted.members.len(), 6);
+    assert!(
+      labels_of(&result).contains(&"Personal/Chunk of 3".to_string())
+    );
   }
 
   #[test]
