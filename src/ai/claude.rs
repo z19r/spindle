@@ -123,6 +123,7 @@ fn group_output_config() -> serde_json::Value {
         "properties": {
           "groups": {
             "type": "array",
+            "minItems": 1,
             "items": {
               "type": "object",
               "properties": {
@@ -130,6 +131,7 @@ fn group_output_config() -> serde_json::Value {
                 "rationale": {"type": "string"},
                 "members": {
                   "type": "array",
+                  "minItems": 1,
                   "items": {
                     "type": "object",
                     "properties": {
@@ -553,6 +555,35 @@ impl ClaudeProvider {
   }
 }
 
+/// Normalise parsed groups: derive member indices from destinations and
+/// log the raw reply when the model placed nothing, which otherwise
+/// looks like a healthy response with empty groups.
+fn finish_groups(
+  groups: Vec<ProposedGroup>,
+  raw: &str,
+) -> Vec<ProposedGroup> {
+  let groups: Vec<ProposedGroup> = groups
+    .into_iter()
+    .map(|mut g| {
+      if !g.member_destinations.is_empty()
+        && g.member_indices.is_empty()
+      {
+        g.member_indices =
+          g.member_destinations.iter().map(|m| m.index).collect();
+      }
+      g
+    })
+    .collect();
+  if groups.iter().all(|g| g.member_indices.is_empty()) {
+    tracing::warn!(
+      groups = groups.len(),
+      raw = %preview(raw, 4000),
+      "Grouping response placed no files"
+    );
+  }
+  groups
+}
+
 /// Extract the JSON text payload from a successful API response,
 /// rejecting truncated responses.
 fn response_text(api_response: ApiResponse) -> Result<String> {
@@ -764,21 +795,7 @@ impl AiProvider for ClaudeProvider {
         )
       })?;
 
-    let groups = response
-      .groups
-      .into_iter()
-      .map(|mut g| {
-        if !g.member_destinations.is_empty()
-          && g.member_indices.is_empty()
-        {
-          g.member_indices =
-            g.member_destinations.iter().map(|m| m.index).collect();
-        }
-        g
-      })
-      .collect();
-
-    Ok(groups)
+    Ok(finish_groups(response.groups, &text))
   }
 
   async fn propose_groups_with_organized_context(
@@ -840,21 +857,7 @@ impl AiProvider for ClaudeProvider {
         )
       })?;
 
-    let groups = response
-      .groups
-      .into_iter()
-      .map(|mut g| {
-        if !g.member_destinations.is_empty()
-          && g.member_indices.is_empty()
-        {
-          g.member_indices =
-            g.member_destinations.iter().map(|m| m.index).collect();
-        }
-        g
-      })
-      .collect();
-
-    Ok(groups)
+    Ok(finish_groups(response.groups, &text))
   }
 }
 
@@ -862,6 +865,19 @@ impl AiProvider for ClaudeProvider {
 mod tests {
   use super::*;
   use crate::model::DescriptionSource;
+
+  /// The grammar must forbid a group with no members and a reply with
+  /// no groups: both parsed fine yet placed nothing in real runs.
+  #[test]
+  fn group_schema_requires_at_least_one_group_and_member() {
+    let cfg = group_output_config();
+    let groups = &cfg["format"]["schema"]["properties"]["groups"];
+    assert_eq!(groups["minItems"], 1);
+    assert_eq!(
+      groups["items"]["properties"]["members"]["minItems"],
+      1
+    );
+  }
 
   #[test]
   fn api_request_serializes_prompt_caching_fields() {

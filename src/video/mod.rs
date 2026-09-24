@@ -7,6 +7,27 @@ pub struct ExtractedFrame {
   pub timestamp_secs: f64,
 }
 
+/// Is `ffmpeg` on PATH? Probed once per process.
+pub fn ffmpeg_available() -> bool {
+  static AVAILABLE: std::sync::OnceLock<bool> =
+    std::sync::OnceLock::new();
+  *AVAILABLE.get_or_init(|| {
+    let ok = std::process::Command::new("ffmpeg")
+      .arg("-version")
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .status()
+      .map(|s| s.success())
+      .unwrap_or(false);
+    if !ok {
+      tracing::info!(
+        "ffmpeg not found — video keyframes will not be analyzed"
+      );
+    }
+    ok
+  })
+}
+
 pub async fn check_ffmpeg() -> bool {
   tokio::process::Command::new("ffmpeg")
     .arg("-version")
