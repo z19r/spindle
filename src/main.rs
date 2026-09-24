@@ -3,7 +3,7 @@ use std::path::Path;
 
 use std::io::IsTerminal;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use dotenvy::dotenv;
 use tracing_subscriber::EnvFilter;
@@ -38,8 +38,10 @@ async fn main() -> Result<()> {
     1 => "spindle=debug",
     _ => "spindle=trace",
   };
+  // Logs go to stderr so stdout stays clean for --json and pipes.
   tracing_subscriber::fmt()
     .with_env_filter(EnvFilter::new(filter))
+    .with_writer(std::io::stderr)
     .init();
 
   let config = Config::load(&cli)?;
@@ -114,11 +116,14 @@ async fn main() -> Result<()> {
   // One terminal session covers progress and review, so the screen
   // never flashes back to the shell between them. Piped or redirected
   // output gets plain lines instead.
-  let session = if std::io::stdout().is_terminal() {
-    Some(TerminalSession::enter()?)
-  } else {
-    None
-  };
+  // --yes and --json never open the review screen, so keep the plain
+  // progress lines for them too.
+  let session =
+    if std::io::stdout().is_terminal() && !cli.yes && !cli.json {
+      Some(TerminalSession::enter()?)
+    } else {
+      None
+    };
   let event_handle: tokio::task::JoinHandle<(
     Option<TerminalSession>,
     Result<()>,
@@ -127,6 +132,11 @@ async fn main() -> Result<()> {
       let outcome =
         tui::run_pipeline_progress(rx, &mut session.terminal);
       (Some(session), outcome)
+    }),
+    None if cli.json => tokio::spawn(async move {
+      // stdout is the JSON document; swallow progress entirely.
+      while rx.recv().await.is_some() {}
+      (None, Ok(()))
     }),
     None => tokio::spawn(async move {
       let mut progress = PipelineProgress::new();
@@ -168,6 +178,12 @@ async fn main() -> Result<()> {
     format_bytes(plan.stats.space_to_reclaim),
   );
 
+  if cli.json {
+    drop(session);
+    println!("{}", plan_json(&result)?);
+    return Ok(());
+  }
+
   if plan.groups.is_empty() {
     drop(session);
     println!("\nPlan: {summary}.");
@@ -190,26 +206,35 @@ async fn main() -> Result<()> {
   .with_descriptions(&result.descriptions, &result.fingerprinted)
   .with_banner(&summary);
 
-  let Some(mut session) = session else {
-    anyhow::bail!(
-      "Interactive review needs a terminal. Run spindle in a \
-       terminal, or use --dry-run there to see the plan."
-    );
-  };
-  let review = tui::run_review(review_state, &mut session.terminal);
-  drop(session);
-  let (action, review_state) = review?;
+  let review_state = if cli.yes {
+    drop(session);
+    println!("\nPlan: {summary}. Executing without review (--yes).");
+    print_organized_duplicates(&result);
+    review_state
+  } else {
+    let Some(mut session) = session else {
+      anyhow::bail!(
+        "Interactive review needs a terminal. Run spindle in a \
+         terminal, or pass --yes to execute the plan unattended or \
+         --json to print it."
+      );
+    };
+    let review = tui::run_review(review_state, &mut session.terminal);
+    drop(session);
+    let (action, review_state) = review?;
 
-  println!("\nPlan: {summary}.");
-  print_organized_duplicates(&result);
+    println!("\nPlan: {summary}.");
+    print_organized_duplicates(&result);
 
-  match action {
-    ReviewAction::Quit => {
-      println!("Aborted by user.");
-      return Ok(());
+    match action {
+      ReviewAction::Quit => {
+        println!("Aborted by user.");
+        return Ok(());
+      }
+      ReviewAction::Execute => {}
     }
-    ReviewAction::Execute => {}
-  }
+    review_state
+  };
 
   let recording =
     ledger_path.as_deref().map(|path| LedgerRecording {
@@ -276,6 +301,43 @@ fn record_corrections(
       "Failed to save review corrections"
     ),
   }
+}
+
+/// The plan as JSON for scripts: groups with their labels, members and
+/// notes, every move, duplicate sets, stats, and already-organized
+/// copies. Paths are absolute.
+fn plan_json(result: &pipeline::PipelineResult) -> Result<String> {
+  let organized_duplicates: Vec<serde_json::Value> = result
+    .organized_duplicates
+    .iter()
+    .map(|d| {
+      serde_json::json!({
+        "path": d.path,
+        "organized_at": d.organized_at,
+      })
+    })
+    .collect();
+  let files: Vec<serde_json::Value> = result
+    .fingerprinted
+    .iter()
+    .enumerate()
+    .map(|(i, f)| {
+      serde_json::json!({
+        "index": i,
+        "path": f.scanned.path,
+        "size": f.scanned.size,
+        "blake3": spindle::ledger::hash_hex(&f.blake3_hash),
+        "description": result.descriptions.get(&i),
+      })
+    })
+    .collect();
+  let value = serde_json::json!({
+    "plan": result.plan,
+    "files": files,
+    "organized_duplicates": organized_duplicates,
+  });
+  serde_json::to_string_pretty(&value)
+    .context("Failed to encode plan")
 }
 
 fn print_organized_duplicates(result: &pipeline::PipelineResult) {

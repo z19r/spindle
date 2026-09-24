@@ -105,6 +105,18 @@ pub struct CliArgs {
   #[arg(long)]
   pub no_corrections: bool,
 
+  /// Skip the review screen and execute the proposed plan as-is:
+  /// every real group approved, Unsorted and Needs Review left alone,
+  /// byte-identical duplicates staged to trash (undoable). Combine with
+  /// --dry-run to only print what would happen.
+  #[arg(short = 'y', long)]
+  pub yes: bool,
+
+  /// Print the proposed plan as JSON and exit without reviewing or
+  /// executing. Works without a terminal.
+  #[arg(long)]
+  pub json: bool,
+
   /// Path to the organized ledger (defaults to the global data dir).
   #[arg(long)]
   pub ledger: Option<PathBuf>,
@@ -427,6 +439,8 @@ mod tests {
       file_types: vec![],
       no_ledger: false,
       no_corrections: false,
+      yes: false,
+      json: false,
       ledger: None,
       no_organized_context: false,
       no_introspect_archives: false,
@@ -834,5 +848,14 @@ max_archive_file_size_mb = 10
     ]);
     assert!(args.no_organized_context);
     assert!(args.no_introspect_archives);
+  }
+
+  #[test]
+  fn yes_and_json_flags_parse() {
+    let cli =
+      CliArgs::parse_from(["spindle", "--yes", "--json", "/tmp/x"]);
+    assert!(cli.yes && cli.json);
+    let cli = CliArgs::parse_from(["spindle", "-y", "/tmp/x"]);
+    assert!(cli.yes && !cli.json);
   }
 }
