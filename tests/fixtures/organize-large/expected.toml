@@ -1,0 +1,804 @@
+# Ground truth for the large fixture (see organize/expected.toml for the rules).
+
+[[file]]
+path = "Documents/acme_redesign_brief.md"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+
+[[file]]
+path = "Documents/acme_redesign_sitemap_v3.md"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+
+[[file]]
+path = "Documents/acme_redesign_meeting_2024-02-12.md"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+
+[[file]]
+path = "Documents/acme_redesign_meeting_2024-03-04.md"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+
+[[file]]
+path = "Desktop/acme_homepage_mockup_v3.png"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+
+[[file]]
+path = "Desktop/acme_catalog_mockup.png"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+
+[[file]]
+path = "Desktop/Screenshot 2024-03-02 at 10.12.44.png"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+
+[[file]]
+path = "Downloads/acme_redesign_budget.xlsx"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+alt_areas = ["Finance"]
+
+[[file]]
+path = "Documents/acme_q1_2024_report_draft.md"
+group = "Work/Acme Corp/Q1 2024 Report"
+area = "Work"
+
+[[file]]
+path = "Documents/acme_q1_2024_report_final.md"
+group = "Work/Acme Corp/Q1 2024 Report"
+area = "Work"
+
+[[file]]
+path = "Downloads/acme_q1_2024_review.pptx"
+group = "Work/Acme Corp/Q1 2024 Report"
+area = "Work"
+
+[[file]]
+path = "Documents/acme_q1_2024_hours.xlsx"
+group = "Work/Acme Corp/Q1 2024 Report"
+area = "Work"
+
+[[file]]
+path = "Documents/acme_q1_2024_invoice_summary.txt"
+group = "Work/Acme Corp/Q1 2024 Report"
+area = "Work"
+alt_areas = ["Finance"]
+
+[[file]]
+path = "Documents/globex_proposal_v1.md"
+group = "Work/Globex/Proposal"
+area = "Work"
+
+[[file]]
+path = "Documents/globex_proposal_v2.md"
+group = "Work/Globex/Proposal"
+area = "Work"
+
+[[file]]
+path = "Documents/globex_discovery_notes.md"
+group = "Work/Globex/Proposal"
+area = "Work"
+
+[[file]]
+path = "Downloads/globex_pitch_deck.pptx"
+group = "Work/Globex/Proposal"
+area = "Work"
+
+[[file]]
+path = "Desktop/globex_dashboard_sketch.png"
+group = "Work/Globex/Proposal"
+area = "Work"
+
+[[file]]
+path = "Downloads/globex_rfp_requirements.txt"
+group = "Work/Globex/Proposal"
+area = "Work"
+
+[[file]]
+path = "Documents/q4_launch_plan.md"
+group = "Work/Spindle 2.0/Q4 2024 Launch"
+area = "Work"
+
+[[file]]
+path = "Downloads/Q4_Launch_Plan_v2.md"
+group = "Work/Spindle 2.0/Q4 2024 Launch"
+area = "Work"
+
+[[file]]
+path = "Documents/q4_standup_2024-10-02.md"
+group = "Work/Spindle 2.0/Q4 2024 Launch"
+area = "Work"
+
+[[file]]
+path = "Documents/q4_standup_2024-10-09.md"
+group = "Work/Spindle 2.0/Q4 2024 Launch"
+area = "Work"
+
+[[file]]
+path = "Documents/q4_launch_budget.xlsx"
+group = "Work/Spindle 2.0/Q4 2024 Launch"
+area = "Work"
+
+[[file]]
+path = "Desktop/q4_launch_timeline.png"
+group = "Work/Spindle 2.0/Q4 2024 Launch"
+area = "Work"
+
+[[file]]
+path = "Downloads/spindle_2_release_notes_draft.md"
+group = "Work/Spindle 2.0/Q4 2024 Launch"
+area = "Work"
+
+[[file]]
+path = "Documents/offsite_2024_agenda.md"
+group = "Work/Team Offsite 2024"
+area = "Work"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Documents/offsite_2024_retro_notes.md"
+group = "Work/Team Offsite 2024"
+area = "Work"
+
+[[file]]
+path = "Desktop/offsite_2024_team_photo.jpg"
+group = "Work/Team Offsite 2024"
+area = "Work"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Desktop/offsite_2024_whiteboard.jpg"
+group = "Work/Team Offsite 2024"
+area = "Work"
+
+[[file]]
+path = "Downloads/offsite_2024_lodge_receipt.txt"
+group = "Work/Team Offsite 2024"
+area = "Work"
+alt_areas = ["Finance"]
+
+[[file]]
+path = "Downloads/resume_2024.txt"
+group = "Work/Job Search"
+area = "Work"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Downloads/cover_letter_globex.txt"
+group = "Work/Job Search"
+area = "Work"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Downloads/cover_letter_initech.txt"
+group = "Work/Job Search"
+area = "Work"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Documents/interview_prep_notes.md"
+group = "Work/Job Search"
+area = "Work"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Documents/2022_w2_acme.txt"
+group = "Finance/Taxes/2022"
+area = "Finance"
+
+[[file]]
+path = "Documents/1099-int-chase-2022.txt"
+group = "Finance/Taxes/2022"
+area = "Finance"
+
+[[file]]
+path = "Documents/turbotax_receipt_2022.txt"
+group = "Finance/Taxes/2022"
+area = "Finance"
+
+[[file]]
+path = "Documents/2022_tax_return_summary.txt"
+group = "Finance/Taxes/2022"
+area = "Finance"
+
+[[file]]
+path = "Documents/2023_w2_acme.txt"
+group = "Finance/Taxes/2023"
+area = "Finance"
+
+[[file]]
+path = "Documents/1099-int-chase-2023.txt"
+group = "Finance/Taxes/2023"
+area = "Finance"
+
+[[file]]
+path = "Documents/turbotax_receipt_2023.txt"
+group = "Finance/Taxes/2023"
+area = "Finance"
+
+[[file]]
+path = "Downloads/2023_charitable_donations.csv"
+group = "Finance/Taxes/2023"
+area = "Finance"
+
+[[file]]
+path = "Documents/globex_electric_2024-06.md"
+group = "Finance/Bills/Utilities"
+area = "Finance"
+alt_areas = ["Personal", "Home", "Housing"]
+
+[[file]]
+path = "Documents/comcast_bill_2024-06.txt"
+group = "Finance/Bills/Utilities"
+area = "Finance"
+alt_areas = ["Personal", "Home", "Housing"]
+
+[[file]]
+path = "Documents/globex_electric_2024-07.md"
+group = "Finance/Bills/Utilities"
+area = "Finance"
+alt_areas = ["Personal", "Home", "Housing"]
+
+[[file]]
+path = "Documents/comcast_bill_2024-07.txt"
+group = "Finance/Bills/Utilities"
+area = "Finance"
+alt_areas = ["Personal", "Home", "Housing"]
+
+[[file]]
+path = "Documents/globex_electric_2024-08.md"
+group = "Finance/Bills/Utilities"
+area = "Finance"
+alt_areas = ["Personal", "Home", "Housing"]
+
+[[file]]
+path = "Documents/comcast_bill_2024-08.txt"
+group = "Finance/Bills/Utilities"
+area = "Finance"
+alt_areas = ["Personal", "Home", "Housing"]
+
+[[file]]
+path = "Downloads/chase_checking_statement_2024-05.txt"
+group = "Finance/Bank Statements"
+area = "Finance"
+
+[[file]]
+path = "Downloads/chase_checking_statement_2024-06.txt"
+group = "Finance/Bank Statements"
+area = "Finance"
+
+[[file]]
+path = "Downloads/chase_checking_statement_2024-07.txt"
+group = "Finance/Bank Statements"
+area = "Finance"
+
+[[file]]
+path = "Downloads/chase_checking_statement_2024-08.txt"
+group = "Finance/Bank Statements"
+area = "Finance"
+
+[[file]]
+path = "Documents/monthly_budget_2024.xlsx"
+group = "Finance/Bank Statements"
+area = "Finance"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Documents/car_loan_agreement_2023.txt"
+group = "Finance/Car Loan"
+area = "Finance"
+alt_areas = ["Legal"]
+
+[[file]]
+path = "Documents/car_loan_statement_2024-08.txt"
+group = "Finance/Car Loan"
+area = "Finance"
+
+[[file]]
+path = "Downloads/car_loan_payoff_quote.txt"
+group = "Finance/Car Loan"
+area = "Finance"
+
+[[file]]
+path = "Documents/renters_insurance_policy_2024.txt"
+group = "Finance/Insurance"
+area = "Finance"
+alt_areas = ["Legal", "Personal"]
+
+[[file]]
+path = "Documents/auto_insurance_policy_2024.txt"
+group = "Finance/Insurance"
+area = "Finance"
+alt_areas = ["Legal"]
+
+[[file]]
+path = "Downloads/auto_insurance_id_card.txt"
+group = "Finance/Insurance"
+area = "Finance"
+alt_areas = ["Legal"]
+
+[[file]]
+path = "Documents/insurance_claim_2024-03.txt"
+group = "Finance/Insurance"
+area = "Finance"
+alt_areas = ["Legal"]
+
+[[file]]
+path = "Documents/lease_agreement_2024.txt"
+group = "Legal/Apartment Lease"
+area = "Legal"
+alt_areas = ["Personal", "Housing", "Home"]
+
+[[file]]
+path = "Downloads/lease_agreement_2024 (1).txt"
+group = "Legal/Apartment Lease"
+area = "Legal"
+alt_areas = ["Personal", "Housing", "Home"]
+
+[[file]]
+path = "Documents/lease_renewal_notice_2025.txt"
+group = "Legal/Apartment Lease"
+area = "Legal"
+alt_areas = ["Personal", "Housing", "Home"]
+
+[[file]]
+path = "Documents/move_in_inspection.csv"
+group = "Legal/Apartment Lease"
+area = "Legal"
+alt_areas = ["Personal", "Housing", "Home"]
+
+[[file]]
+path = "Documents/landlord_repair_request_2024-07.txt"
+group = "Legal/Apartment Lease"
+area = "Legal"
+alt_areas = ["Personal", "Housing", "Home"]
+
+[[file]]
+path = "Documents/smith_v_jones_complaint.txt"
+group = "Legal/Smith v Jones"
+area = "Legal"
+
+[[file]]
+path = "Documents/smith_v_jones_discovery_request.txt"
+group = "Legal/Smith v Jones"
+area = "Legal"
+
+[[file]]
+path = "Documents/smith_v_jones_answer.txt"
+group = "Legal/Smith v Jones"
+area = "Legal"
+
+[[file]]
+path = "Downloads/smith_v_jones_exhibit_list.csv"
+group = "Legal/Smith v Jones"
+area = "Legal"
+
+[[file]]
+path = "Documents/will_draft_2024.txt"
+group = "Legal/Estate Planning"
+area = "Legal"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Documents/power_of_attorney_2024.txt"
+group = "Legal/Estate Planning"
+area = "Legal"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Documents/estate_attorney_notes.md"
+group = "Legal/Estate Planning"
+area = "Legal"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Documents/bloodwork_results_2024.txt"
+group = "Health/Medical Records"
+area = "Health"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Documents/dentist_invoice_2024.txt"
+group = "Health/Medical Records"
+area = "Health"
+alt_areas = ["Personal", "Finance"]
+
+[[file]]
+path = "Documents/annual_physical_2024_summary.txt"
+group = "Health/Medical Records"
+area = "Health"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Downloads/vaccination_record.txt"
+group = "Health/Medical Records"
+area = "Health"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Documents/marathon_training_plan.md"
+group = "Health/Fitness"
+area = "Health"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Downloads/running_log_2024.csv"
+group = "Health/Fitness"
+area = "Health"
+alt_areas = ["Personal"]
+
+[[file]]
+path = "Documents/gym_membership_2024.txt"
+group = "Health/Fitness"
+area = "Health"
+alt_areas = ["Personal", "Finance"]
+
+[[file]]
+path = "Desktop/IMG_4021.jpg"
+group = "Personal/Travel/Hawaii 2023"
+area = "Personal"
+alt_areas = ["Photos", "Travel"]
+
+[[file]]
+path = "Desktop/IMG_4022.jpg"
+group = "Personal/Travel/Hawaii 2023"
+area = "Personal"
+alt_areas = ["Photos", "Travel"]
+
+[[file]]
+path = "Desktop/IMG_4030.jpg"
+group = "Personal/Travel/Hawaii 2023"
+area = "Personal"
+alt_areas = ["Photos", "Travel"]
+
+[[file]]
+path = "Desktop/IMG_4035.jpg"
+group = "Personal/Travel/Hawaii 2023"
+area = "Personal"
+alt_areas = ["Photos", "Travel"]
+
+[[file]]
+path = "Documents/hawaii_itinerary.md"
+group = "Personal/Travel/Hawaii 2023"
+area = "Personal"
+alt_areas = ["Travel"]
+
+[[file]]
+path = "Documents/hawaii_hotel_receipt.txt"
+group = "Personal/Travel/Hawaii 2023"
+area = "Personal"
+alt_areas = ["Travel", "Finance"]
+
+[[file]]
+path = "Downloads/hawaii_flights_confirmation.txt"
+group = "Personal/Travel/Hawaii 2023"
+area = "Personal"
+alt_areas = ["Travel", "Finance"]
+
+[[file]]
+path = "Downloads/hawaii_snorkel_molokini_2023.mp4"
+group = "Personal/Travel/Hawaii 2023"
+area = "Personal"
+alt_areas = ["Travel", "Photos", "Media"]
+
+[[file]]
+path = "Desktop/IMG_2201.jpg"
+group = "Personal/Travel/Japan 2022"
+area = "Personal"
+alt_areas = ["Photos", "Travel"]
+
+[[file]]
+path = "Desktop/IMG_2210.jpg"
+group = "Personal/Travel/Japan 2022"
+area = "Personal"
+alt_areas = ["Photos", "Travel"]
+
+[[file]]
+path = "Desktop/IMG_2215.jpg"
+group = "Personal/Travel/Japan 2022"
+area = "Personal"
+alt_areas = ["Photos", "Travel"]
+
+[[file]]
+path = "Documents/japan_itinerary_2022.md"
+group = "Personal/Travel/Japan 2022"
+area = "Personal"
+alt_areas = ["Travel"]
+
+[[file]]
+path = "Downloads/japan_jr_pass_receipt.txt"
+group = "Personal/Travel/Japan 2022"
+area = "Personal"
+alt_areas = ["Travel", "Finance"]
+
+[[file]]
+path = "Downloads/japan_ryokan_booking.txt"
+group = "Personal/Travel/Japan 2022"
+area = "Personal"
+alt_areas = ["Travel"]
+
+[[file]]
+path = "Downloads/kyoto_bamboo_walk_2022.mp4"
+group = "Personal/Travel/Japan 2022"
+area = "Personal"
+alt_areas = ["Travel", "Photos", "Media"]
+
+[[file]]
+path = "Desktop/biscuit_park.jpg"
+group = "Personal/Pets/Biscuit"
+area = "Personal"
+alt_areas = ["Photos", "Pets"]
+
+[[file]]
+path = "Desktop/biscuit_beach.jpg"
+group = "Personal/Pets/Biscuit"
+area = "Personal"
+alt_areas = ["Photos", "Pets"]
+
+[[file]]
+path = "Desktop/biscuit_puppy.jpg"
+group = "Personal/Pets/Biscuit"
+area = "Personal"
+alt_areas = ["Photos", "Pets"]
+
+[[file]]
+path = "Documents/biscuit_vet_records.txt"
+group = "Personal/Pets/Biscuit"
+area = "Personal"
+alt_areas = ["Pets", "Health"]
+
+[[file]]
+path = "Downloads/biscuit_fetch.mp4"
+group = "Personal/Pets/Biscuit"
+area = "Personal"
+alt_areas = ["Photos", "Pets", "Media"]
+
+[[file]]
+path = "Desktop/grandma_lasagna.md"
+group = "Personal/Recipes"
+area = "Personal"
+alt_areas = ["Recipes", "Food"]
+
+[[file]]
+path = "Desktop/sourdough_notes.md"
+group = "Personal/Recipes"
+area = "Personal"
+alt_areas = ["Recipes", "Food"]
+
+[[file]]
+path = "Desktop/thai_green_curry.md"
+group = "Personal/Recipes"
+area = "Personal"
+alt_areas = ["Recipes", "Food"]
+
+[[file]]
+path = "Desktop/banana_bread.md"
+group = "Personal/Recipes"
+area = "Personal"
+alt_areas = ["Recipes", "Food"]
+
+[[file]]
+path = "Desktop/weeknight_chili.md"
+group = "Personal/Recipes"
+area = "Personal"
+alt_areas = ["Recipes", "Food"]
+
+[[file]]
+path = "Desktop/pizza_dough.md"
+group = "Personal/Recipes"
+area = "Personal"
+alt_areas = ["Recipes", "Food"]
+
+[[file]]
+path = "Desktop/wedding_ceremony.jpg"
+group = "Personal/Wedding 2021"
+area = "Personal"
+alt_areas = ["Photos", "Family"]
+
+[[file]]
+path = "Desktop/wedding_first_dance.jpg"
+group = "Personal/Wedding 2021"
+area = "Personal"
+alt_areas = ["Photos", "Family"]
+
+[[file]]
+path = "Desktop/wedding_family_portrait.jpg"
+group = "Personal/Wedding 2021"
+area = "Personal"
+alt_areas = ["Photos", "Family"]
+
+[[file]]
+path = "Documents/wedding_vendor_contracts.txt"
+group = "Personal/Wedding 2021"
+area = "Personal"
+alt_areas = ["Legal", "Finance", "Family"]
+
+[[file]]
+path = "Documents/wedding_guest_list.csv"
+group = "Personal/Wedding 2021"
+area = "Personal"
+alt_areas = ["Family"]
+
+[[file]]
+path = "Downloads/marriage_certificate_copy.txt"
+group = "Personal/Wedding 2021"
+area = "Personal"
+alt_areas = ["Legal", "Family"]
+
+[[file]]
+path = "Documents/kitchen_reno_quote_northwest.txt"
+group = "Personal/Home Renovation"
+area = "Personal"
+alt_areas = ["Home", "Housing", "Finance"]
+
+[[file]]
+path = "Documents/kitchen_reno_quote_portland_builders.txt"
+group = "Personal/Home Renovation"
+area = "Personal"
+alt_areas = ["Home", "Housing", "Finance"]
+
+[[file]]
+path = "Documents/kitchen_reno_plan.md"
+group = "Personal/Home Renovation"
+area = "Personal"
+alt_areas = ["Home", "Housing"]
+
+[[file]]
+path = "Desktop/kitchen_before.jpg"
+group = "Personal/Home Renovation"
+area = "Personal"
+alt_areas = ["Home", "Housing", "Photos"]
+
+[[file]]
+path = "Desktop/kitchen_inspiration.png"
+group = "Personal/Home Renovation"
+area = "Personal"
+alt_areas = ["Home", "Housing", "Photos"]
+
+[[file]]
+path = "Downloads/podcast_ep12_rust_async.mp3"
+group = "Media/Podcasts"
+area = "Media"
+alt_areas = ["Audio", "Podcasts", "Reference"]
+
+[[file]]
+path = "Downloads/podcast_ep13_tokio_internals.mp3"
+group = "Media/Podcasts"
+area = "Media"
+alt_areas = ["Audio", "Podcasts", "Reference"]
+
+[[file]]
+path = "Downloads/podcast_ep14_error_handling.mp3"
+group = "Media/Podcasts"
+area = "Media"
+alt_areas = ["Audio", "Podcasts", "Reference"]
+
+[[file]]
+path = "Downloads/history_hour_ep201_rome.mp3"
+group = "Media/Podcasts"
+area = "Media"
+alt_areas = ["Audio", "Podcasts", "Reference"]
+
+[[file]]
+path = "Downloads/pride_and_prejudice.epub"
+group = "Media/Ebooks"
+area = "Media"
+alt_areas = ["Books", "Reading"]
+
+[[file]]
+path = "Downloads/dune.epub"
+group = "Media/Ebooks"
+area = "Media"
+alt_areas = ["Books", "Reading"]
+
+[[file]]
+path = "Downloads/rust_programming_book.epub"
+group = "Media/Ebooks"
+area = "Media"
+alt_areas = ["Books", "Reference", "Software"]
+
+[[file]]
+path = "Downloads/Spindle-1.2.dmg"
+group = "Software/Installers"
+area = "Software"
+alt_areas = ["Downloads", "Apps", "Applications"]
+
+[[file]]
+path = "Downloads/node-v20.10.0.pkg"
+group = "Software/Installers"
+area = "Software"
+alt_areas = ["Downloads", "Apps", "Applications"]
+
+[[file]]
+path = "Downloads/setup_vlc.exe"
+group = "Software/Installers"
+area = "Software"
+alt_areas = ["Downloads", "Apps", "Applications"]
+
+[[file]]
+path = "Downloads/docker-desktop.dmg"
+group = "Software/Installers"
+area = "Software"
+alt_areas = ["Downloads", "Apps", "Applications"]
+
+[[file]]
+path = "Downloads/Slack-4.36.deb"
+group = "Software/Installers"
+area = "Software"
+alt_areas = ["Downloads", "Apps", "Applications"]
+
+[[file]]
+path = "Downloads/VSCodeSetup.exe"
+group = "Software/Installers"
+area = "Software"
+alt_areas = ["Downloads", "Apps", "Applications"]
+
+[[file]]
+path = "Downloads/rust_async_cheatsheet.md"
+group = "Software/Rust Notes"
+area = "Software"
+alt_areas = ["Reference", "Work", "Tech", "Programming"]
+
+[[file]]
+path = "Downloads/tokio_notes.md"
+group = "Software/Rust Notes"
+area = "Software"
+alt_areas = ["Reference", "Work", "Tech", "Programming"]
+
+[[file]]
+path = "Documents/rust_error_handling_notes.md"
+group = "Software/Rust Notes"
+area = "Software"
+alt_areas = ["Reference", "Work", "Tech", "Programming"]
+
+[[file]]
+path = "Downloads/rust_ownership_examples.rs"
+group = "Software/Rust Notes"
+area = "Software"
+alt_areas = ["Reference", "Work", "Tech", "Programming"]
+
+[[file]]
+path = "Downloads/python_asyncio_notes.md"
+group = "Software/Python Notes"
+area = "Software"
+alt_areas = ["Reference", "Work", "Tech", "Programming"]
+
+[[file]]
+path = "Downloads/pandas_cheatsheet.md"
+group = "Software/Python Notes"
+area = "Software"
+alt_areas = ["Reference", "Work", "Tech", "Programming"]
+
+[[file]]
+path = "Downloads/data_cleaning.py"
+group = "Software/Python Notes"
+area = "Software"
+alt_areas = ["Reference", "Work", "Tech", "Programming"]
+
+[[file]]
+path = "Downloads/honda_civic_owners_manual_excerpt.txt"
+group = "Reference/Manuals"
+area = "Reference"
+alt_areas = ["Personal", "Finance"]
+
+[[file]]
+path = "Downloads/dishwasher_manual_bosch.txt"
+group = "Reference/Manuals"
+area = "Reference"
+alt_areas = ["Personal", "Home"]
+
+[[file]]
+path = "Downloads/router_setup_guide.txt"
+group = "Reference/Manuals"
+area = "Reference"
+alt_areas = ["Personal", "Home", "Software"]
+
+[[file]]
+path = "Downloads/espresso_machine_manual.txt"
+group = "Reference/Manuals"
+area = "Reference"
+alt_areas = ["Personal", "Home"]
+
