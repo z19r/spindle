@@ -38,11 +38,31 @@ async fn main() -> Result<()> {
     1 => "spindle=debug",
     _ => "spindle=trace",
   };
-  // Logs go to stderr so stdout stays clean for --json and pipes.
-  tracing_subscriber::fmt()
-    .with_env_filter(EnvFilter::new(filter))
-    .with_writer(std::io::stderr)
-    .init();
+  // While the review screens own the terminal, anything written to
+  // stderr lands on top of the UI, so interactive runs log to a file.
+  // Piped runs and --json/--yes keep stderr, which stays off stdout.
+  let interactive =
+    std::io::stdout().is_terminal() && !cli.yes && !cli.json;
+  let log_path = interactive.then(default_log_path);
+  let log_file = log_path.as_ref().and_then(|p| {
+    std::fs::create_dir_all(p.parent()?).ok()?;
+    std::fs::OpenOptions::new()
+      .create(true)
+      .append(true)
+      .open(p)
+      .ok()
+  });
+  match log_file {
+    Some(file) => tracing_subscriber::fmt()
+      .with_env_filter(EnvFilter::new(filter))
+      .with_ansi(false)
+      .with_writer(std::sync::Mutex::new(file))
+      .init(),
+    None => tracing_subscriber::fmt()
+      .with_env_filter(EnvFilter::new(filter))
+      .with_writer(std::io::stderr)
+      .init(),
+  }
 
   let config = Config::load(&cli)?;
   tracing::debug!(?config, "Loaded configuration");
@@ -232,6 +252,9 @@ async fn main() -> Result<()> {
 
     println!("\nPlan: {summary}.");
     print_organized_duplicates(&result);
+    if let Some(path) = &log_path {
+      println!("Log: {}", path.display());
+    }
 
     match action {
       ReviewAction::Quit => {
@@ -851,6 +874,15 @@ fn print_undo_info(report: &ExecutionReport) {
       report.run_id
     );
   }
+}
+
+fn default_log_path() -> std::path::PathBuf {
+  directories::BaseDirs::new()
+    .map(|d| d.data_dir().join("spindle"))
+    .unwrap_or_else(|| {
+      std::path::PathBuf::from(".local/share/spindle")
+    })
+    .join("spindle.log")
 }
 
 fn default_cache_dir() -> std::path::PathBuf {

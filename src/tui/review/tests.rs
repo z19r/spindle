@@ -1313,3 +1313,24 @@ fn filename_only_descriptions_say_so() {
     .collect();
   assert!(text.contains("filename only"), "{text}");
 }
+
+#[test]
+fn compact_label_keeps_the_tail_of_long_labels() {
+  assert_eq!(compact_label("Work", 20), "Work");
+  assert_eq!(
+    compact_label("Work/Acme Corp/Website Redesign", 40),
+    "Work/Acme Corp/Website Redesign"
+  );
+  assert_eq!(
+    compact_label("Work/Acme Corp/Website Redesign", 28),
+    "\u{2026}/Acme Corp/Website Redesign"
+  );
+  assert_eq!(
+    compact_label("Work/Acme Corp/Website Redesign", 18),
+    "\u{2026}/Website Redesign"
+  );
+  assert_eq!(
+    compact_label("Work/Acme Corp/Website Redesign", 10),
+    "\u{2026} Redesign"
+  );
+}

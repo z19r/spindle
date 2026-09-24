@@ -33,15 +33,39 @@ pub(crate) fn render_header(
       .alignment(Alignment::Right),
     )
     .border_style(Style::default().fg(theme::BORDER_PURPLE));
-  let block = match state.banner() {
-    Some(text) => block.title_bottom(
-      Line::from(Span::styled(format!(" {text} "), theme::dim()))
-        .alignment(Alignment::Center),
-    ),
-    None => block,
-  };
+  let banner = Paragraph::new(Line::from(Span::styled(
+    format!(" {}", state.banner().unwrap_or("")),
+    theme::normal(),
+  )))
+  .block(block);
+  frame.render_widget(banner, area);
+}
 
-  frame.render_widget(block, area);
+/// Fit a nested label into `width` cells by keeping its tail: the
+/// deepest segments are the ones that distinguish sibling groups.
+pub(crate) fn compact_label(label: &str, width: usize) -> String {
+  if label.chars().count() <= width || width < 4 {
+    return label.to_string();
+  }
+  let segments: Vec<&str> = label.split('/').collect();
+  for start in 1..segments.len() {
+    let tail = segments[start..].join("/");
+    let candidate = format!("\u{2026}/{tail}");
+    if candidate.chars().count() <= width {
+      return candidate;
+    }
+  }
+  let last = segments.last().copied().unwrap_or(label);
+  let keep = width.saturating_sub(1);
+  let tail: String = last
+    .chars()
+    .rev()
+    .take(keep)
+    .collect::<Vec<_>>()
+    .into_iter()
+    .rev()
+    .collect();
+  format!("\u{2026}{tail}")
 }
 
 pub(crate) fn render_group_list(
@@ -96,7 +120,13 @@ pub(crate) fn render_group_list(
 
       ListItem::new(Line::from(vec![
         checkbox,
-        Span::styled(&group.label, label_style),
+        Span::styled(
+          compact_label(
+            &group.label,
+            area.width.saturating_sub(10) as usize,
+          ),
+          label_style,
+        ),
         count_span,
       ]))
       .style(line_style)
