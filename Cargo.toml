@@ -82,6 +82,8 @@ hex = "0.4"
 dotenvy = "0.15"
 pdf-extract = "0.12.0"
 zip = "8"
+tar = "0.4"
+flate2 = "1"
 tempfile = "3"
 
 [dev-dependencies]

@@ -499,6 +499,7 @@ impl ClaudeProvider {
             output_tokens: reply.output_tokens.unwrap_or(0),
           },
         );
+
         return finish_text(reply.text, reply.stop_reason.as_deref());
       }
 

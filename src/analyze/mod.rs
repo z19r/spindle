@@ -499,6 +499,16 @@ async fn extract_and_analyze_archive(
     ArchiveFormat::Zip => {
       extract_zip(&file.scanned.path, tmp.path(), options)
     }
+    ArchiveFormat::Tar => {
+      extract_tar(&file.scanned.path, tmp.path(), options, false)
+    }
+    ArchiveFormat::Gz => {
+      if is_tarball_name(&file.scanned.path) {
+        extract_tar(&file.scanned.path, tmp.path(), options, true)
+      } else {
+        extract_gz_single(&file.scanned.path, tmp.path(), options)
+      }
+    }
     _ => {
       tracing::debug!(
         format = ?format,
@@ -633,6 +643,160 @@ fn extract_zip(
 
     extracted_count += 1;
   }
+
+  let scanned = scan_directory(dest).unwrap_or_default();
+  Ok(
+    crate::fingerprint::fingerprint_files(scanned)
+      .unwrap_or_default(),
+  )
+}
+
+/// `.tar.gz` and `.tgz` hold a tarball; any other `.gz` is one file.
+fn is_tarball_name(path: &std::path::Path) -> bool {
+  let name = path
+    .file_name()
+    .map(|n| n.to_string_lossy().to_lowercase())
+    .unwrap_or_default();
+  name.ends_with(".tar.gz") || name.ends_with(".tgz")
+}
+
+/// Whether an archive entry is worth extracting: a regular file under
+/// the size cap, not hidden, not itself an archive, and of a type we
+/// can describe. Same rules as the zip path.
+fn wanted_entry(
+  entry_name: &std::path::Path,
+  size: u64,
+  options: &AnalyzeOptions,
+) -> bool {
+  if size > options.max_archive_file_size_mb * BYTES_PER_MB {
+    return false;
+  }
+  if entry_name
+    .components()
+    .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+  {
+    return false;
+  }
+  let inner_ext = entry_name
+    .extension()
+    .and_then(|e| e.to_str())
+    .unwrap_or("");
+  !matches!(
+    crate::model::FileType::from_extension(inner_ext),
+    crate::model::FileType::Archive(_)
+      | crate::model::FileType::Other
+  )
+}
+
+/// Extract a tar (optionally gzip-compressed) the way `extract_zip`
+/// does: regular files only, hidden and nested archives skipped, the
+/// entry's relative path preserved, never outside `dest`.
+fn extract_tar(
+  archive_path: &std::path::Path,
+  dest: &std::path::Path,
+  options: &AnalyzeOptions,
+  gzipped: bool,
+) -> Result<Vec<FingerprintedFile>> {
+  use crate::scanner::scan_directory;
+
+  let file = std::fs::File::open(archive_path)
+    .with_context(|| format!("Opening {}", archive_path.display()))?;
+  let reader: Box<dyn std::io::Read> = if gzipped {
+    Box::new(flate2::read::GzDecoder::new(file))
+  } else {
+    Box::new(file)
+  };
+  let mut archive = tar::Archive::new(reader);
+  let mut extracted_count = 0;
+
+  for entry in archive.entries().with_context(|| {
+    format!("Reading tar {}", archive_path.display())
+  })? {
+    if extracted_count >= options.max_archive_files {
+      break;
+    }
+    let mut entry = match entry {
+      Ok(e) => e,
+      Err(_) => continue,
+    };
+    if !entry.header().entry_type().is_file() {
+      continue;
+    }
+    let entry_name = match entry.path() {
+      Ok(p) => p.into_owned(),
+      Err(_) => continue,
+    };
+    // Reject traversal outright; the tar crate strips leading `/`
+    // but a `..` component could still escape.
+    if entry_name
+      .components()
+      .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+      continue;
+    }
+    let size = entry.header().size().unwrap_or(u64::MAX);
+    if !wanted_entry(&entry_name, size, options) {
+      continue;
+    }
+    let dest_path = dest.join(&entry_name);
+    if let Some(parent) = dest_path.parent() {
+      if std::fs::create_dir_all(parent).is_err() {
+        continue;
+      }
+    }
+    let mut out = match std::fs::File::create(&dest_path) {
+      Ok(f) => f,
+      Err(_) => continue,
+    };
+    if std::io::copy(&mut entry, &mut out).is_err() {
+      continue;
+    }
+    extracted_count += 1;
+  }
+
+  let scanned = scan_directory(dest).unwrap_or_default();
+  Ok(
+    crate::fingerprint::fingerprint_files(scanned)
+      .unwrap_or_default(),
+  )
+}
+
+/// A lone `.gz` file: decompress to the name without the suffix so the
+/// inner file can be described like any other.
+fn extract_gz_single(
+  archive_path: &std::path::Path,
+  dest: &std::path::Path,
+  options: &AnalyzeOptions,
+) -> Result<Vec<FingerprintedFile>> {
+  use crate::scanner::scan_directory;
+
+  let inner_name = archive_path
+    .file_name()
+    .map(|n| n.to_string_lossy().to_string())
+    .unwrap_or_default();
+  let inner_name = inner_name
+    .strip_suffix(".gz")
+    .or_else(|| inner_name.strip_suffix(".GZ"))
+    .unwrap_or(&inner_name)
+    .to_string();
+  let inner_path = std::path::PathBuf::from(&inner_name);
+  if !wanted_entry(&inner_path, 0, options) {
+    return Ok(Vec::new());
+  }
+
+  let file = std::fs::File::open(archive_path)
+    .with_context(|| format!("Opening {}", archive_path.display()))?;
+  let mut decoder = flate2::read::GzDecoder::new(file);
+  let cap = options.max_archive_file_size_mb * BYTES_PER_MB;
+  let mut out = std::fs::File::create(dest.join(&inner_name))
+    .with_context(|| format!("Creating {inner_name}"))?;
+  std::io::copy(
+    &mut std::io::Read::take(&mut decoder, cap),
+    &mut out,
+  )
+  .with_context(|| {
+    format!("Decompressing {}", archive_path.display())
+  })?;
 
   let scanned = scan_directory(dest).unwrap_or_default();
   Ok(
@@ -2628,6 +2792,110 @@ mod tests {
     let name =
       files[0].scanned.path.file_name().unwrap().to_string_lossy();
     assert_eq!(name, "visible.txt");
+  }
+
+  fn build_tar(
+    path: &std::path::Path,
+    gz: bool,
+    entries: &[(&str, &[u8])],
+  ) {
+    let file = std::fs::File::create(path).unwrap();
+    let writer: Box<dyn std::io::Write> = if gz {
+      Box::new(flate2::write::GzEncoder::new(
+        file,
+        flate2::Compression::default(),
+      ))
+    } else {
+      Box::new(file)
+    };
+    let mut builder = tar::Builder::new(writer);
+    for (name, body) in entries {
+      let mut header = tar::Header::new_gnu();
+      header.set_size(body.len() as u64);
+      header.set_mode(0o644);
+      header.set_cksum();
+      builder.append_data(&mut header, name, *body).unwrap();
+    }
+    builder.into_inner().unwrap().flush().unwrap();
+  }
+
+  #[test]
+  fn extract_tar_and_tgz_keep_wanted_entries_only() {
+    for gz in [false, true] {
+      let dir = TempDir::new().unwrap();
+      let archive =
+        dir.path().join(if gz { "a.tar.gz" } else { "a.tar" });
+      build_tar(
+        &archive,
+        gz,
+        &[
+          ("notes/hello.txt", b"Hello tar"),
+          ("photo.jpg", b"\xFF\xD8\xFF\xE0fake"),
+          (".hidden/secret.txt", b"nope"),
+          ("inner.zip", b"nested"),
+        ],
+      );
+      let dest = dir.path().join("out");
+      std::fs::create_dir(&dest).unwrap();
+
+      let files =
+        extract_tar(&archive, &dest, &AnalyzeOptions::default(), gz)
+          .unwrap();
+
+      let mut names: Vec<String> = files
+        .iter()
+        .map(|f| {
+          f.scanned
+            .path
+            .strip_prefix(&dest)
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+        })
+        .collect();
+      names.sort();
+      assert_eq!(
+        names,
+        vec!["notes/hello.txt", "photo.jpg"],
+        "gz={gz}"
+      );
+      assert!(!dir.path().join("escape.txt").exists());
+    }
+  }
+
+  #[test]
+  fn extract_gz_single_decompresses_to_the_inner_name() {
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("report.txt.gz");
+    let mut enc = flate2::write::GzEncoder::new(
+      std::fs::File::create(&archive).unwrap(),
+      flate2::Compression::default(),
+    );
+    std::io::Write::write_all(&mut enc, b"QUARTERLY REPORT").unwrap();
+    enc.finish().unwrap();
+    let dest = dir.path().join("out");
+    std::fs::create_dir(&dest).unwrap();
+
+    let files =
+      extract_gz_single(&archive, &dest, &AnalyzeOptions::default())
+        .unwrap();
+
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+      files[0].scanned.path.file_name().unwrap().to_string_lossy(),
+      "report.txt"
+    );
+    assert_eq!(
+      std::fs::read_to_string(&files[0].scanned.path).unwrap(),
+      "QUARTERLY REPORT"
+    );
+  }
+
+  #[test]
+  fn tarball_names_are_recognised() {
+    assert!(is_tarball_name(std::path::Path::new("x/site.tar.gz")));
+    assert!(is_tarball_name(std::path::Path::new("Backup.TGZ")));
+    assert!(!is_tarball_name(std::path::Path::new("log.gz")));
   }
 
   #[test]
