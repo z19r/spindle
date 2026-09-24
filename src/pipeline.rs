@@ -480,14 +480,17 @@ async fn run_ai_pipeline<P: AiProvider>(
   let by_index: HashMap<usize, &FingerprintedFile> =
     files_to_analyze.iter().map(|(idx, f)| (*idx, *f)).collect();
   let mut index_to_hash = HashMap::new();
-  let mut hash_to_index = HashMap::new();
+  // Exact duplicates share a hash; keep every index so a cached
+  // grouping can restore each copy separately.
+  let mut hash_to_indices: HashMap<String, Vec<usize>> =
+    HashMap::new();
   let mut summary_hashes = Vec::with_capacity(summaries.len());
   for summary in &summaries {
     if let Some(f) = by_index.get(&summary.index) {
       let hex = crate::ledger::hash_hex(&f.blake3_hash);
       summary_hashes.push(f.blake3_hash);
       index_to_hash.insert(summary.index, hex.clone());
-      hash_to_index.insert(hex, summary.index);
+      hash_to_indices.entry(hex).or_default().push(summary.index);
     }
   }
 
@@ -495,7 +498,7 @@ async fn run_ai_pipeline<P: AiProvider>(
   if let Some(groups) = read_cached_grouping(
     &config.cache_dir,
     &cache_key,
-    &hash_to_index,
+    &hash_to_indices,
   )
   .await
   {
@@ -1071,6 +1074,50 @@ mod tests {
     assert!(second.organized_duplicates[0]
       .organized_at
       .ends_with("old/original.png"));
+  }
+
+  #[tokio::test]
+  async fn cached_grouping_keeps_both_copies_of_an_exact_duplicate() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    let png = create_test_png(10, 20, 30);
+    fs::write(source.path().join("a.png"), &png).unwrap();
+    fs::write(source.path().join("a (1).png"), &png).unwrap();
+    fs::write(
+      source.path().join("b.png"),
+      create_test_png(200, 0, 0),
+    )
+    .unwrap();
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    // First run populates the description and grouping caches.
+    let (tx, _rx) = mpsc::channel(64);
+    let first = run(&FakeProvider, &config, tx).await.unwrap();
+    // Second run replays the cached grouping.
+    let (tx, _rx) = mpsc::channel(64);
+    let second = run(&PanicProvider, &config, tx).await.unwrap();
+
+    for result in [&first, &second] {
+      let mut placed: Vec<usize> = result
+        .plan
+        .groups
+        .iter()
+        .flat_map(|g| g.members.iter().copied())
+        .collect();
+      placed.sort_unstable();
+      assert_eq!(
+        placed,
+        vec![0, 1, 2],
+        "every file placed exactly once"
+      );
+    }
   }
 
   #[tokio::test]

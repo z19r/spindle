@@ -135,12 +135,14 @@ fn group_cache_path(cache_dir: &Path, key: &str) -> PathBuf {
 }
 
 /// Read a cached grouping and remap it onto the current run's indices via
-/// `hash_to_index`. Returns `None` on miss, version mismatch, corruption,
-/// or if any cached member is absent from the current file set.
+/// `hash_to_indices`. Byte-identical files share a hash, so each hash
+/// maps to every index carrying it and each cached member consumes one.
+/// Returns `None` on miss, version mismatch, corruption, or if any
+/// cached member has no unconsumed index in the current file set.
 pub async fn read_cached_grouping(
   cache_dir: &Path,
   key: &str,
-  hash_to_index: &HashMap<String, usize>,
+  hash_to_indices: &HashMap<String, Vec<usize>>,
 ) -> Option<Vec<ProposedGroup>> {
   let path = group_cache_path(cache_dir, key);
   let content = tokio::fs::read_to_string(&path).await.ok()?;
@@ -149,12 +151,21 @@ pub async fn read_cached_grouping(
     return None;
   }
 
+  let mut remaining: HashMap<
+    &str,
+    std::collections::VecDeque<usize>,
+  > = hash_to_indices
+    .iter()
+    .map(|(hex, idxs)| (hex.as_str(), idxs.iter().copied().collect()))
+    .collect();
+
   let mut groups = Vec::with_capacity(cached.groups.len());
   for group in cached.groups {
     let mut member_indices = Vec::new();
     let mut member_destinations = Vec::new();
     for member in group.members {
-      let index = *hash_to_index.get(&member.blake3_hex)?;
+      let index =
+        remaining.get_mut(member.blake3_hex.as_str())?.pop_front()?;
       member_indices.push(index);
       if let Some(dest_name) = member.dest_name {
         member_destinations
@@ -1236,10 +1247,10 @@ mod tests {
       .unwrap();
 
     // Replay with DIFFERENT indices (e.g. a different scan order).
-    let hash_to_index =
-      HashMap::from([(hex0, 7usize), (hex1, 3usize)]);
+    let hash_to_indices =
+      HashMap::from([(hex0, vec![7usize]), (hex1, vec![3usize])]);
     let loaded =
-      read_cached_grouping(dir.path(), &key, &hash_to_index)
+      read_cached_grouping(dir.path(), &key, &hash_to_indices)
         .await
         .unwrap();
 
@@ -1271,10 +1282,74 @@ mod tests {
       .unwrap();
 
     // Current set is missing h1 — the cached grouping can't be remapped.
-    let hash_to_index = HashMap::from([(hex0, 0usize)]);
+    let hash_to_indices = HashMap::from([(hex0, vec![0usize])]);
     let loaded =
-      read_cached_grouping(dir.path(), &key, &hash_to_index).await;
+      read_cached_grouping(dir.path(), &key, &hash_to_indices).await;
 
+    assert!(loaded.is_none());
+  }
+
+  #[tokio::test]
+  async fn group_cache_keeps_exact_duplicates_as_separate_members() {
+    let dir = TempDir::new().unwrap();
+    let same = [9u8; 32];
+    let other = [2u8; 32];
+    let hex_same = hex::encode(same);
+    let hex_other = hex::encode(other);
+
+    // Indices 0 and 2 are byte-identical files; 1 is different.
+    let groups = vec![ProposedGroup {
+      label: "Lease".to_string(),
+      rationale: "same apartment".to_string(),
+      member_indices: vec![0, 1, 2],
+      member_destinations: vec![],
+    }];
+    let key = group_cache_key(&[same, other, same], &[]);
+    let index_to_hash = HashMap::from([
+      (0, hex_same.clone()),
+      (1, hex_other.clone()),
+      (2, hex_same.clone()),
+    ]);
+    write_cached_grouping(dir.path(), &key, &groups, &index_to_hash)
+      .await
+      .unwrap();
+
+    let hash_to_indices = HashMap::from([
+      (hex_same, vec![0usize, 2]),
+      (hex_other, vec![1usize]),
+    ]);
+    let loaded =
+      read_cached_grouping(dir.path(), &key, &hash_to_indices)
+        .await
+        .unwrap();
+
+    let mut members = loaded[0].member_indices.clone();
+    members.sort_unstable();
+    assert_eq!(members, vec![0, 1, 2]);
+  }
+
+  #[tokio::test]
+  async fn group_cache_misses_when_duplicate_count_shrinks() {
+    let dir = TempDir::new().unwrap();
+    let same = [9u8; 32];
+    let hex_same = hex::encode(same);
+    let groups = vec![ProposedGroup {
+      label: "Lease".to_string(),
+      rationale: String::new(),
+      member_indices: vec![0, 1],
+      member_destinations: vec![],
+    }];
+    let key = group_cache_key(&[same, same], &[]);
+    let index_to_hash =
+      HashMap::from([(0, hex_same.clone()), (1, hex_same.clone())]);
+    write_cached_grouping(dir.path(), &key, &groups, &index_to_hash)
+      .await
+      .unwrap();
+
+    // Only one copy present now: two cached members can't both map.
+    let hash_to_indices = HashMap::from([(hex_same, vec![0usize])]);
+    let loaded =
+      read_cached_grouping(dir.path(), &key, &hash_to_indices).await;
     assert!(loaded.is_none());
   }
 
