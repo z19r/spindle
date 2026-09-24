@@ -43,6 +43,24 @@ pub struct DescribeRequest {
   pub context: DescribeContext,
 }
 
+/// Tokens consumed by one model so far this run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+  pub calls: u64,
+  pub input_tokens: u64,
+  pub cache_read_tokens: u64,
+  pub output_tokens: u64,
+}
+
+impl Usage {
+  pub fn add(&mut self, other: Usage) {
+    self.calls += other.calls;
+    self.input_tokens += other.input_tokens;
+    self.cache_read_tokens += other.cache_read_tokens;
+    self.output_tokens += other.output_tokens;
+  }
+}
+
 /// Everything a grouping call may be told besides the files.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GroupingHints<'a> {
@@ -166,6 +184,12 @@ pub trait AiProvider: Send + Sync {
           .await
       }
     }
+  }
+
+  /// Tokens spent so far, per model id. Providers that do not meter
+  /// return nothing.
+  fn usage(&self) -> Vec<(String, Usage)> {
+    Vec::new()
   }
 
   /// Describe many files in one operation. The default falls back to

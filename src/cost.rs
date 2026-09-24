@@ -20,6 +20,31 @@ fn pricing_per_mtok(model: &str) -> (f64, f64) {
   }
 }
 
+/// USD for tokens actually consumed. Cache reads bill at a tenth of
+/// the input price.
+pub fn cost_usd(model: &str, usage: &crate::ai::Usage) -> f64 {
+  let (input, output) = pricing_per_mtok(model);
+  let fresh =
+    usage.input_tokens.saturating_sub(usage.cache_read_tokens);
+  (fresh as f64 / 1_000_000.0) * input
+    + (usage.cache_read_tokens as f64 / 1_000_000.0) * input * 0.1
+    + (usage.output_tokens as f64 / 1_000_000.0) * output
+}
+
+/// Totals across models: (usd, calls, input tokens, output tokens).
+pub fn spend_summary(
+  usage: &[(String, crate::ai::Usage)],
+) -> (f64, u64, u64, u64) {
+  usage.iter().fold((0.0, 0, 0, 0), |acc, (model, u)| {
+    (
+      acc.0 + cost_usd(model, u),
+      acc.1 + u.calls,
+      acc.2 + u.input_tokens,
+      acc.3 + u.output_tokens,
+    )
+  })
+}
+
 pub struct CostEstimate {
   pub describe_calls: usize,
   pub group_calls: usize,
@@ -79,6 +104,33 @@ mod tests {
   use super::*;
 
   const OPUS: &str = "claude-opus-5";
+
+  #[test]
+  fn actual_usage_is_priced_per_model_with_cache_discount() {
+    let u = crate::ai::Usage {
+      calls: 3,
+      input_tokens: 1_000_000,
+      cache_read_tokens: 500_000,
+      output_tokens: 100_000,
+    };
+    // haiku: 1.0 in, 5.0 out; half the input at 10%.
+    let usd = cost_usd("claude-haiku-4-5", &u);
+    assert!((usd - (0.5 + 0.05 + 0.5)).abs() < 1e-9, "{usd}");
+    let (total, calls, inp, out) = spend_summary(&[
+      ("claude-haiku-4-5".to_string(), u),
+      (
+        "claude-opus-5".to_string(),
+        crate::ai::Usage {
+          calls: 1,
+          input_tokens: 10_000,
+          cache_read_tokens: 0,
+          output_tokens: 2_000,
+        },
+      ),
+    ]);
+    assert!((total - (1.05 + 0.05 + 0.05)).abs() < 1e-9, "{total}");
+    assert_eq!((calls, inp, out), (4, 1_010_000, 102_000));
+  }
 
   #[test]
   fn zero_files_minimal_cost() {

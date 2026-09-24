@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 
-use super::{DegenerateReply, GroupingHints};
+use std::collections::HashMap;
+
+use super::{DegenerateReply, GroupingHints, Usage};
 use crate::model::{
   Area, ContentDescription, FileSummary, ProposedGroup, RoutedFile,
 };
@@ -43,6 +45,8 @@ fn http_client(timeout: std::time::Duration) -> Client {
 pub struct ClaudeProvider {
   client: Client,
   idle_timeout: std::time::Duration,
+  /// Tokens spent per model, for the run summary.
+  spent: std::sync::Mutex<HashMap<String, Usage>>,
   api_key: String,
   /// Model for the grouping call (the hard reasoning step).
   model: String,
@@ -259,6 +263,29 @@ fn cached_api_request(
 struct ApiResponse {
   content: Vec<ResponseBlock>,
   stop_reason: Option<String>,
+  #[serde(default)]
+  usage: Option<ApiUsage>,
+}
+
+#[derive(Deserialize, Default, Clone, Copy)]
+struct ApiUsage {
+  #[serde(default)]
+  input_tokens: u64,
+  #[serde(default)]
+  output_tokens: u64,
+  #[serde(default)]
+  cache_read_input_tokens: u64,
+}
+
+impl From<ApiUsage> for Usage {
+  fn from(u: ApiUsage) -> Self {
+    Usage {
+      calls: 1,
+      input_tokens: u.input_tokens + u.cache_read_input_tokens,
+      cache_read_tokens: u.cache_read_input_tokens,
+      output_tokens: u.output_tokens,
+    }
+  }
 }
 
 #[derive(Serialize)]
@@ -312,6 +339,7 @@ impl ClaudeProvider {
     Self {
       client: http_client(DEFAULT_REQUEST_TIMEOUT),
       idle_timeout: DEFAULT_IDLE_TIMEOUT,
+      spent: std::sync::Mutex::new(HashMap::new()),
       api_key: api_key.into(),
       describe_model: model.clone(),
       model,
@@ -345,6 +373,12 @@ impl ClaudeProvider {
     let mut this = self;
     this.client = http_client(timeout);
     this
+  }
+
+  fn record_usage(&self, model: &str, usage: Usage) {
+    if let Ok(mut spent) = self.spent.lock() {
+      spent.entry(model.to_string()).or_default().add(usage);
+    }
   }
 
   /// Treat a streaming reply as stalled after `idle` without bytes.
@@ -455,6 +489,17 @@ impl ClaudeProvider {
           stop_reason = ?reply.stop_reason,
           "Streamed reply complete"
         );
+        self.record_usage(
+          &request.model,
+          Usage {
+            calls: 1,
+            input_tokens: reply.input_tokens
+              + reply.cache_read_tokens,
+            cache_read_tokens: reply.cache_read_tokens,
+            output_tokens: reply.output_tokens.unwrap_or(0),
+          },
+        );
+
         return finish_text(reply.text, reply.stop_reason.as_deref());
       }
 
@@ -462,6 +507,9 @@ impl ClaudeProvider {
         .json()
         .await
         .context("Failed to parse Claude API response")?;
+      if let Some(usage) = api_response.usage {
+        self.record_usage(&request.model, usage.into());
+      }
 
       return response_text(api_response);
     }
@@ -685,11 +733,16 @@ impl ClaudeProvider {
         })?;
 
       let outcome = match parsed.result {
-        BatchResult::Succeeded { message } => response_text(message)
-          .and_then(|text| {
-            serde_json::from_str::<ContentDescription>(&text)
-              .context("Failed to parse description JSON from Claude")
-          }),
+        BatchResult::Succeeded { message } => {
+          if let Some(usage) = message.usage {
+            self.record_usage(&self.describe_model, usage.into());
+          }
+          response_text(message)
+        }
+        .and_then(|text| {
+          serde_json::from_str::<ContentDescription>(&text)
+            .context("Failed to parse description JSON from Claude")
+        }),
         BatchResult::Errored { error } => {
           Err(anyhow::anyhow!("Batch item failed: {error}"))
         }
@@ -796,6 +849,8 @@ struct StreamedReply {
   text: String,
   stop_reason: Option<String>,
   output_tokens: Option<u64>,
+  input_tokens: u64,
+  cache_read_tokens: u64,
 }
 
 /// Assemble the text of a Messages API SSE stream. Fails as a
@@ -817,6 +872,8 @@ where
     text: String::new(),
     stop_reason: None,
     output_tokens: None,
+    input_tokens: 0,
+    cache_read_tokens: 0,
   };
   let mut checked_at = 0usize;
 
@@ -858,6 +915,13 @@ where
             if let Some(t) = value["delta"]["text"].as_str() {
               reply.text.push_str(t);
             }
+          }
+          Some("message_start") => {
+            let usage = &value["message"]["usage"];
+            reply.input_tokens =
+              usage["input_tokens"].as_u64().unwrap_or(0);
+            reply.cache_read_tokens =
+              usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
           }
           Some("message_delta") => {
             if let Some(r) = value["delta"]["stop_reason"].as_str() {
@@ -999,6 +1063,16 @@ fn extract_json(raw: &str) -> String {
 }
 
 impl AiProvider for ClaudeProvider {
+  fn usage(&self) -> Vec<(String, Usage)> {
+    let mut out: Vec<(String, Usage)> = self
+      .spent
+      .lock()
+      .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+      .unwrap_or_default();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+  }
+
   async fn describe_image(
     &self,
     image_data: &[u8],
@@ -1211,6 +1285,72 @@ mod tests {
       .iter()
       .map(|e| format!("event: {}\ndata: {}\n\n", e["type"], e))
       .collect()
+  }
+
+  #[tokio::test]
+  async fn usage_is_recorded_from_json_replies() {
+    let server = MockServer::start().await;
+    let json_body = serde_json::json!({
+      "content": [{"type": "text", "text": "{\"summary\":\"A red pixel\",\"tags\":[],\"suggested_category\":\"photo\",\"confidence\":0.9}"}],
+      "usage": {"input_tokens": 1200, "output_tokens": 40, "cache_read_input_tokens": 1000}
+    });
+    Mock::given(method("POST"))
+      .and(path("/v1/messages"))
+      .respond_with(
+        ResponseTemplate::new(200).set_body_json(&json_body),
+      )
+      .mount(&server)
+      .await;
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-opus-5".to_string(),
+      0,
+    )
+    .with_describe_model("claude-haiku-4-5")
+    .with_base_url(server.uri());
+    let ctx = DescribeContext {
+      filename: "red.png".to_string(),
+      file_type_label: "PNG".to_string(),
+      file_size: 100,
+      metadata_hint: None,
+    };
+    for _ in 0..2 {
+      provider
+        .describe_image(&[0xFF], "image/png", &ctx)
+        .await
+        .unwrap();
+    }
+
+    let usage = provider.usage();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].0, "claude-haiku-4-5");
+    assert_eq!(
+      usage[0].1,
+      Usage {
+        calls: 2,
+        input_tokens: 4400,
+        cache_read_tokens: 2000,
+        output_tokens: 80
+      }
+    );
+  }
+
+  #[tokio::test]
+  async fn streamed_usage_comes_from_message_start_and_delta() {
+    let body = sse(&[
+      serde_json::json!({"type":"message_start","message":{"usage":{"input_tokens":900,"cache_read_input_tokens":300}}}),
+      serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"{}"}}),
+      serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":55}}),
+    ]);
+    let stream =
+      futures::stream::iter(vec![Ok::<_, String>(body.into_bytes())]);
+    let reply =
+      collect_sse_text(stream, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(reply.input_tokens, 900);
+    assert_eq!(reply.cache_read_tokens, 300);
+    assert_eq!(reply.output_tokens, Some(55));
   }
 
   #[tokio::test]

@@ -8,7 +8,7 @@ use clap::Parser;
 use dotenvy::dotenv;
 use tracing_subscriber::EnvFilter;
 
-use spindle::ai::ClaudeProvider;
+use spindle::ai::{AiProvider, ClaudeProvider};
 use spindle::config::{CliArgs, Config};
 use spindle::executor::{
   execute_plan, journal, trash, ExecutorPaths,
@@ -170,8 +170,15 @@ async fn main() -> Result<()> {
   };
 
   let plan = &result.plan;
+  let usage = provider.usage();
+  let (spent_usd, calls, _, _) = spindle::cost::spend_summary(&usage);
+  let spent = if calls == 0 {
+    String::new()
+  } else {
+    format!(" · spent ${spent_usd:.2} in {calls} calls")
+  };
   let summary = format!(
-    "{} groups · {} moves · {} duplicates ({} reclaimable)",
+    "{} groups · {} moves · {} duplicates ({} reclaimable){spent}",
     plan.stats.groups_created,
     plan.moves.len(),
     plan.stats.duplicates_found,
