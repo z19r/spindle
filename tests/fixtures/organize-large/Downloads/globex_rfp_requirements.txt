@@ -1,0 +1,1 @@
+Globex Industries RFP — analytics dashboard requirements: SSO, SAP connector, mobile view, 99.9% uptime, weekly KPI email.

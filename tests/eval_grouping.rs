@@ -17,12 +17,13 @@ use spindle::pipeline::{self, PipelineConfig, PipelineEvent};
 /// Minimum composite score. Raised as grouping improves; a change
 /// that drops below it is a regression.
 const FLOOR: f64 = 0.85;
+/// Floor for the large fixture; raised once a baseline is recorded.
+const LARGE_FLOOR: f64 = 0.80;
 
-fn fixture_root() -> PathBuf {
+fn fixtures_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))
     .join("tests")
     .join("fixtures")
-    .join("organize")
 }
 
 fn provider() -> Option<ClaudeProvider> {
@@ -70,9 +71,9 @@ fn print_groups(placements: &[Placement], expected: &ExpectedSet) {
   }
 }
 
-#[tokio::test]
-#[ignore = "real API; run via `just eval`"]
-async fn grouping_quality_meets_floor() {
+/// Run one fixture through the real pipeline and return its report.
+/// `None` when the eval is not enabled in this environment.
+async fn eval_fixture(name: &str) -> Option<eval::EvalReport> {
   dotenvy::dotenv().ok();
   let _ = tracing_subscriber::fmt()
     .with_env_filter(
@@ -83,7 +84,7 @@ async fn grouping_quality_meets_floor() {
     .try_init();
   if std::env::var("SPINDLE_EVAL").as_deref() != Ok("1") {
     eprintln!("SPINDLE_EVAL != 1; skipping real-API eval");
-    return;
+    return None;
   }
   let Some(provider) = provider() else {
     panic!(
@@ -91,7 +92,7 @@ async fn grouping_quality_meets_floor() {
     );
   };
 
-  let root = fixture_root();
+  let root = fixtures_root().join(name);
   let expected = eval::load_expected(&root.join("expected.toml"))
     .expect("expected.toml");
   let output = tempfile::tempdir().expect("tempdir");
@@ -134,7 +135,9 @@ async fn grouping_quality_meets_floor() {
         PipelineEvent::CostEstimated {
           estimated_usd,
           file_count,
-        } => println!("estimated ${estimated_usd:.4} for {file_count} uncached files"),
+        } => println!(
+          "estimated ${estimated_usd:.4} for {file_count} uncached files"
+        ),
         PipelineEvent::AnalysisComplete {
           succeeded,
           failed,
@@ -165,12 +168,36 @@ async fn grouping_quality_meets_floor() {
   );
   let report = eval::score(&expected, &placements);
 
+  println!("\n=== fixture: {name} ===");
   print_groups(&placements, &expected);
-  println!("\n=== eval report ===\n{report}");
+  println!("\n=== eval report ({name}) ===\n{report}");
+  Some(report)
+}
 
+#[tokio::test]
+#[ignore = "real API; run via `just eval`"]
+async fn grouping_quality_meets_floor() {
+  let Some(report) = eval_fixture("organize").await else {
+    return;
+  };
   assert!(
     report.composite() >= FLOOR,
     "composite {:.3} fell below floor {FLOOR:.3}",
+    report.composite()
+  );
+}
+
+/// ~140 files, 29 groups, ambiguous items, office/ebook files, exact
+/// and near duplicates. Floor is recorded on #98 once a baseline exists.
+#[tokio::test]
+#[ignore = "real API; run via `just eval`"]
+async fn large_fixture_quality_meets_floor() {
+  let Some(report) = eval_fixture("organize-large").await else {
+    return;
+  };
+  assert!(
+    report.composite() >= LARGE_FLOOR,
+    "composite {:.3} fell below floor {LARGE_FLOOR:.3}",
     report.composite()
   );
 }
