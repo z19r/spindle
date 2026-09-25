@@ -1001,10 +1001,15 @@ fn log_claude_api_call(_api_key: &str, endpoint: &str, fqdn: &str) {
 
 fn preview(s: &str, max: usize) -> String {
   if s.len() <= max {
-    s.to_string()
-  } else {
-    format!("{}…(truncated, {} bytes total)", &s[..max], s.len())
+    return s.to_string();
   }
+  // Back off to a char boundary so a multi-byte character straddling
+  // the cut cannot panic the slice.
+  let mut cut = max;
+  while !s.is_char_boundary(cut) {
+    cut -= 1;
+  }
+  format!("{}…(truncated, {} bytes total)", &s[..cut], s.len())
 }
 
 fn extract_json(raw: &str) -> String {
@@ -1249,6 +1254,20 @@ impl AiProvider for ClaudeProvider {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn preview_never_cuts_inside_a_multibyte_char() {
+    // "ab—" is 5 bytes: the dash spans bytes 2..5.
+    let text = "ab—cd";
+    for max in 0..=text.len() {
+      let out = preview(text, max);
+      assert!(
+        out.starts_with(&text[..out.find('…').unwrap_or(out.len())])
+      );
+    }
+    assert_eq!(preview("ab—cd", 3), "ab…(truncated, 7 bytes total)");
+    assert_eq!(preview("plain", 10), "plain");
+  }
   use crate::model::DescriptionSource;
 
   /// The grammar must forbid a group with no members and a reply with
