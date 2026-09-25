@@ -216,7 +216,7 @@ fn group_output_config() -> serde_json::Value {
                       "index": {"type": "integer"},
                       "dest_name": {"type": "string"}
                     },
-                    "required": ["index", "dest_name"],
+                    "required": ["index"],
                     "additionalProperties": false
                   }
                 }
@@ -1397,6 +1397,12 @@ mod tests {
     assert_eq!(
       groups["items"]["properties"]["members"]["minItems"],
       1
+    );
+    // dest_name is optional: a member is just its index unless the
+    // model wants to rename, which keeps replies short.
+    assert_eq!(
+      groups["items"]["properties"]["members"]["items"]["required"],
+      serde_json::json!(["index"])
     );
   }
 

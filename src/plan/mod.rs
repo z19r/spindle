@@ -21,6 +21,7 @@ pub fn propose_plan(
     let dest_lookup: HashMap<usize, &str> = group
       .member_destinations
       .iter()
+      .filter(|m| !m.dest_name.trim().is_empty())
       .map(|m| (m.index, m.dest_name.as_str()))
       .collect();
 
@@ -468,6 +469,25 @@ mod tests {
     assert_eq!(
       plan.moves[0].to,
       PathBuf::from("/organized/cats/cute_cat.jpg")
+    );
+  }
+
+  #[test]
+  fn empty_dest_name_keeps_the_original_filename() {
+    let files = vec![make_fingerprinted("image3.jpg", 100)];
+    let dests = vec![MemberDestination {
+      index: 0,
+      dest_name: String::new(),
+    }];
+    let groups =
+      vec![make_group_with_dests(0, "Cats", vec![0], dests)];
+    let output = Path::new("/organized");
+
+    let plan = propose_plan(output, &groups, &[], &files);
+
+    assert_eq!(
+      plan.moves[0].to,
+      PathBuf::from("/organized/cats/image3.jpg")
     );
   }
 

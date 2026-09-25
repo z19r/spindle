@@ -840,9 +840,131 @@ async fn propose_once<P: AiProvider>(
 /// group), so only an empty reply counts as degenerate.
 const MIN_FILES_FOR_COVERAGE_CHECK: usize = 4;
 
+/// Errors that mean "the model produced a bad reply for this many
+/// files", which a smaller call may fix. Anything else (auth, network,
+/// quota) is not helped by splitting.
+fn is_model_quality_error(err: &anyhow::Error) -> bool {
+  err.downcast_ref::<crate::ai::DegenerateReply>().is_some()
+    || err.downcast_ref::<crate::ai::Refused>().is_some()
+    || {
+      let msg = format!("{err:#}");
+      msg.contains("placed too few")
+        || msg.contains("No text content")
+        || msg.contains("Failed to parse")
+    }
+}
+
+/// The area configured for explicit or intimate content, if any.
+fn private_area(areas: &[Area]) -> Option<&Area> {
+  areas
+    .iter()
+    .find(|a| a.name.eq_ignore_ascii_case("private"))
+    .or_else(|| {
+      areas.iter().find(|a| {
+        let d = a.description.to_ascii_lowercase();
+        d.contains("explicit")
+          || d.contains("intimate")
+          || d.contains("nudity")
+      })
+    })
+}
+
+fn is_private_area(area: &Area) -> bool {
+  private_area(std::slice::from_ref(area)).is_some()
+}
+
+/// Group one batch, but never let it sink the run: a call that still
+/// fails after its retry is split in half and each half tried on its
+/// own. Below [`MIN_SPLIT`] files, the private area falls back to one
+/// group named for the area (separation matters more than sub-folders
+/// there); any other area leaves its files unplaced, where they
+/// surface in Unsorted with a note.
+async fn propose_chunk_resilient<P: AiProvider>(
+  provider: &P,
+  files: &[FileSummary],
+  labels: &[String],
+  organized_context: &[(String, Vec<ContentDescription>)],
+  area: Option<&Area>,
+  renames: &[(String, String)],
+) -> Vec<ProposedGroup> {
+  match propose_once(
+    provider,
+    files,
+    labels,
+    organized_context,
+    area,
+    renames,
+  )
+  .await
+  {
+    Ok(groups) => groups,
+    Err(err)
+      if files.len() >= MIN_SPLIT && is_model_quality_error(&err) =>
+    {
+      tracing::warn!(
+        area = area.map(|a| a.name.as_str()).unwrap_or("-"),
+        files = files.len(),
+        error = %format!("{err:#}"),
+        "Grouping call failed; splitting in half"
+      );
+      let (a, b) = files.split_at(files.len() / 2);
+      let mut out = Vec::new();
+      let mut labels: Vec<String> = labels.to_vec();
+      for half in [a, b] {
+        let groups = Box::pin(propose_chunk_resilient(
+          provider,
+          half,
+          &labels,
+          organized_context,
+          area,
+          renames,
+        ))
+        .await;
+        for g in &groups {
+          if !labels.contains(&g.label) {
+            labels.push(g.label.clone());
+          }
+        }
+        out.extend(groups);
+      }
+      out
+    }
+    Err(err) => match area {
+      Some(area) if is_private_area(area) => {
+        tracing::warn!(
+          area = %area.name,
+          files = files.len(),
+          error = %format!("{err:#}"),
+          "Private grouping failed; filing the batch under the area itself"
+        );
+        vec![ProposedGroup {
+          label: area.name.clone(),
+          rationale:
+            "grouped by the private-area fallback after the \
+                      model could not group these files"
+              .to_string(),
+          member_indices: files.iter().map(|f| f.index).collect(),
+          member_destinations: vec![],
+          member_notes: vec![],
+        }]
+      }
+      _ => {
+        tracing::warn!(
+          area = area.map(|a| a.name.as_str()).unwrap_or("-"),
+          files = files.len(),
+          error = %format!("{err:#}"),
+          "Grouping call failed; leaving its files unplaced"
+        );
+        Vec::new()
+      }
+    },
+  }
+}
+
 /// Large sets are grouped in topic-coherent batches. Labels produced
 /// by earlier batches feed later ones (so they reuse folders instead
-/// of inventing near-duplicates), and same-label groups merge.
+/// of inventing near-duplicates), and same-label groups merge. A batch
+/// the model cannot handle is split, never fatal.
 async fn propose_groups_batched<P: AiProvider>(
   provider: &P,
   summaries: &[FileSummary],
@@ -850,9 +972,9 @@ async fn propose_groups_batched<P: AiProvider>(
   organized_context: &[(String, Vec<ContentDescription>)],
   area: Option<&Area>,
   renames: &[(String, String)],
-) -> Result<Vec<ProposedGroup>> {
+) -> Vec<ProposedGroup> {
   if summaries.len() <= MAX_GROUPING_BATCH {
-    return propose_once(
+    return propose_chunk_resilient(
       provider,
       summaries,
       existing_labels,
@@ -875,7 +997,7 @@ async fn propose_groups_batched<P: AiProvider>(
   let mut merged: HashMap<String, ProposedGroup> = HashMap::new();
 
   for chunk in ordered.chunks(MAX_GROUPING_BATCH) {
-    let groups = propose_once(
+    let groups = propose_chunk_resilient(
       provider,
       chunk,
       &labels,
@@ -883,7 +1005,7 @@ async fn propose_groups_batched<P: AiProvider>(
       area,
       renames,
     )
-    .await?;
+    .await;
     for group in groups {
       if !labels.contains(&group.label) {
         labels.push(group.label.clone());
@@ -903,12 +1025,10 @@ async fn propose_groups_batched<P: AiProvider>(
     }
   }
 
-  Ok(
-    order
-      .into_iter()
-      .filter_map(|label| merged.remove(&label))
-      .collect(),
-  )
+  order
+    .into_iter()
+    .filter_map(|label| merged.remove(&label))
+    .collect()
 }
 
 /// Files per routing call; short lines, so this stays well inside the
@@ -938,15 +1058,17 @@ async fn propose_groups_two_stage<P: AiProvider>(
   tx: &mpsc::Sender<PipelineEvent>,
 ) -> Result<Vec<ProposedGroup>> {
   if stage.areas.is_empty() || summaries.is_empty() {
-    return propose_groups_batched(
-      provider,
-      summaries,
-      existing_labels,
-      organized_context,
-      None,
-      stage.renames,
-    )
-    .await;
+    return Ok(
+      propose_groups_batched(
+        provider,
+        summaries,
+        existing_labels,
+        organized_context,
+        None,
+        stage.renames,
+      )
+      .await,
+    );
   }
 
   let area_salt: Vec<String> = stage
@@ -966,33 +1088,17 @@ async fn propose_groups_two_stage<P: AiProvider>(
       tracing::info!("Reused cached routing (no Claude call)");
       routed
     }
-    None => match route_all(provider, summaries, stage.areas).await {
-      Ok(routed) => {
-        let _ = write_cached_routing(
-          stage.cache_dir,
-          &route_key,
-          &routed,
-          stage.index_to_hash,
-        )
-        .await;
-        routed
-      }
-      Err(err) => {
-        tracing::warn!(
-          error = %format!("{err:#}"),
-          "Routing failed; grouping in a single stage"
-        );
-        return propose_groups_batched(
-          provider,
-          summaries,
-          existing_labels,
-          organized_context,
-          None,
-          stage.renames,
-        )
-        .await;
-      }
-    },
+    None => {
+      let routed = route_all(provider, summaries, stage.areas).await;
+      let _ = write_cached_routing(
+        stage.cache_dir,
+        &route_key,
+        &routed,
+        stage.index_to_hash,
+      )
+      .await;
+      routed
+    }
   };
 
   // Bucket summaries by area, in taxonomy order. Unknown or missing
@@ -1037,12 +1143,12 @@ async fn propose_groups_two_stage<P: AiProvider>(
   for (area, files) in
     buckets.into_iter().filter(|(_, f)| !f.is_empty())
   {
-    let groups = propose_area_resilient(
+    let groups = propose_groups_batched(
       provider,
       &files,
       &labels,
       organized_context,
-      area,
+      Some(area),
       stage.renames,
     )
     .await;
@@ -1063,7 +1169,7 @@ async fn propose_groups_two_stage<P: AiProvider>(
       None,
       stage.renames,
     )
-    .await?;
+    .await;
     all.extend(groups);
   }
   Ok(all)
@@ -1072,80 +1178,134 @@ async fn propose_groups_two_stage<P: AiProvider>(
 /// Files per call below which a failing area is no longer split.
 const MIN_SPLIT: usize = 8;
 
-/// Group one area, but never let it sink the run: a call that still
-/// fails after its retry is split in half and each half tried on its
-/// own; files whose half also fails are left unplaced (they surface in
-/// Unsorted) while every other area proceeds.
-async fn propose_area_resilient<P: AiProvider>(
+/// Files the router must never be asked about: anything the describe
+/// stage already flagged as explicit or sensitive goes straight to the
+/// private area. Keeping their summaries out of the routing call also
+/// keeps that call from being refused wholesale.
+fn is_private_summary(s: &FileSummary) -> bool {
+  let d = &s.description;
+  d.suggested_category.eq_ignore_ascii_case("adult")
+    || d.tags.iter().any(|t| {
+      matches!(
+        t.to_ascii_lowercase().as_str(),
+        "explicit"
+          | "sensitive"
+          | "private"
+          | "nsfw"
+          | "nude"
+          | "nudity"
+      )
+    })
+}
+
+/// Where a file goes when the router cannot be asked: the first
+/// configured area that fits its category, else nowhere (it is then
+/// grouped without an area constraint).
+fn fallback_area<'a>(
+  s: &FileSummary,
+  areas: &'a [Area],
+) -> Option<&'a Area> {
+  let category =
+    s.description.suggested_category.to_ascii_lowercase();
+  let wanted: &[&str] = match category.as_str() {
+    "adult" => &["Private"],
+    "work" => &["Work"],
+    "finance" | "receipts" => &["Finance"],
+    "legal" => &["Legal"],
+    "health" => &["Health"],
+    "travel" | "family" | "friends" | "people" | "selfies"
+    | "kids" | "pets" | "home" | "food" | "events" | "sports"
+    | "nature" | "vehicles" | "architecture" => {
+      &["Personal", "Photos"]
+    }
+    "photo" | "photos" | "screenshots" => &["Photos", "Personal"],
+    "entertainment" | "music" | "gaming" | "memes" | "art" => {
+      &["Media", "Personal"]
+    }
+    "tech" | "science" | "education" => &["Reference", "Software"],
+    _ => &[],
+  };
+  wanted.iter().find_map(|w| {
+    areas.iter().find(|a| a.name.eq_ignore_ascii_case(w))
+  })
+}
+
+/// Route one chunk; a bad reply is retried on halves, and below
+/// [`MIN_SPLIT`] files (or on a non-model error) each file is routed
+/// by its category instead. Never fails.
+async fn route_chunk_resilient<P: AiProvider>(
   provider: &P,
-  files: &[FileSummary],
-  labels: &[String],
-  organized_context: &[(String, Vec<ContentDescription>)],
-  area: &Area,
-  renames: &[(String, String)],
-) -> Vec<ProposedGroup> {
-  match propose_groups_batched(
-    provider,
-    files,
-    labels,
-    organized_context,
-    Some(area),
-    renames,
-  )
-  .await
-  {
-    Ok(groups) => groups,
-    Err(err) if files.len() >= MIN_SPLIT => {
+  chunk: &[FileSummary],
+  areas: &[Area],
+) -> Vec<RoutedFile> {
+  match provider.route_files(chunk, areas).await {
+    Ok(routed) => routed,
+    Err(err)
+      if chunk.len() >= MIN_SPLIT && is_model_quality_error(&err) =>
+    {
       tracing::warn!(
-        area = %area.name,
-        files = files.len(),
+        files = chunk.len(),
         error = %format!("{err:#}"),
-        "Area grouping failed; splitting in half"
+        "Routing call failed; splitting in half"
       );
-      let (a, b) = files.split_at(files.len() / 2);
-      let mut out = Vec::new();
-      let mut labels: Vec<String> = labels.to_vec();
-      for half in [a, b] {
-        let groups = Box::pin(propose_area_resilient(
-          provider,
-          half,
-          &labels,
-          organized_context,
-          area,
-          renames,
-        ))
-        .await;
-        for g in &groups {
-          if !labels.contains(&g.label) {
-            labels.push(g.label.clone());
-          }
-        }
-        out.extend(groups);
-      }
+      let (a, b) = chunk.split_at(chunk.len() / 2);
+      let mut out =
+        Box::pin(route_chunk_resilient(provider, a, areas)).await;
+      out.extend(
+        Box::pin(route_chunk_resilient(provider, b, areas)).await,
+      );
       out
     }
     Err(err) => {
       tracing::warn!(
-        area = %area.name,
-        files = files.len(),
+        files = chunk.len(),
         error = %format!("{err:#}"),
-        "Area grouping failed; leaving its files unplaced"
+        "Routing call failed; routing these files by category"
       );
-      Vec::new()
+      chunk
+        .iter()
+        .filter_map(|s| {
+          fallback_area(s, areas).map(|a| RoutedFile {
+            index: s.index,
+            area: a.name.clone(),
+          })
+        })
+        .collect()
     }
   }
 }
 
+/// Stage one for every file: explicit content is pre-routed to the
+/// private area without a model call; everything else goes to the
+/// router in chunks that recover from bad replies on their own.
 async fn route_all<P: AiProvider>(
   provider: &P,
   summaries: &[FileSummary],
   areas: &[Area],
-) -> Result<Vec<RoutedFile>> {
+) -> Vec<RoutedFile> {
   let mut routed = Vec::with_capacity(summaries.len());
-  for chunk in summaries.chunks(ROUTE_BATCH) {
-    routed.extend(provider.route_files(chunk, areas).await?);
+  let mut ask: Vec<FileSummary> = Vec::new();
+  let private = private_area(areas);
+  for s in summaries {
+    match private {
+      Some(p) if is_private_summary(s) => routed.push(RoutedFile {
+        index: s.index,
+        area: p.name.clone(),
+      }),
+      _ => ask.push(s.clone()),
+    }
   }
-  Ok(routed)
+  if !routed.is_empty() {
+    tracing::info!(
+      files = routed.len(),
+      "Pre-routed explicit or sensitive files to the private area"
+    );
+  }
+  for chunk in ask.chunks(ROUTE_BATCH) {
+    routed
+      .extend(route_chunk_resilient(provider, chunk, areas).await);
+  }
+  routed
 }
 
 /// `Work/Acme` stays; `Acme` becomes `Work/Acme`; `work / acme` keeps
@@ -1366,8 +1526,7 @@ mod tests {
       None,
       &[],
     )
-    .await
-    .unwrap();
+    .await;
 
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].member_indices.len(), summaries.len());
@@ -1824,8 +1983,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn grouping_fallback_uses_file_indices_not_summary_positions()
-  {
+  async fn unplaced_files_use_file_indices_not_summary_positions() {
     let source = TempDir::new().unwrap();
     let output = TempDir::new().unwrap();
     let cache = TempDir::new().unwrap();
@@ -1863,24 +2021,26 @@ mod tests {
     let (tx, _rx) = mpsc::channel(64);
     let result = run(&provider, &config, tx).await.unwrap();
 
-    let analyzed: Vec<usize> = result
+    let failed_idx = result
       .fingerprinted
       .iter()
-      .enumerate()
-      .filter(|(_, f)| {
-        f.scanned.path.file_name().unwrap().to_string_lossy() != first
+      .position(|f| {
+        f.scanned.path.file_name().unwrap().to_string_lossy() == first
       })
-      .map(|(i, _)| i)
-      .collect();
-    let all_files = result
-      .plan
-      .groups
-      .iter()
-      .find(|g| g.label == "All Files")
-      .expect("fallback group");
-    let mut members = all_files.members.clone();
+      .unwrap();
+    let unsorted = unsorted_group(&result);
+    let mut members = unsorted.members.clone();
     members.sort_unstable();
-    assert_eq!(members, analyzed);
+    assert_eq!(members, vec![0, 1, 2]);
+    // Notes are keyed by file index, not by position in the summary
+    // list the model saw.
+    assert!(note_for(unsorted, failed_idx)
+      .contains("simulated analysis failure"));
+    for i in (0..3).filter(|&i| i != failed_idx) {
+      assert!(
+        note_for(unsorted, i).contains("not placed by grouping")
+      );
+    }
     assert_every_file_placed_once(&result);
   }
 
@@ -2147,7 +2307,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn grouping_with_no_placements_twice_falls_back() {
+  async fn grouping_with_no_placements_twice_lands_in_unsorted() {
     let source = TempDir::new().unwrap();
     let output = TempDir::new().unwrap();
     let cache = TempDir::new().unwrap();
@@ -2164,19 +2324,12 @@ mod tests {
     );
     config.no_ai = false;
 
-    let (tx, mut rx) = mpsc::channel(64);
+    let (tx, _rx) = mpsc::channel(64);
     let result = run(&provider, &config, tx).await.unwrap();
 
     assert_every_file_placed_once(&result);
     assert_eq!(result.plan.groups.len(), 1);
-    assert_eq!(result.plan.groups[0].label, "All Files");
-    let mut failed = false;
-    while let Ok(ev) = rx.try_recv() {
-      if matches!(ev, PipelineEvent::GroupingFailed { .. }) {
-        failed = true;
-      }
-    }
-    assert!(failed, "GroupingFailed event expected");
+    assert_eq!(result.plan.groups[0].label, UNSORTED_LABEL);
     // Exactly one retry: two calls total.
     assert_eq!(
       provider.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -2370,6 +2523,9 @@ mod tests {
     ByName,
     Fail,
     Unknown,
+    /// A degenerate reply for calls above this many files; smaller
+    /// calls route everything to Personal.
+    DegenerateAbove(usize),
   }
 
   impl RoutingProvider {
@@ -2412,6 +2568,18 @@ mod tests {
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
       match self.route_result {
         RouteBehaviour::Fail => anyhow::bail!("routing exploded"),
+        RouteBehaviour::DegenerateAbove(n) if files.len() > n => {
+          Err(crate::ai::DegenerateReply("loop".to_string()).into())
+        }
+        RouteBehaviour::DegenerateAbove(_) => Ok(
+          files
+            .iter()
+            .map(|f| RoutedFile {
+              index: f.index,
+              area: "Personal".to_string(),
+            })
+            .collect(),
+        ),
         RouteBehaviour::Unknown => Ok(
           files
             .iter()
@@ -2507,7 +2675,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn routing_failure_falls_back_to_single_stage() {
+  async fn routing_failure_routes_by_category() {
     let source = TempDir::new().unwrap();
     let output = TempDir::new().unwrap();
     let cache = TempDir::new().unwrap();
@@ -2525,8 +2693,172 @@ mod tests {
     let result = run(&provider, &config, tx).await.unwrap();
 
     assert_every_file_placed_once(&result);
-    assert_eq!(labels_of(&result), vec!["Stuff"]);
+    // A non-model error is not retried on halves; the files are routed
+    // by their category ("photo" → Photos) and grouped there.
+    assert_eq!(labels_of(&result), vec!["Photos/Stuff"]);
     assert_eq!(provider.calls(), (1, 1));
+  }
+
+  #[tokio::test]
+  async fn a_degenerate_routing_reply_is_retried_on_halves() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_pngs(source.path(), "p", 10);
+    let provider =
+      RoutingProvider::new(RouteBehaviour::DegenerateAbove(5));
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    assert_eq!(labels_of(&result), vec!["Personal/Stuff"]);
+    // One failing call for 10 files, then two good ones for 5 each.
+    assert_eq!(provider.calls().0, 3);
+  }
+
+  /// Describes files starting with "x" as explicit, records whether the
+  /// router ever saw one, and (optionally) refuses to group them.
+  struct PrivateAwareProvider {
+    fail_private: bool,
+    router_saw_explicit: std::sync::atomic::AtomicBool,
+  }
+
+  impl AiProvider for PrivateAwareProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      context: &DescribeContext,
+    ) -> anyhow::Result<ContentDescription> {
+      let explicit = context.filename.starts_with('x');
+      Ok(ContentDescription {
+        summary: format!("Description of {}", context.filename),
+        tags: if explicit {
+          vec!["explicit".to_string(), "private".to_string()]
+        } else {
+          vec![]
+        },
+        suggested_category: if explicit { "adult" } else { "photo" }
+          .to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      })
+    }
+
+    async fn route_files(
+      &self,
+      files: &[FileSummary],
+      _areas: &[Area],
+    ) -> anyhow::Result<Vec<RoutedFile>> {
+      if files.iter().any(|f| f.filename.starts_with('x')) {
+        self
+          .router_saw_explicit
+          .store(true, std::sync::atomic::Ordering::SeqCst);
+      }
+      Ok(
+        files
+          .iter()
+          .map(|f| RoutedFile {
+            index: f.index,
+            area: "Personal".to_string(),
+          })
+          .collect(),
+      )
+    }
+
+    async fn propose_groups(
+      &self,
+      files: &[FileSummary],
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      if self.fail_private
+        && files.iter().all(|f| f.filename.starts_with('x'))
+      {
+        return Err(
+          crate::ai::DegenerateReply("declined".to_string()).into(),
+        );
+      }
+      Ok(vec![ProposedGroup {
+        label: "Stuff".to_string(),
+        rationale: String::new(),
+        member_indices: files.iter().map(|f| f.index).collect(),
+        member_destinations: vec![],
+        member_notes: vec![],
+      }])
+    }
+  }
+
+  #[tokio::test]
+  async fn explicit_files_are_pre_routed_to_private_without_the_router(
+  ) {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_pngs(source.path(), "xx", 2);
+    write_pngs(source.path(), "p", 3);
+    let provider = PrivateAwareProvider {
+      fail_private: false,
+      router_saw_explicit: Default::default(),
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    assert_eq!(
+      labels_of(&result),
+      vec!["Personal/Stuff", "Private/Stuff"]
+    );
+    assert!(!provider
+      .router_saw_explicit
+      .load(std::sync::atomic::Ordering::SeqCst));
+  }
+
+  #[tokio::test]
+  async fn private_grouping_failure_files_the_batch_under_private() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_pngs(source.path(), "xx", 2);
+    write_pngs(source.path(), "p", 3);
+    let provider = PrivateAwareProvider {
+      fail_private: true,
+      router_saw_explicit: Default::default(),
+    };
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, _rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    assert_eq!(labels_of(&result), vec!["Personal/Stuff", "Private"]);
+    let private = result
+      .plan
+      .groups
+      .iter()
+      .find(|g| g.label == "Private")
+      .unwrap();
+    assert_eq!(private.members.len(), 2);
   }
 
   #[tokio::test]
@@ -2687,7 +3019,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn degenerate_reply_twice_falls_back_to_all_files() {
+  async fn degenerate_reply_twice_lands_in_unsorted() {
     let source = TempDir::new().unwrap();
     let output = TempDir::new().unwrap();
     let cache = TempDir::new().unwrap();
@@ -2709,7 +3041,9 @@ mod tests {
     let result = run(&provider, &config, tx).await.unwrap();
 
     assert_every_file_placed_once(&result);
-    assert_eq!(labels_of(&result), vec!["All Files"]);
+    // Three files sit below the split threshold, so after the one
+    // retry they are left unplaced rather than dumped in one folder.
+    assert_eq!(labels_of(&result), vec![UNSORTED_LABEL]);
     assert_eq!(
       provider.calls.load(std::sync::atomic::Ordering::SeqCst),
       2
@@ -3107,14 +3441,23 @@ mod tests {
       .iter()
       .position(|f| f.scanned.path.ends_with("other.png"))
       .unwrap();
+    // The provider also refuses to group, so the other two files are
+    // unplaced; each file carries its own reason.
     let unsorted = unsorted_group(&result);
-    assert_eq!(unsorted.members, vec![other]);
+    let mut members = unsorted.members.clone();
+    members.sort_unstable();
+    assert_eq!(members, vec![0, 1, 2]);
     assert!(
       note_for(unsorted, other)
         .contains("simulated analysis failure"),
       "note: {}",
       note_for(unsorted, other)
     );
+    for i in (0..3).filter(|&i| i != other) {
+      assert!(
+        note_for(unsorted, i).contains("not placed by grouping")
+      );
+    }
   }
 
   #[tokio::test]
