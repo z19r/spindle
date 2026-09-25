@@ -9,7 +9,8 @@ use ratatui::{
   style::{Modifier, Style},
   text::{Line, Span},
   widgets::{
-    Block, BorderType, Clear, List, ListItem, Padding, Paragraph,
+    Block, BorderType, Clear, List, ListItem, ListState, Padding,
+    Paragraph,
   },
   Frame,
 };
@@ -135,6 +136,15 @@ pub struct ReviewState {
   /// Header-only metadata per source path, computed the first time a
   /// file is shown in the detail pane.
   facts: HashMap<PathBuf, Vec<crate::facts::Fact>>,
+  /// Viewport offsets for the list panes. The cursor lives in
+  /// `selected` / `file_selected` / the mode's cursor; these only carry
+  /// the scroll offset ratatui computes to keep that cursor on screen.
+  group_list: ListState,
+  file_list: ListState,
+  picker_list: ListState,
+  /// Rows the detail pane is scrolled down by. Reset whenever the
+  /// cursor moves, clamped to the content at render time.
+  detail_scroll: u16,
 }
 
 /// Another group the selected file could plausibly join, ranked by the

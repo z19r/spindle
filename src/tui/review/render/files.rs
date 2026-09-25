@@ -3,7 +3,7 @@ use super::*;
 pub(crate) fn render_file_list(
   frame: &mut Frame,
   area: Rect,
-  state: &ReviewState,
+  state: &mut ReviewState,
 ) {
   let focused = state.focus == Pane::Files;
   let moves = state.current_group_moves();
@@ -121,5 +121,6 @@ pub(crate) fn render_file_list(
     .collect();
 
   let list = List::new(items).block(block);
-  frame.render_widget(list, area);
+  state.file_list.select(Some(state.file_selected));
+  frame.render_stateful_widget(list, area, &mut state.file_list);
 }

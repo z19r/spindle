@@ -139,5 +139,8 @@ pub(crate) fn key_table(
     ("?", "help"),
     ("q", "quit"),
   ]);
+  // Last: the footer truncates on the right, and this is the hint the
+  // narrowest terminals can most afford to lose.
+  k.push(("[/]", "scroll detail"));
   k
 }
