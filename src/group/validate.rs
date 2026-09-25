@@ -54,6 +54,43 @@ pub struct Normalisation {
 /// words: it carried no subject, so the files go to `Unsorted`.
 pub const TYPE_ONLY_NOTE: &str = "grouped only by file type";
 
+/// Sibling groups that differ only by a trailing token are merged unless
+/// the result would hold more files than this.
+pub const MAX_SIBLING_MERGE: usize = 40;
+
+/// Trailing words that mark a revision of the same subject rather than a
+/// different subject.
+const STATUS_WORDS: &[&str] = &[
+  "draft", "final", "revised", "revision", "latest", "old", "new",
+];
+
+const MONTHS: &[&str] = &[
+  "jan",
+  "january",
+  "feb",
+  "february",
+  "mar",
+  "march",
+  "apr",
+  "april",
+  "may",
+  "jun",
+  "june",
+  "jul",
+  "july",
+  "aug",
+  "august",
+  "sep",
+  "sept",
+  "september",
+  "oct",
+  "october",
+  "nov",
+  "november",
+  "dec",
+  "december",
+];
+
 pub fn validate_groups(
   groups: Vec<ProposedGroup>,
 ) -> (Vec<ProposedGroup>, Normalisation) {
@@ -95,6 +132,7 @@ pub fn validate_groups(
   }
 
   let mut out = merge_by_key(work, &mut n.merged);
+  out = merge_siblings(out, &mut n.merged);
 
   let mut collapsed_any = false;
   for g in &mut out {
@@ -197,6 +235,210 @@ fn merge_by_key(
         out.push(g);
       }
     }
+  }
+  out
+}
+
+/// What a label's last segment ends with, once recognised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Token {
+  /// A year, year-month, year-month-day, or month + year.
+  Date,
+  /// v2, v1.3, rev 3, version 2.
+  Version,
+  /// draft, final, revised …
+  Status,
+}
+
+fn is_year(w: &str) -> bool {
+  w.len() == 4
+    && w.chars().all(|c| c.is_ascii_digit())
+    && (w.starts_with("19") || w.starts_with("20"))
+}
+
+/// YYYY, YYYY-MM, YYYY-MM-DD (also with `_`, `.` or `/` separators).
+fn is_date_word(w: &str) -> bool {
+  let parts: Vec<&str> = w.split(['-', '_', '.', '/']).collect();
+  match parts.as_slice() {
+    [y] => is_year(y),
+    [y, m] => is_year(y) && is_two_digits(m),
+    [y, m, d] => is_year(y) && is_two_digits(m) && is_two_digits(d),
+    _ => false,
+  }
+}
+
+fn is_two_digits(w: &str) -> bool {
+  (1..=2).contains(&w.len()) && w.chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_version_word(w: &str) -> bool {
+  let rest = match w.strip_prefix('v').or_else(|| w.strip_prefix('V'))
+  {
+    Some(r) => r,
+    None => return false,
+  };
+  !rest.is_empty()
+    && rest
+      .split('.')
+      .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_number(w: &str) -> bool {
+  !w.is_empty() && w.chars().all(|c| c.is_ascii_digit())
+}
+
+fn trim_punct(w: &str) -> &str {
+  w.trim_matches(|c: char| {
+    matches!(
+      c,
+      '(' | ')' | '[' | ']' | ',' | ':' | '-' | '_' | '–' | '—'
+    )
+  })
+}
+
+/// Split a segment into the subject and the trailing token that
+/// qualifies it: `"Utilities 2024-06"` → `("Utilities", Date)`,
+/// `"Report (Draft)"` → `("Report", Status)`. `None` when the segment
+/// ends in an ordinary word. The subject may be empty when the segment
+/// is nothing but the token.
+fn strip_trailing_token(segment: &str) -> Option<(String, Token)> {
+  let words: Vec<&str> = segment.split_whitespace().collect();
+  let (last, before) = words.split_last()?;
+  let last = trim_punct(last);
+  let lower = last.to_ascii_lowercase();
+  let prev =
+    before.last().map(|w| trim_punct(w).to_ascii_lowercase());
+
+  let (drop, token) = if is_date_word(&lower) {
+    let month_before = prev.as_deref().is_some_and(|p| {
+      MONTHS.contains(&p)
+        || (p.len() == 2
+          && p.starts_with('q')
+          && p[1..].chars().all(|c| c.is_ascii_digit()))
+        || p == "fy"
+    });
+    (if month_before { 2 } else { 1 }, Token::Date)
+  } else if is_version_word(&lower) {
+    (1, Token::Version)
+  } else if is_number(&lower)
+    && prev.as_deref().is_some_and(|p| {
+      matches!(p, "rev" | "revision" | "version" | "ver")
+    })
+  {
+    (2, Token::Version)
+  } else if STATUS_WORDS.contains(&lower.as_str()) {
+    (1, Token::Status)
+  } else {
+    return None;
+  };
+
+  let base = words[..words.len() - drop]
+    .join(" ")
+    .trim_end_matches(|c: char| {
+      c.is_whitespace()
+        || matches!(c, '-' | '_' | ':' | '(' | '[' | ',' | '–' | '—')
+    })
+    .to_string();
+  Some((base, token))
+}
+
+/// The label a group would share with its siblings once the trailing
+/// token of its last segment is removed. `None` for groups that must not
+/// take part: a last segment that is only a date or version is a
+/// deliberate sub-folder (`Finance/Taxes/2023`).
+fn sibling_target(label: &str) -> Option<String> {
+  let segs: Vec<&str> = label
+    .split('/')
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+    .collect();
+  let last = segs.last()?;
+  match strip_trailing_token(last) {
+    None => Some(label.to_string()),
+    Some((base, token)) if base.is_empty() => match token {
+      Token::Status if segs.len() >= 2 => Some(parent(label)),
+      _ => None,
+    },
+    Some((base, _)) => {
+      let mut head: Vec<&str> = segs[..segs.len() - 1].to_vec();
+      head.push(&base);
+      Some(head.join("/"))
+    }
+  }
+}
+
+/// Merge sibling groups whose labels differ only by a trailing date,
+/// version or status token, under the label with the token removed.
+/// Groups that would end up larger than [`MAX_SIBLING_MERGE`] are left
+/// as they are.
+fn merge_siblings(
+  groups: Vec<ProposedGroup>,
+  merged: &mut usize,
+) -> Vec<ProposedGroup> {
+  // key → (target label, positions in `groups`)
+  let mut buckets: Vec<(String, Vec<usize>)> = Vec::new();
+  let mut by_key: HashMap<String, usize> = HashMap::new();
+  for (pos, g) in groups.iter().enumerate() {
+    if is_system_label(&g.label) {
+      continue;
+    }
+    let Some(target) = sibling_target(&g.label) else {
+      continue;
+    };
+    let k = key(&target);
+    match by_key.get(&k) {
+      Some(&b) => buckets[b].1.push(pos),
+      None => {
+        by_key.insert(k, buckets.len());
+        buckets.push((target, vec![pos]));
+      }
+    }
+  }
+
+  // position → (target label, positions absorbed into it)
+  let mut absorb: HashMap<usize, (String, Vec<usize>)> =
+    HashMap::new();
+  let mut absorbed: HashMap<usize, usize> = HashMap::new();
+  for (target, positions) in buckets {
+    if positions.len() < 2 {
+      continue;
+    }
+    let total: usize = positions
+      .iter()
+      .map(|&p| groups[p].member_indices.len())
+      .sum();
+    if total > MAX_SIBLING_MERGE {
+      continue;
+    }
+    let first = positions[0];
+    for &p in &positions[1..] {
+      absorbed.insert(p, first);
+    }
+    absorb.insert(first, (target, positions[1..].to_vec()));
+  }
+
+  let mut slots: Vec<Option<ProposedGroup>> =
+    groups.into_iter().map(Some).collect();
+  let mut out = Vec::with_capacity(slots.len());
+  for pos in 0..slots.len() {
+    if absorbed.contains_key(&pos) {
+      continue;
+    }
+    let Some(mut g) = slots[pos].take() else {
+      continue;
+    };
+    if let Some((target, others)) = absorb.remove(&pos) {
+      g.label = target;
+      for o in others {
+        if let Some(other) = slots[o].take() {
+          g.member_indices.extend(other.member_indices);
+          g.member_destinations.extend(other.member_destinations);
+          g.member_notes.extend(other.member_notes);
+          *merged += 1;
+        }
+      }
+    }
+    out.push(g);
   }
   out
 }
@@ -343,6 +585,107 @@ mod tests {
       vec!["Needs Review", "Unsorted", "Unsorted"]
     );
     assert_eq!(n, Normalisation::default());
+  }
+
+  #[test]
+  fn strip_trailing_token_recognises_dates_versions_and_status() {
+    let cases: &[(&str, Option<(&str, Token)>)] = &[
+      ("Utilities 2024-06", Some(("Utilities", Token::Date))),
+      ("Utilities June 2024", Some(("Utilities", Token::Date))),
+      ("Utilities Q3 2024", Some(("Utilities", Token::Date))),
+      ("Returns 2023", Some(("Returns", Token::Date))),
+      ("2023", Some(("", Token::Date))),
+      ("Logo v2", Some(("Logo", Token::Version))),
+      ("Logo v1.3", Some(("Logo", Token::Version))),
+      ("Logo rev 3", Some(("Logo", Token::Version))),
+      ("Report (Draft)", Some(("Report", Token::Status))),
+      ("Report - Final", Some(("Report", Token::Status))),
+      ("Draft", Some(("", Token::Status))),
+      ("Acme Corp", None),
+      ("Room 101", None),
+      ("iPhone 15", None),
+    ];
+    for (input, want) in cases {
+      let got = strip_trailing_token(input);
+      let want = want.map(|(b, t)| (b.to_string(), t));
+      assert_eq!(got, want, "{input}");
+    }
+  }
+
+  #[test]
+  fn months_of_one_subject_merge_under_the_bare_label() {
+    let input = vec![
+      g("Finance/Bills/Utilities 2024-06", &[0, 1]),
+      g("Finance/Bills/Utilities 2024-07", &[2, 3]),
+      g("Finance/Bills/Utilities 2024-08", &[4]),
+    ];
+    let (out, n) = validate_groups(input);
+    assert_eq!(labels(&out), vec!["Finance/Bills/Utilities"]);
+    assert_eq!(out[0].member_indices, vec![0, 1, 2, 3, 4]);
+    assert_eq!(n.merged, 2);
+  }
+
+  #[test]
+  fn tax_year_folders_stay_separate() {
+    let input = vec![
+      g("Finance/Taxes/2022", &[0, 1]),
+      g("Finance/Taxes/2023", &[2, 3]),
+      g("Design/Logo/v1", &[4, 5]),
+      g("Design/Logo/v2", &[6, 7]),
+    ];
+    let (out, n) = validate_groups(input.clone());
+    assert_eq!(labels(&out), labels(&input));
+    assert_eq!(n.merged, 0);
+  }
+
+  #[test]
+  fn draft_and_final_siblings_merge_into_the_subject() {
+    let input = vec![
+      g("Work/Acme Q1 Report/Draft", &[0, 1]),
+      g("Work/Acme Q1 Report/Final", &[2, 3]),
+      g("Design/Logo v1", &[4, 5]),
+      g("Design/Logo v2", &[6]),
+    ];
+    let (out, _) = validate_groups(input);
+    assert_eq!(
+      labels(&out),
+      vec!["Work/Acme Q1 Report", "Design/Logo"]
+    );
+    assert_eq!(out[0].member_indices, vec![0, 1, 2, 3]);
+    assert_eq!(out[1].member_indices, vec![4, 5, 6]);
+  }
+
+  #[test]
+  fn a_tokened_sibling_joins_the_existing_bare_group() {
+    let input = vec![
+      g("Finance/Bills/Utilities", &[0, 1]),
+      g("Finance/Bills/Utilities 2024-08", &[2, 3]),
+    ];
+    let (out, n) = validate_groups(input);
+    assert_eq!(labels(&out), vec!["Finance/Bills/Utilities"]);
+    assert_eq!(out[0].member_indices, vec![0, 1, 2, 3]);
+    assert_eq!(n.merged, 1);
+  }
+
+  #[test]
+  fn a_lone_tokened_label_is_not_renamed() {
+    let input = vec![g("Design/Logo v2", &[0, 1])];
+    let (out, n) = validate_groups(input);
+    assert_eq!(labels(&out), vec!["Design/Logo v2"]);
+    assert_eq!(n.merged, 0);
+  }
+
+  #[test]
+  fn sibling_merge_respects_the_size_cap() {
+    let big: Vec<usize> = (0..30).collect();
+    let more: Vec<usize> = (30..45).collect();
+    let input = vec![
+      g("Finance/Bills/Utilities 2024-06", &big),
+      g("Finance/Bills/Utilities 2024-07", &more),
+    ];
+    let (out, n) = validate_groups(input.clone());
+    assert_eq!(labels(&out), labels(&input));
+    assert_eq!(n.merged, 0);
   }
 
   #[test]
