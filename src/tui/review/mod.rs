@@ -132,6 +132,20 @@ pub struct ReviewState {
   /// Per-file explanation (from `FileGroup::member_notes`), keyed by
   /// source path so it survives moves between groups.
   file_notes: HashMap<PathBuf, String>,
+  /// Header-only metadata per source path, computed the first time a
+  /// file is shown in the detail pane.
+  facts: HashMap<PathBuf, Vec<crate::facts::Fact>>,
+}
+
+/// Another group the selected file could plausibly join, ranked by the
+/// tags it shares with that group's members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alternative {
+  pub group_idx: usize,
+  pub label: String,
+  pub shared_tags: Vec<String>,
+  /// A few member filenames, so the user can judge without navigating.
+  pub samples: Vec<String>,
 }
 
 /// Groups the pipeline creates for files it could not place. Shown

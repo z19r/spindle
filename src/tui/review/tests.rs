@@ -1334,3 +1334,105 @@ fn compact_label_keeps_the_tail_of_long_labels() {
     "\u{2026} Redesign"
   );
 }
+
+fn tagged(tags: &[&str], category: &str) -> ContentDescription {
+  ContentDescription {
+    summary: format!("about {}", tags.join(" ")),
+    tags: tags.iter().map(|t| t.to_string()).collect(),
+    suggested_category: category.to_string(),
+    confidence: 0.9,
+    source: DescriptionSource::Ai,
+  }
+}
+
+#[test]
+fn alternatives_rank_other_groups_by_shared_tags() {
+  let descriptions = HashMap::from([
+    (1usize, tagged(&["cat", "beach", "pet"], "pets")),
+    (2usize, tagged(&["cat", "kitten"], "pets")),
+    (3usize, tagged(&["sofa"], "pets")),
+    (0usize, tagged(&["beach", "sunset"], "travel")),
+  ]);
+  let state = make_state().with_descriptions(&descriptions, &files());
+
+  let alts = state.alternatives(Path::new("/dl/beach2.jpg"));
+  assert_eq!(alts.len(), 1);
+  assert_eq!(alts[0].label, "Cats");
+  assert_eq!(alts[0].group_idx, 1);
+  assert_eq!(alts[0].shared_tags, vec!["cat".to_string()]);
+  assert_eq!(alts[0].samples, vec!["cat1.jpg", "cat2.jpg"]);
+
+  // A file whose tags overlap nothing else has no alternatives; a file
+  // without a description has none either.
+  assert!(state.alternatives(Path::new("/dl/cat2.jpg")).is_empty());
+  assert!(state.alternatives(Path::new("/dl/nope.jpg")).is_empty());
+}
+
+#[test]
+fn number_key_moves_the_file_to_that_alternative() {
+  let descriptions = HashMap::from([
+    (1usize, tagged(&["cat", "beach"], "pets")),
+    (2usize, tagged(&["cat"], "pets")),
+  ]);
+  let mut state =
+    make_state().with_descriptions(&descriptions, &files());
+  state.focus = Pane::Files;
+  state.file_selected = 1;
+
+  state.handle_key(KeyCode::Char('1'));
+
+  assert_eq!(state.group_moves[0].len(), 1);
+  assert_eq!(state.group_moves[1].len(), 4);
+  let moved = &state.group_moves[1][3];
+  assert_eq!(moved.from, PathBuf::from("/dl/beach2.jpg"));
+  assert_eq!(moved.to, PathBuf::from("/out/cats/beach2.jpg"));
+  assert_eq!(moved.group_id, 1);
+  assert_eq!(state.mode, Mode::Normal);
+
+  // No second alternative: the key is a no-op.
+  state.file_selected = 0;
+  state.handle_key(KeyCode::Char('2'));
+  assert_eq!(state.group_moves[0].len(), 1);
+}
+
+#[test]
+fn detail_pane_lists_metadata_and_alternatives() {
+  let dir = tempfile::tempdir().unwrap();
+  let png = dir.path().join("beach2.png");
+  image::RgbImage::new(4, 3).save(&png).unwrap();
+  let mut moves = make_moves();
+  moves[1].from = png.clone();
+  let descriptions = HashMap::from([
+    (1usize, tagged(&["cat", "beach"], "pets")),
+    (2usize, tagged(&["cat"], "pets")),
+  ]);
+  let mut fps = files();
+  fps[1].scanned.path = png.clone();
+  let mut state = ReviewState::new(
+    make_groups(),
+    moves,
+    PathBuf::from("/out"),
+    None,
+    ReviewMode::Organize,
+  )
+  .with_descriptions(&descriptions, &fps);
+  state.focus = Pane::Files;
+  state.file_selected = 1;
+  state.ensure_facts_for_current();
+
+  let text: String = render_detail_file(&state)
+    .iter()
+    .map(|l| {
+      l.spans
+        .iter()
+        .map(|s| s.content.to_string())
+        .collect::<String>()
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+  assert!(text.contains("METADATA"), "{text}");
+  assert!(text.contains("4 × 3"), "{text}");
+  assert!(text.contains("ALSO FITS"), "{text}");
+  assert!(text.contains("Cats"), "{text}");
+  assert!(text.contains("shares cat"), "{text}");
+}

@@ -20,6 +20,9 @@ pub(crate) fn render_detail(
 
   let in_files =
     state.mode == Mode::Normal && state.focus == Pane::Files;
+  if state.focus == Pane::Files {
+    state.ensure_facts_for_current();
+  }
   let show_image = state.has_image_preview() && in_files;
   let show_loading = state.is_image_loading() && in_files;
 
@@ -171,6 +174,49 @@ pub(crate) fn render_detail_file(
         Span::styled("  ", Style::default()),
         Span::styled(note.to_string(), theme::warning()),
       ]));
+      lines.push(Line::from(""));
+    }
+    let facts = state.facts(&mv.from);
+    if !facts.is_empty() {
+      lines
+        .push(Line::from(Span::styled("  METADATA", theme::label())));
+      for f in facts {
+        lines.push(Line::from(vec![
+          Span::styled(format!("  {:<11}", f.key), theme::dim()),
+          Span::styled(f.value.clone(), theme::normal()),
+        ]));
+      }
+      lines.push(Line::from(""));
+    }
+    let alternatives = state.alternatives(&mv.from);
+    if !alternatives.is_empty() {
+      lines.push(Line::from(Span::styled(
+        "  ALSO FITS",
+        theme::label(),
+      )));
+      for (i, alt) in alternatives.iter().enumerate() {
+        lines.push(Line::from(vec![
+          Span::styled(
+            format!("  {} ", i + 1),
+            theme::value().add_modifier(Modifier::BOLD),
+          ),
+          Span::styled(alt.label.clone(), theme::value()),
+        ]));
+        lines.push(Line::from(vec![
+          Span::styled("    shares ", theme::dim()),
+          Span::styled(alt.shared_tags.join(", "), theme::normal()),
+        ]));
+        if !alt.samples.is_empty() {
+          lines.push(Line::from(vec![
+            Span::styled("    e.g. ", theme::dim()),
+            Span::styled(alt.samples.join(", "), theme::path()),
+          ]));
+        }
+      }
+      lines.push(Line::from(Span::styled(
+        "  press 1-3 to move this file there",
+        theme::dim(),
+      )));
       lines.push(Line::from(""));
     }
     if let Some(info) = state.dupe_info(&mv.from) {

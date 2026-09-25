@@ -81,6 +81,22 @@ areas = [
 
 An empty list (`areas = []`) groups in a single stage with no fixed top level.
 
+### The detail pane
+
+Select a file in the review screen and the right-hand pane shows what Spindle
+knows about it: the model's description and tags, then a **Metadata** table
+read straight from the file. Photos get dimensions, when they were taken (with
+the time of day), the place they were taken if they carry GPS, camera, lens and
+exposure. Video and audio get duration, resolution, codecs and any embedded
+title, artist or recording location (needs `ffprobe`, part of ffmpeg). PDFs get
+page count, title and author; Office documents their title, author and
+creation date; text files line and word counts; archives their entry count.
+Place names come from an offline gazetteer, so nothing leaves your machine.
+
+Below that, **Also fits** lists up to three other groups whose files share tags
+with this one, with the shared tags and a couple of member filenames so you
+can judge without navigating. Press `1`, `2` or `3` to move the file there.
+
 ### Learning from your review
 
 When you rename a group, merge groups, or move files in the review screen and

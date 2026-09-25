@@ -128,6 +128,7 @@ impl ReviewState {
       file_notes,
       banner: None,
       descriptions: HashMap::new(),
+      facts: HashMap::new(),
     };
     state.update_image_preview();
     state
@@ -749,6 +750,117 @@ impl ReviewState {
         }
       }
     }
+  }
+
+  /// Compute (once) the metadata rows for the file under the cursor.
+  pub fn ensure_facts_for_current(&mut self) {
+    let Some(path) = self.current_file_move().map(|m| m.from.clone())
+    else {
+      return;
+    };
+    self
+      .facts
+      .entry(path)
+      .or_insert_with_key(|p| crate::facts::file_facts(p));
+  }
+
+  pub fn facts(&self, path: &Path) -> &[crate::facts::Fact] {
+    self.facts.get(path).map(Vec::as_slice).unwrap_or(&[])
+  }
+
+  /// Up to three other groups this file could join, best first. A
+  /// group qualifies when its members share at least one tag with the
+  /// file; ties break toward a matching category.
+  pub fn alternatives(&self, path: &Path) -> Vec<Alternative> {
+    const MAX: usize = 3;
+    let Some(desc) = self.descriptions.get(path) else {
+      return Vec::new();
+    };
+    let file_tags: HashSet<String> =
+      desc.tags.iter().map(|t| t.to_lowercase()).collect();
+    if file_tags.is_empty() {
+      return Vec::new();
+    }
+    let own_group = self
+      .group_moves
+      .iter()
+      .position(|moves| moves.iter().any(|m| m.from == path));
+
+    let mut scored: Vec<(f64, Alternative)> = Vec::new();
+    for (idx, group) in self.groups.iter().enumerate() {
+      if Some(idx) == own_group || is_system_group(group) {
+        continue;
+      }
+      let members = &self.group_moves[idx];
+      if members.is_empty() {
+        continue;
+      }
+      let mut group_tags: HashSet<String> = HashSet::new();
+      let mut categories: HashMap<&str, usize> = HashMap::new();
+      for m in members {
+        if let Some(d) = self.descriptions.get(&m.from) {
+          group_tags.extend(d.tags.iter().map(|t| t.to_lowercase()));
+          *categories
+            .entry(d.suggested_category.as_str())
+            .or_default() += 1;
+        }
+      }
+      let mut shared: Vec<String> =
+        file_tags.intersection(&group_tags).cloned().collect();
+      if shared.is_empty() {
+        continue;
+      }
+      shared.sort();
+      let union = file_tags.union(&group_tags).count() as f64;
+      let mut score = shared.len() as f64 / union;
+      let dominant =
+        categories.iter().max_by_key(|(_, n)| **n).map(|(c, _)| *c);
+      if dominant == Some(desc.suggested_category.as_str()) {
+        score += 0.25;
+      }
+      let samples = members
+        .iter()
+        .take(2)
+        .filter_map(|m| m.from.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .collect();
+      scored.push((
+        score,
+        Alternative {
+          group_idx: idx,
+          label: group.label.clone(),
+          shared_tags: shared,
+          samples,
+        },
+      ));
+    }
+    scored.sort_by(|a, b| {
+      b.0
+        .partial_cmp(&a.0)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.1.label.cmp(&b.1.label))
+    });
+    scored.into_iter().take(MAX).map(|(_, a)| a).collect()
+  }
+
+  /// Move the file under the cursor to its `n`th (1-based) alternative.
+  pub(crate) fn move_current_file_to_alternative(
+    &mut self,
+    n: usize,
+  ) {
+    let Some(path) = self.current_file_move().map(|m| m.from.clone())
+    else {
+      return;
+    };
+    let alternatives = self.alternatives(&path);
+    let Some(alt) =
+      n.checked_sub(1).and_then(|i| alternatives.get(i))
+    else {
+      return;
+    };
+    let dest_idx = alt.group_idx;
+    self.clear_marks();
+    self.move_marked_to_group(dest_idx);
   }
 
   pub fn move_target_groups(&self) -> Vec<(usize, &FileGroup)> {
