@@ -323,7 +323,13 @@ pub fn ffprobe_facts(json: &serde_json::Value, out: &mut Vec<Fact>) {
   ] {
     if let Some(v) = tags[key].as_str() {
       let v = if key == "creation_time" {
-        v.replace('T', " ").trim_end_matches('Z').to_string()
+        let v = v.replace('T', " ");
+        let v = v.trim_end_matches('Z');
+        // Drop fractional seconds: "10:00:00.000000" → "10:00:00".
+        v.split_once('.')
+          .map(|(whole, _)| whole)
+          .unwrap_or(v)
+          .to_string()
       } else {
         v.to_string()
       };
@@ -673,10 +679,7 @@ mod tests {
     assert_eq!(row(&facts, "Video"), Some("1920 × 1080 @ 30 fps"));
     assert_eq!(row(&facts, "Audio"), Some("aac, 48000 Hz, stereo"));
     assert_eq!(row(&facts, "Title"), Some("Ep 12"));
-    assert_eq!(
-      row(&facts, "Recorded"),
-      Some("2024-05-01 10:00:00.000000")
-    );
+    assert_eq!(row(&facts, "Recorded"), Some("2024-05-01 10:00:00"));
   }
 
   #[test]
