@@ -16,9 +16,10 @@ use spindle::pipeline::{self, PipelineConfig, PipelineEvent};
 
 /// Minimum composite score. Raised as grouping improves; a change
 /// that drops below it is a regression.
-const FLOOR: f64 = 0.85;
-/// Floor for the large fixture; raised once a baseline is recorded.
-const LARGE_FLOOR: f64 = 0.80;
+const FLOOR: f64 = 0.90;
+/// Floor for the large fixture. Fresh samples on 2026-09-25 ranged
+/// 0.915 to 0.946.
+const LARGE_FLOOR: f64 = 0.85;
 /// Floors for the second-run fixture: composite, and the share of files
 /// whose folder already existed that landed under exactly that label.
 const SECOND_RUN_FLOOR: f64 = 0.85;
