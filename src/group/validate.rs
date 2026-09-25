@@ -4,7 +4,7 @@
 //! label, lone-file leaf folders, and over-deep trees. Fixing those in
 //! Rust is cheaper and more reliable than pleading in the prompt.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::model::ProposedGroup;
 
@@ -133,6 +133,7 @@ pub fn validate_groups(
 
   let mut out = merge_by_key(work, &mut n.merged);
   out = merge_siblings(out, &mut n.merged);
+  out = fold_children_into_singleton_parent(out, &mut n.merged);
 
   let mut collapsed_any = false;
   for g in &mut out {
@@ -207,6 +208,81 @@ fn key(label: &str) -> String {
     .map(normalize_segment)
     .collect::<Vec<_>>()
     .join("/")
+}
+
+/// A lone file left at `Health/Fitness` beside `Health/Fitness/Marathon
+/// Training` means the model could not narrow it, so the child's extra
+/// level is not shared. Fold every group whose label extends a
+/// single-member label of depth two or more into that parent, under the
+/// parent's label. Depth-one parents are left alone: folding
+/// `Reference/Programming/Python` into a bare `Reference` would be
+/// worse. Skipped when the result would exceed [`MAX_SIBLING_MERGE`].
+fn fold_children_into_singleton_parent(
+  groups: Vec<ProposedGroup>,
+  merged: &mut usize,
+) -> Vec<ProposedGroup> {
+  let keys: Vec<String> =
+    groups.iter().map(|g| key(&g.label)).collect();
+  // parent position → child positions
+  let mut into: HashMap<usize, Vec<usize>> = HashMap::new();
+  let mut taken: HashSet<usize> = HashSet::new();
+  for (pos, g) in groups.iter().enumerate() {
+    if g.member_indices.len() != 1
+      || is_system_label(&g.label)
+      || depth(&g.label) < 2
+      || taken.contains(&pos)
+    {
+      continue;
+    }
+    let prefix = format!("{}/", keys[pos]);
+    let children: Vec<usize> = (0..groups.len())
+      .filter(|&c| {
+        c != pos
+          && !taken.contains(&c)
+          && keys[c].starts_with(&prefix)
+      })
+      .collect();
+    if children.is_empty() {
+      continue;
+    }
+    let total: usize = 1
+      + children
+        .iter()
+        .map(|&c| groups[c].member_indices.len())
+        .sum::<usize>();
+    if total > MAX_SIBLING_MERGE {
+      continue;
+    }
+    taken.insert(pos);
+    taken.extend(children.iter().copied());
+    into.insert(pos, children);
+  }
+
+  let absorbed: HashSet<usize> =
+    into.values().flatten().copied().collect();
+  let mut slots: Vec<Option<ProposedGroup>> =
+    groups.into_iter().map(Some).collect();
+  let mut out = Vec::with_capacity(slots.len());
+  for pos in 0..slots.len() {
+    if absorbed.contains(&pos) {
+      continue;
+    }
+    let Some(mut g) = slots[pos].take() else {
+      continue;
+    };
+    if let Some(children) = into.remove(&pos) {
+      for c in children {
+        if let Some(child) = slots[c].take() {
+          g.member_indices.extend(child.member_indices);
+          g.member_destinations.extend(child.member_destinations);
+          g.member_notes.extend(child.member_notes);
+          *merged += 1;
+        }
+      }
+    }
+    out.push(g);
+  }
+  out
 }
 
 /// Fold groups whose labels agree after normalisation into the first
@@ -686,6 +762,63 @@ mod tests {
     let (out, n) = validate_groups(input.clone());
     assert_eq!(labels(&out), labels(&input));
     assert_eq!(n.merged, 0);
+  }
+
+  #[test]
+  fn a_child_folds_into_its_singleton_parent() {
+    let input = vec![
+      g("Health/Fitness", &[0]),
+      g("Health/Fitness/Marathon Training 2024", &[1, 2]),
+      g("Health/Medical Records", &[3, 4]),
+    ];
+    let (out, n) = validate_groups(input);
+    assert_eq!(
+      labels(&out),
+      vec!["Health/Fitness", "Health/Medical Records"]
+    );
+    assert_eq!(out[0].member_indices, vec![0, 1, 2]);
+    assert_eq!(n.merged, 1);
+    assert_eq!(n.collapsed, 0);
+  }
+
+  #[test]
+  fn a_bare_area_singleton_does_not_swallow_its_children() {
+    let input = vec![
+      g("Reference", &[0]),
+      g("Reference/Programming/Python", &[1, 2]),
+      g("Reference/Programming/Rust", &[3, 4]),
+    ];
+    let (out, n) = validate_groups(input.clone());
+    assert_eq!(labels(&out), labels(&input));
+    assert_eq!(n.merged, 0);
+  }
+
+  #[test]
+  fn a_parent_with_two_files_keeps_its_children_separate() {
+    let input = vec![
+      g("Health/Fitness", &[0, 5]),
+      g("Health/Fitness/Marathon Training 2024", &[1, 2]),
+    ];
+    let (out, n) = validate_groups(input.clone());
+    assert_eq!(labels(&out), labels(&input));
+    assert_eq!(n.merged, 0);
+  }
+
+  #[test]
+  fn folding_into_a_singleton_parent_respects_the_size_cap() {
+    let many: Vec<usize> = (1..=40).collect();
+    let input = vec![
+      g("Health/Fitness", &[0]),
+      g("Health/Fitness/Marathon Training 2024", &many),
+    ];
+    let (out, n) = validate_groups(input);
+    // Not folded; the lone parent then collapses a level as usual.
+    assert_eq!(
+      labels(&out),
+      vec!["Health", "Health/Fitness/Marathon Training 2024"]
+    );
+    assert_eq!(n.merged, 0);
+    assert_eq!(n.collapsed, 1);
   }
 
   #[test]
