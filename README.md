@@ -67,8 +67,8 @@ or set `base_url` under `[ai]` in the config file.
 
 Grouping runs in two stages: every file is first routed to one of your
 top-level areas, then grouped into sub-folders within that area. The default
-areas are Work, Personal, Finance, Legal, Health, Photos, Media, Software and
-Reference. Override them under `[taxonomy]`:
+areas are Work, Personal, Finance, Legal, Health, Photos, Private, Media,
+Software and Reference. Override them under `[taxonomy]`:
 
 ```toml
 [taxonomy]
@@ -80,6 +80,12 @@ areas = [
 ```
 
 An empty list (`areas = []`) groups in a single stage with no fixed top level.
+
+Nudity and intimate content are described plainly, tagged `explicit` and
+`private`, and routed to **Private**, never alongside family or trip photos.
+When the model declines to describe an image at all, the file is filed as
+"sensitive, declined to describe" and still lands in Private for you to
+review, rather than falling back to a guess from the filename.
 
 ### The detail pane
 

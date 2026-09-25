@@ -44,6 +44,11 @@ pub fn default_areas() -> Vec<Area> {
        belong with that trip or pet instead",
     ),
     Area::new(
+      "Private",
+      "nudity, intimate or explicit photos and videos, and anything \
+       flagged sensitive; never mixed with family or trip photos",
+    ),
+    Area::new(
       "Media",
       "music, podcasts, movies, ebooks for consumption",
     ),
