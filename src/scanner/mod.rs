@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -99,11 +99,13 @@ pub fn scan_directories_filtered(
 ) -> Result<Vec<ScannedFile>> {
   let mut all_files = Vec::new();
   let mut seen_paths = std::collections::HashSet::new();
+  let mut missing: Vec<PathBuf> = Vec::new();
 
   for path in paths {
     let path = path.as_ref();
     if !path.exists() {
       tracing::warn!(path = %path.display(), "Skipping nonexistent directory");
+      missing.push(path.to_path_buf());
       continue;
     }
 
@@ -130,7 +132,46 @@ pub fn scan_directories_filtered(
     }
   }
 
+  // One missing directory among several is a warning; when none of them
+  // exist there is nothing to scan and the user needs to know why.
+  if !missing.is_empty() && missing.len() == paths.len() {
+    anyhow::bail!("{}", missing_dirs_message(&missing));
+  }
+
   Ok(all_files)
+}
+
+/// Error text for a run where every target directory is missing. Names
+/// each path and, when the pieces look like one path the shell split at
+/// a space, shows the quoted form to use instead.
+pub fn missing_dirs_message(missing: &[PathBuf]) -> String {
+  let mut msg = String::from("None of the target directories exist:");
+  for p in missing {
+    msg.push_str(&format!("\n  {}", p.display()));
+  }
+  if let Some(joined) = split_path_hint(missing) {
+    msg.push_str(&format!(
+      "\n\nThey look like one path split at a space. Quote it:\n  spindle \"{}\"",
+      joined.display()
+    ));
+  }
+  msg
+}
+
+/// When the missing paths, joined back together with spaces, name a
+/// directory that does exist, the shell most likely split an unquoted
+/// path. Returns that directory.
+pub fn split_path_hint(missing: &[PathBuf]) -> Option<PathBuf> {
+  if missing.len() < 2 {
+    return None;
+  }
+  let joined = missing
+    .iter()
+    .map(|p| p.to_string_lossy().into_owned())
+    .collect::<Vec<_>>()
+    .join(" ");
+  let joined = PathBuf::from(joined);
+  joined.is_dir().then_some(joined)
 }
 
 fn detect_file_type(path: &Path) -> FileType {
@@ -337,6 +378,34 @@ mod tests {
     let results = scan_directories(&[dir.path(), fake]).unwrap();
 
     assert_eq!(results.len(), 1);
+  }
+
+  #[test]
+  fn all_dirs_missing_is_an_error_naming_them() {
+    let a = Path::new("/nonexistent/one");
+    let b = Path::new("/nonexistent/two");
+
+    let err = scan_directories(&[a, b]).unwrap_err().to_string();
+
+    assert!(err.contains("None of the target directories exist"));
+    assert!(err.contains("/nonexistent/one"));
+    assert!(err.contains("/nonexistent/two"));
+    assert!(!err.contains("Quote it"));
+  }
+
+  #[test]
+  fn unquoted_path_with_space_gets_a_quoting_hint() {
+    let dir = TempDir::new().unwrap();
+    let spaced = dir.path().join("old photos");
+    fs::create_dir(&spaced).unwrap();
+    let first = dir.path().join("old");
+    let second = PathBuf::from("photos");
+
+    let err =
+      scan_directories(&[first, second]).unwrap_err().to_string();
+
+    assert!(err.contains("split at a space"));
+    assert!(err.contains(&format!("\"{}\"", spaced.display())));
   }
 
   #[test]
