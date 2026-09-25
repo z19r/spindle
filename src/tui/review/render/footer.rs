@@ -121,6 +121,7 @@ pub(crate) fn key_table(
     k.extend([
       ("v", "mark"),
       ("m", "move"),
+      ("1-3", "move to also-fits"),
       ("n", "new group"),
       ("d", "remove"),
       ("D", "diff with copy"),

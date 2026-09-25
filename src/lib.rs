@@ -5,6 +5,7 @@ pub mod corrections;
 pub mod cost;
 pub mod eval;
 pub mod executor;
+pub mod facts;
 pub mod fingerprint;
 pub mod group;
 pub mod ledger;

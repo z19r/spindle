@@ -148,6 +148,14 @@ impl ReviewState {
         self.enter_move_to_group();
       }
 
+      KeyCode::Char(c @ '1'..='3')
+        if self.focus == Pane::Files
+          && self.review_mode == ReviewMode::Organize =>
+      {
+        let n = c.to_digit(10).unwrap_or(0) as usize;
+        self.move_current_file_to_alternative(n);
+      }
+
       KeyCode::Char('n')
         if self.focus == Pane::Files
           && self.review_mode == ReviewMode::Organize =>
@@ -439,6 +447,16 @@ impl ReviewState {
       return;
     }
     let dest_idx = targets[cursor].0;
+    self.move_marked_to_group(dest_idx);
+  }
+
+  /// Move the marked files (or the one under the cursor) of the
+  /// selected group into `dest_idx`, then leave move mode.
+  pub(crate) fn move_marked_to_group(&mut self, dest_idx: usize) {
+    if dest_idx >= self.groups.len() || dest_idx == self.selected {
+      self.mode = Mode::Normal;
+      return;
+    }
     let dest_group_id = self.groups[dest_idx].id;
     let dest_suggested = self.groups[dest_idx].suggested_path.clone();
 
