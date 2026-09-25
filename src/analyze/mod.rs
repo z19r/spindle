@@ -1216,6 +1216,9 @@ async fn analyze_video(
   let frames = match crate::video::extract_keyframes(
     &file.scanned.path,
     MAX_KEYFRAMES,
+    // `analyze_batch` runs `max_concurrent` of these at once; between
+    // them they should ask for about one thread per core, not one each.
+    crate::video::thread_budget(options.max_concurrent),
   )
   .await
   {

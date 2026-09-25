@@ -45,7 +45,12 @@ pub fn keyframe_phash(path: &Path) -> Option<Vec<u8>> {
       .unwrap_or_default()
   ));
 
+  // One of these runs per rayon worker, i.e. one per core. Uncapped,
+  // each child would also frame-thread across every core.
+  let threads =
+    crate::video::thread_budget(rayon::current_num_threads());
   let status = std::process::Command::new("ffmpeg")
+    .args(["-threads", &threads.to_string()])
     .args(["-y", "-ss", "1", "-i"])
     .arg(path)
     .args(["-frames:v", "1", "-vf", "scale=256:-1"])
