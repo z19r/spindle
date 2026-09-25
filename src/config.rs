@@ -324,8 +324,12 @@ fn default_max_concurrent() -> usize {
   5
 }
 
+/// Per-run cap on files sent for description. A phone's photo export
+/// alone runs to several hundred files, so the cap is a cost guard for
+/// very large folders, not a typical-run limit. `--max-cost` is the
+/// finer control.
 fn default_max_files() -> usize {
-  500
+  2000
 }
 
 fn default_skip_size() -> u64 {
@@ -619,7 +623,7 @@ near_duplicate_threshold = 12
 
     assert!(ai.api_key.is_none());
     assert_eq!(ai.max_concurrent_requests, 5);
-    assert_eq!(ai.max_files_to_analyze, 500);
+    assert_eq!(ai.max_files_to_analyze, 2000);
     assert_eq!(ai.skip_files_larger_than_mb, 100);
     assert!(ai.cache_responses);
   }

@@ -204,8 +204,11 @@ async fn main() -> Result<()> {
     } else {
       " · audio near-dupes off (install chromaprint)"
     };
+  let capped_note = capped_files_note(
+    plan.groups.iter().flat_map(|g| g.member_notes.iter()),
+  );
   let summary = format!(
-    "{} groups · {} moves · {} duplicates ({} reclaimable){spent}{audio_note}",
+    "{} groups · {} moves · {} duplicates ({} reclaimable){spent}{audio_note}{capped_note}",
     plan.stats.groups_created,
     plan.moves.len(),
     plan.stats.duplicates_found,
@@ -490,6 +493,22 @@ fn run_purge(older_than_days: Option<u64>) -> Result<()> {
     format_bytes(report.bytes_freed),
   );
   Ok(())
+}
+
+/// Files the analysis cap kept away from the model sit in Unsorted with
+/// a "beyond --max-files" note. Say so in the summary, since the fix
+/// (a bigger cap) is a flag the user has to pass.
+fn capped_files_note<'a>(
+  notes: impl Iterator<Item = &'a spindle::model::MemberNote>,
+) -> String {
+  let capped = notes
+    .filter(|n| n.note.contains("beyond --max-files"))
+    .count();
+  if capped == 0 {
+    String::new()
+  } else {
+    format!(" · {capped} not analysed (raise --max-files)")
+  }
 }
 
 fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
@@ -908,5 +927,32 @@ fn format_bytes(bytes: u64) -> String {
     format!("{:.1} KB", bytes as f64 / 1_000.0)
   } else {
     format!("{} B", bytes)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use spindle::model::MemberNote;
+
+  fn note(index: usize, note: &str) -> MemberNote {
+    MemberNote {
+      index,
+      note: note.to_string(),
+    }
+  }
+
+  #[test]
+  fn capped_files_note_counts_only_the_cap_reason() {
+    let notes = [
+      note(0, "not analyzed: beyond --max-files (500)"),
+      note(1, "not analyzed: beyond --max-files (500)"),
+      note(2, "not analyzed: larger than 100 MB"),
+    ];
+    assert_eq!(
+      capped_files_note(notes.iter()),
+      " · 2 not analysed (raise --max-files)"
+    );
+    assert_eq!(capped_files_note(std::iter::empty()), "");
   }
 }
