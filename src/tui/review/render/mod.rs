@@ -104,42 +104,46 @@ pub(crate) fn panel_block<'a>(
 pub(crate) fn render_middle_panel(
   frame: &mut Frame,
   area: Rect,
-  state: &ReviewState,
+  state: &mut ReviewState,
 ) {
-  match &state.mode {
+  match state.mode.clone() {
     Mode::Normal => render_file_list(frame, area, state),
     Mode::MoveToGroup { cursor } => render_group_picker(
       frame,
       area,
       state,
-      *cursor,
+      cursor,
       "Move to\u{2026}",
     ),
     Mode::MergeInto { cursor } => render_group_picker(
       frame,
       area,
       state,
-      *cursor,
+      cursor,
       "Merge into\u{2026}",
     ),
-    Mode::NewGroup { input, cursor_pos } => render_new_group_input(
+    Mode::NewGroup {
+      ref input,
+      cursor_pos,
+    } => render_new_group_input(
       frame,
       area,
       state,
       input,
-      *cursor_pos,
+      cursor_pos,
       "New Group",
     ),
-    Mode::RenameGroup { input, cursor_pos } => {
-      render_new_group_input(
-        frame,
-        area,
-        state,
-        input,
-        *cursor_pos,
-        "Rename Group",
-      )
-    }
+    Mode::RenameGroup {
+      ref input,
+      cursor_pos,
+    } => render_new_group_input(
+      frame,
+      area,
+      state,
+      input,
+      cursor_pos,
+      "Rename Group",
+    ),
     Mode::ConfirmRemove => render_confirm_remove(frame, area, state),
     Mode::DiffView { .. }
     | Mode::Preview

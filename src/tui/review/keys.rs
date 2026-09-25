@@ -4,6 +4,12 @@ use super::*;
 
 impl ReviewState {
   pub fn handle_key(&mut self, code: KeyCode) {
+    // The detail pane has no cursor of its own; it shows whatever the
+    // group and file cursors point at. Any key that moves them starts
+    // the pane back at the top instead of inheriting an offset that
+    // meant something for the previous item.
+    let cursor_before =
+      (self.selected, self.file_selected, self.focus);
     match &self.mode {
       Mode::Normal => self.handle_normal_key(code),
       Mode::MoveToGroup { .. } => self.handle_move_to_group_key(code),
@@ -16,6 +22,11 @@ impl ReviewState {
       Mode::DiffView { .. } => self.handle_diff_view_key(code),
       Mode::Preview => self.handle_preview_key(code),
       Mode::Help => self.mode = Mode::Normal,
+    }
+    if (self.selected, self.file_selected, self.focus)
+      != cursor_before
+    {
+      self.detail_scroll = 0;
     }
     self.update_image_preview();
   }
@@ -105,6 +116,11 @@ impl ReviewState {
       {
         self.toggle_file_mark();
       }
+
+      // The detail pane has no cursor of its own, so it scrolls with
+      // the same keys the preview and diff modals use.
+      KeyCode::Char('[') => self.scroll_detail(-3),
+      KeyCode::Char(']') => self.scroll_detail(3),
 
       KeyCode::Char('x') => {
         self.mode = Mode::ConfirmExecute;

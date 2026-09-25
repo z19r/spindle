@@ -68,13 +68,17 @@ pub(crate) fn render_detail(
       frame.render_widget(loading, split[0]);
     }
 
+    let scroll = state.clamp_detail_scroll(&lines, split[1]);
     let detail = Paragraph::new(lines)
-      .wrap(ratatui::widgets::Wrap { trim: true });
+      .wrap(ratatui::widgets::Wrap { trim: true })
+      .scroll((scroll, 0));
     frame.render_widget(detail, split[1]);
   } else {
+    let scroll = state.clamp_detail_scroll(&lines, block.inner(area));
     let detail = Paragraph::new(lines)
       .block(block)
-      .wrap(ratatui::widgets::Wrap { trim: true });
+      .wrap(ratatui::widgets::Wrap { trim: true })
+      .scroll((scroll, 0));
     frame.render_widget(detail, area);
   }
 }

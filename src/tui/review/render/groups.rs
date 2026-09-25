@@ -71,7 +71,7 @@ pub(crate) fn compact_label(label: &str, width: usize) -> String {
 pub(crate) fn render_group_list(
   frame: &mut Frame,
   area: Rect,
-  state: &ReviewState,
+  state: &mut ReviewState,
 ) {
   let focused =
     state.focus == Pane::Groups && state.mode == Mode::Normal;
@@ -134,13 +134,18 @@ pub(crate) fn render_group_list(
     .collect();
 
   let list = List::new(items).block(block);
-  frame.render_widget(list, area);
+  state.group_list.select(if state.groups.is_empty() {
+    None
+  } else {
+    Some(state.selected)
+  });
+  frame.render_stateful_widget(list, area, &mut state.group_list);
 }
 
 pub(crate) fn render_group_picker(
   frame: &mut Frame,
   area: Rect,
-  state: &ReviewState,
+  state: &mut ReviewState,
   cursor: usize,
   title: &str,
 ) {
@@ -191,15 +196,17 @@ pub(crate) fn render_group_picker(
           if is_cursor { " \u{25b8} " } else { "   " },
           theme::label(),
         ),
-        Span::styled(&group.label, label_style),
+        Span::styled(group.label.clone(), label_style),
         Span::styled(format!(" ({file_count})"), theme::dim()),
       ]))
       .style(line_style)
     })
     .collect();
 
+  drop(targets);
   let list = List::new(items).block(block);
-  frame.render_widget(list, area);
+  state.picker_list.select(Some(cursor));
+  frame.render_stateful_widget(list, area, &mut state.picker_list);
 }
 
 pub(crate) fn render_new_group_input(

@@ -1436,3 +1436,148 @@ fn detail_pane_lists_metadata_and_alternatives() {
   assert!(text.contains("Cats"), "{text}");
   assert!(text.contains("shares cat"), "{text}");
 }
+
+// --- Panels scroll to follow the cursor ---
+
+/// `n` groups each holding `per_group` files, enough to overflow any
+/// terminal the review screen is drawn into.
+fn make_tall_state(n: usize, per_group: usize) -> ReviewState {
+  let groups: Vec<FileGroup> = (0..n)
+    .map(|i| FileGroup {
+      id: i,
+      label: format!("Group{i}"),
+      rationale: "A rationale".to_string(),
+      members: (0..per_group).map(|j| i * per_group + j).collect(),
+      member_destinations: vec![],
+      suggested_path: PathBuf::from(format!("g{i}")),
+      member_notes: vec![],
+    })
+    .collect();
+  let moves: Vec<FileMove> = (0..n)
+    .flat_map(|i| {
+      (0..per_group).map(move |j| FileMove {
+        from: PathBuf::from(format!("/dl/g{i}f{j}.jpg")),
+        to: PathBuf::from(format!("/out/g{i}/g{i}f{j}.jpg")),
+        group_id: i,
+      })
+    })
+    .collect();
+  ReviewState::new(
+    groups,
+    moves,
+    PathBuf::from("/out"),
+    None,
+    ReviewMode::Organize,
+  )
+}
+
+fn draw(state: &mut ReviewState, w: u16, h: u16) -> String {
+  let backend = ratatui::backend::TestBackend::new(w, h);
+  let mut term = ratatui::Terminal::new(backend).unwrap();
+  term.draw(|f| render(f, state)).unwrap();
+  term.backend().to_string()
+}
+
+/// Only the Groups pane, so "Group30" in the Detail pane cannot
+/// satisfy an assertion about the list.
+fn groups_pane(dump: &str) -> String {
+  dump
+    .lines()
+    .map(|l| l.chars().take(30).collect::<String>())
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+#[test]
+fn group_list_follows_cursor_past_the_viewport() {
+  let mut state = make_tall_state(40, 1);
+  for _ in 0..30 {
+    state.handle_key(KeyCode::Char('j'));
+  }
+  let pane = groups_pane(&draw(&mut state, 100, 24));
+  assert!(pane.contains("Group30"), "cursor off screen:\n{pane}");
+  assert!(
+    !pane.contains("Group0 "),
+    "viewport never scrolled:\n{pane}"
+  );
+}
+
+#[test]
+fn group_list_scrolls_back_up_to_the_cursor() {
+  let mut state = make_tall_state(40, 1);
+  for _ in 0..30 {
+    state.handle_key(KeyCode::Char('j'));
+  }
+  draw(&mut state, 100, 24);
+  for _ in 0..30 {
+    state.handle_key(KeyCode::Char('k'));
+  }
+  let pane = groups_pane(&draw(&mut state, 100, 24));
+  assert!(pane.contains("Group0 "), "did not scroll back:\n{pane}");
+}
+
+#[test]
+fn file_list_follows_cursor_past_the_viewport() {
+  let mut state = make_tall_state(1, 40);
+  state.handle_key(KeyCode::Tab);
+  for _ in 0..30 {
+    state.handle_key(KeyCode::Char('j'));
+  }
+  let dump = draw(&mut state, 120, 24);
+  assert!(dump.contains("g0f30.jpg"), "cursor off screen:\n{dump}");
+  assert!(!dump.contains("g0f0.jpg"), "never scrolled:\n{dump}");
+}
+
+#[test]
+fn group_picker_follows_cursor_past_the_viewport() {
+  let mut state = make_tall_state(40, 1);
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Char('v'));
+  state.handle_key(KeyCode::Char('m'));
+  for _ in 0..30 {
+    state.handle_key(KeyCode::Char('j'));
+  }
+  let dump = draw(&mut state, 120, 24);
+  assert!(dump.contains("Group31"), "cursor off screen:\n{dump}");
+}
+
+#[test]
+fn detail_pane_scrolls_and_clamps() {
+  let mut state = make_tall_state(1, 3);
+  let top = draw(&mut state, 120, 16);
+  state.handle_key(KeyCode::Char(']'));
+  let scrolled = draw(&mut state, 120, 16);
+  assert_ne!(top, scrolled, "] did not scroll the detail pane");
+
+  // Far past the end still shows content, not an empty pane.
+  for _ in 0..200 {
+    state.handle_key(KeyCode::Char(']'));
+  }
+  let bottom = draw(&mut state, 120, 16);
+  assert!(
+    bottom.contains("Files") || bottom.contains("Rationale"),
+    "scrolled past the content:\n{bottom}"
+  );
+
+  for _ in 0..200 {
+    state.handle_key(KeyCode::Char('['));
+  }
+  assert_eq!(draw(&mut state, 120, 16), top, "did not return to top");
+}
+
+#[test]
+fn detail_scroll_resets_when_the_cursor_moves() {
+  let mut state = make_tall_state(4, 3);
+  let top = draw(&mut state, 120, 16);
+  for _ in 0..3 {
+    state.handle_key(KeyCode::Char(']'));
+  }
+  draw(&mut state, 120, 16);
+  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Char('k'));
+  assert_eq!(
+    draw(&mut state, 120, 16),
+    top,
+    "detail kept the previous item's scroll offset"
+  );
+}

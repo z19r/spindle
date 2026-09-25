@@ -129,9 +129,56 @@ impl ReviewState {
       banner: None,
       descriptions: HashMap::new(),
       facts: HashMap::new(),
+      group_list: ListState::default(),
+      file_list: ListState::default(),
+      picker_list: ListState::default(),
+      detail_scroll: 0,
     };
     state.update_image_preview();
     state
+  }
+
+  /// Hold the detail pane's scroll inside its content: the last screen
+  /// of text is as far down as it goes, and short content never
+  /// scrolls. `lines` are the unwrapped rows; `area` is where they
+  /// land, so the wrapped height is measured at the real width.
+  pub(crate) fn clamp_detail_scroll(
+    &mut self,
+    lines: &[Line<'static>],
+    area: Rect,
+  ) -> u16 {
+    let width = area.width as usize;
+    let height = area.height as usize;
+    if width == 0 || height == 0 {
+      self.detail_scroll = 0;
+      return 0;
+    }
+    let wrapped: usize = lines
+      .iter()
+      .map(|line| {
+        let text: String =
+          line.spans.iter().map(|s| s.content.as_ref()).collect();
+        if text.trim().is_empty() {
+          1
+        } else {
+          crate::tui::review::render::wrap_text(text.trim(), width)
+            .len()
+        }
+      })
+      .sum();
+    let max = wrapped.saturating_sub(height) as u16;
+    self.detail_scroll = self.detail_scroll.min(max);
+    self.detail_scroll
+  }
+
+  /// Move the detail pane by `delta` rows. The clamp happens at render
+  /// time, where the pane's width and height are known.
+  pub(crate) fn scroll_detail(&mut self, delta: i16) {
+    self.detail_scroll = if delta < 0 {
+      self.detail_scroll.saturating_sub(delta.unsigned_abs())
+    } else {
+      self.detail_scroll.saturating_add(delta as u16)
+    };
   }
 
   /// Attach what the model said about each file so the detail pane can
