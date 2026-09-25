@@ -141,7 +141,13 @@ pub async fn run<P: AiProvider>(
   let scanned =
     scan_directories_filtered(&config.target_dirs, &scan_opts)?;
   if scanned.is_empty() {
-    anyhow::bail!("No supported files found in target directories");
+    let dirs = config
+      .target_dirs
+      .iter()
+      .map(|d| d.display().to_string())
+      .collect::<Vec<_>>()
+      .join(", ");
+    anyhow::bail!("No supported files found in {dirs}");
   }
 
   let _ = tx
