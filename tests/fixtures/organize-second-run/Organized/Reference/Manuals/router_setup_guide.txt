@@ -1,0 +1,1 @@
+Netgear Nighthawk setup guide — admin at 192.168.1.1, WPA3, guest network, firmware update steps.

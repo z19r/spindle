@@ -19,6 +19,10 @@ use spindle::pipeline::{self, PipelineConfig, PipelineEvent};
 const FLOOR: f64 = 0.85;
 /// Floor for the large fixture; raised once a baseline is recorded.
 const LARGE_FLOOR: f64 = 0.80;
+/// Floors for the second-run fixture: composite, and the share of files
+/// whose folder already existed that landed under exactly that label.
+const SECOND_RUN_FLOOR: f64 = 0.85;
+const REUSE_FLOOR: f64 = 0.75;
 
 fn fixtures_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -71,9 +75,56 @@ fn print_groups(placements: &[Placement], expected: &ExpectedSet) {
   }
 }
 
+/// Copy the fixture's `Organized/` tree into `output` and write a ledger
+/// that records every file in it under the folder's label, as a previous
+/// run would have. Returns the ledger path.
+fn seed_previous_run(fixture: &Path, output: &Path) -> PathBuf {
+  use spindle::ledger::{Ledger, LedgerEntry};
+  let organized = fixture.join("Organized");
+  let mut ledger = Ledger::default();
+  for entry in walkdir::WalkDir::new(&organized)
+    .into_iter()
+    .filter_map(Result::ok)
+    .filter(|e| e.file_type().is_file())
+  {
+    let rel = entry
+      .path()
+      .strip_prefix(&organized)
+      .expect("under Organized");
+    let label = rel
+      .parent()
+      .expect("file inside a folder")
+      .to_string_lossy()
+      .replace('\\', "/");
+    let dest = output.join(rel);
+    std::fs::create_dir_all(dest.parent().unwrap()).expect("mkdir");
+    std::fs::copy(entry.path(), &dest).expect("copy organized file");
+    let bytes = std::fs::read(&dest).expect("read organized file");
+    ledger.record(LedgerEntry {
+      source_path: dest.clone(),
+      dest_path: dest,
+      blake3_hex: blake3::hash(&bytes).to_hex().to_string(),
+      group_label: label,
+      organized_at: "2026-09-01T00:00:00Z".to_string(),
+    });
+  }
+  let path = output.join("ledger.json");
+  ledger.save(&path).expect("save ledger");
+  path
+}
+
 /// Run one fixture through the real pipeline and return its report.
-/// `None` when the eval is not enabled in this environment.
 async fn eval_fixture(name: &str) -> Option<eval::EvalReport> {
+  eval_fixture_with(name, false).await
+}
+
+/// `second_run` seeds the output directory and ledger from the
+/// fixture's `Organized/` tree first, so existing folders are offered
+/// to the model for reuse.
+async fn eval_fixture_with(
+  name: &str,
+  second_run: bool,
+) -> Option<eval::EvalReport> {
   dotenvy::dotenv().ok();
   let _ = tracing_subscriber::fmt()
     .with_env_filter(
@@ -98,6 +149,8 @@ async fn eval_fixture(name: &str) -> Option<eval::EvalReport> {
   let output = tempfile::tempdir().expect("tempdir");
   let cache_dir =
     Path::new(env!("CARGO_MANIFEST_DIR")).join("target/eval-cache");
+  let ledger_path =
+    second_run.then(|| seed_previous_run(&root, output.path()));
   let ai = AiConfig::default();
 
   let config = PipelineConfig {
@@ -120,8 +173,8 @@ async fn eval_fixture(name: &str) -> Option<eval::EvalReport> {
     introspect_archives: true,
     max_archive_files: 20,
     max_archive_file_size_mb: 50,
-    use_organized_context: false,
-    ledger_path: None,
+    use_organized_context: second_run,
+    ledger_path,
     model: ai.model,
     describe_model: ai.describe_model,
     taxonomy: spindle::model::default_areas(),
@@ -199,5 +252,30 @@ async fn large_fixture_quality_meets_floor() {
     report.composite() >= LARGE_FLOOR,
     "composite {:.3} fell below floor {LARGE_FLOOR:.3}",
     report.composite()
+  );
+}
+
+/// A dozen folders already exist from a previous run (seeded from the
+/// fixture's `Organized/` tree plus a ledger). 27 incoming files belong
+/// in them and 8 need new folders. Measures label reuse as well as the
+/// usual composite.
+#[tokio::test]
+#[ignore = "real API; run via `just eval`"]
+async fn second_run_reuses_existing_folders() {
+  let Some(report) =
+    eval_fixture_with("organize-second-run", true).await
+  else {
+    return;
+  };
+  assert!(
+    report.composite() >= SECOND_RUN_FLOOR,
+    "composite {:.3} fell below floor {SECOND_RUN_FLOOR:.3}",
+    report.composite()
+  );
+  let reuse =
+    report.reuse_rate().expect("fixture marks existing files");
+  assert!(
+    reuse >= REUSE_FLOOR,
+    "label reuse {reuse:.3} fell below floor {REUSE_FLOOR:.3}"
   );
 }

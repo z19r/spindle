@@ -33,6 +33,10 @@ pub struct ExpectedFile {
   /// Other top-level areas a reasonable organizer might pick.
   #[serde(default)]
   pub alt_areas: Vec<String>,
+  /// The expected folder already exists from a previous run, so the
+  /// produced label should match it exactly (label reuse).
+  #[serde(default)]
+  pub existing: bool,
 }
 
 impl ExpectedFile {
@@ -93,6 +97,10 @@ pub struct EvalReport {
   pub pairwise_f1: f64,
   pub top_level_accuracy: f64,
   pub hygiene: Hygiene,
+  /// Files whose expected folder already existed before the run.
+  pub reuse_expected: usize,
+  /// Of those, how many landed under exactly that label.
+  pub reuse_matched: usize,
 }
 
 impl EvalReport {
@@ -101,6 +109,13 @@ impl EvalReport {
       return 1.0;
     }
     self.placed_files as f64 / self.expected_files as f64
+  }
+
+  /// Share of files with a pre-existing folder that were filed under
+  /// exactly that label. `None` when the fixture has no such files.
+  pub fn reuse_rate(&self) -> Option<f64> {
+    (self.reuse_expected > 0)
+      .then(|| self.reuse_matched as f64 / self.reuse_expected as f64)
   }
 
   /// Single number to compare runs: grouping agreement dominates,
@@ -154,6 +169,13 @@ impl std::fmt::Display for EvalReport {
       self.hygiene.singleton_groups,
       self.hygiene.too_deep_groups
     )?;
+    if let Some(rate) = self.reuse_rate() {
+      writeln!(
+        f,
+        "label reuse            {}/{} ({:.3})",
+        self.reuse_matched, self.reuse_expected, rate
+      )?;
+    }
     writeln!(f, "composite              {:.3}", self.composite())
   }
 }
@@ -285,6 +307,15 @@ pub fn score(
     .count();
   let top_level_accuracy = ratio(top_hits, assigned.len());
 
+  let reuse_expected =
+    assigned.iter().filter(|(e, _)| e.existing).count();
+  let reuse_matched = assigned
+    .iter()
+    .filter(|(e, label)| {
+      e.existing && *label == normalize_label(&e.group)
+    })
+    .count();
+
   EvalReport {
     expected_files: expected.files.len(),
     placed_files,
@@ -300,6 +331,8 @@ pub fn score(
       .len(),
     produced_groups: hygiene(actual).total_groups,
     hygiene: hygiene(actual),
+    reuse_expected,
+    reuse_matched,
   }
 }
 
@@ -350,6 +383,55 @@ pub fn hygiene(actual: &[Placement]) -> Hygiene {
 mod tests {
   use super::*;
 
+  fn existing(path: &str, group: &str) -> ExpectedFile {
+    ExpectedFile {
+      existing: true,
+      ..exp(path, group)
+    }
+  }
+
+  fn pl(path: &str, label: &str) -> Placement {
+    Placement {
+      path: path.to_string(),
+      label: label.to_string(),
+    }
+  }
+
+  #[test]
+  fn reuse_rate_counts_exact_label_matches_for_existing_folders() {
+    let expected = ExpectedSet {
+      files: vec![
+        existing("a.txt", "Finance/Bills/Utilities"),
+        existing("b.txt", "Finance/Bills/Utilities"),
+        existing("c.txt", "Personal/Recipes"),
+        exp("d.txt", "Work/Initech/Onboarding"),
+      ],
+    };
+    let actual = vec![
+      pl("a.txt", "Finance/Bills/Utilities"),
+      pl("b.txt", "finance/bills/utilities"),
+      pl("c.txt", "Personal/Recipes/Baking"),
+      pl("d.txt", "Work/Initech/Onboarding"),
+    ];
+    let report = score(&expected, &actual);
+    assert_eq!(report.reuse_expected, 3);
+    assert_eq!(report.reuse_matched, 2);
+    assert!((report.reuse_rate().unwrap() - 2.0 / 3.0).abs() < 1e-9);
+    assert!(report
+      .to_string()
+      .contains("label reuse            2/3"));
+  }
+
+  #[test]
+  fn reuse_rate_is_absent_without_existing_folders() {
+    let expected = ExpectedSet {
+      files: vec![exp("a.txt", "Work/Acme")],
+    };
+    let report = score(&expected, &[pl("a.txt", "Work/Acme")]);
+    assert_eq!(report.reuse_rate(), None);
+    assert!(!report.to_string().contains("label reuse"));
+  }
+
   fn exp(path: &str, group: &str) -> ExpectedFile {
     let area = group.split('/').next().unwrap().to_string();
     ExpectedFile {
@@ -357,6 +439,7 @@ mod tests {
       group: group.to_string(),
       area,
       alt_areas: vec![],
+      existing: false,
     }
   }
 
