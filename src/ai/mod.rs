@@ -1,7 +1,7 @@
 mod claude;
 mod prompts;
 
-pub use claude::ClaudeProvider;
+pub use claude::{ClaudeProvider, Refused};
 pub use prompts::*;
 
 use anyhow::Result;
@@ -124,7 +124,8 @@ pub trait AiProvider: Send + Sync {
   }
 
   /// Assign each file to one of `areas` (stage one of grouping). The
-  /// default cannot route; the pipeline then groups in a single stage.
+  /// default routes nothing, so every file is grouped without an area
+  /// constraint (single stage).
   fn route_files(
     &self,
     files: &[FileSummary],
@@ -132,7 +133,7 @@ pub trait AiProvider: Send + Sync {
   ) -> impl std::future::Future<Output = Result<Vec<RoutedFile>>> + Send
   {
     let _ = (files, areas);
-    async { anyhow::bail!("routing not supported by this provider") }
+    async { Ok(Vec::new()) }
   }
 
   /// Group files already known to belong under `area`; labels must

@@ -10,6 +10,22 @@ pub struct ScanOptions {
   pub type_filter: Vec<FileCategory>,
 }
 
+/// Operating-system droppings that are never the user's files: macOS
+/// AppleDouble resource forks (`._IMG_0001.JPG`), Finder and Explorer
+/// metadata. They have no content worth describing and a `._` copy of
+/// every photo would double the bill.
+pub fn is_junk_file_name(name: &str) -> bool {
+  name.starts_with("._")
+    || matches!(
+      name,
+      ".DS_Store"
+        | "Thumbs.db"
+        | "desktop.ini"
+        | ".localized"
+        | "ehthumbs.db"
+    )
+}
+
 fn is_trash_path(path: &Path) -> bool {
   path.components().any(|c| {
     let s = c.as_os_str().to_string_lossy();
@@ -56,6 +72,13 @@ pub fn scan_directory_opts(
     })
   {
     if !entry.file_type().is_file() {
+      continue;
+    }
+    if entry
+      .file_name()
+      .to_str()
+      .is_some_and(is_junk_file_name)
+    {
       continue;
     }
 
@@ -406,6 +429,23 @@ mod tests {
 
     assert!(err.contains("split at a space"));
     assert!(err.contains(&format!("\"{}\"", spaced.display())));
+  }
+
+  #[test]
+  fn os_metadata_files_are_never_scanned() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("IMG_0001.JPG"), b"real").unwrap();
+    fs::write(dir.path().join("._IMG_0001.JPG"), b"fork").unwrap();
+    fs::write(dir.path().join(".DS_Store"), b"finder").unwrap();
+    fs::write(dir.path().join("Thumbs.db"), b"explorer").unwrap();
+
+    let results = scan_directory(dir.path()).unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert!(results[0].path.ends_with("IMG_0001.JPG"));
+    assert!(
+      is_junk_file_name("._x.mov") && !is_junk_file_name("_x.mov")
+    );
   }
 
   #[test]

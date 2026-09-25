@@ -35,6 +35,10 @@ pub struct DuplicateSet {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemberDestination {
   pub index: usize,
+  /// Filename or sub-path inside the group folder. Empty means "keep
+  /// the original filename", which is what the model is told to do
+  /// unless it has a reason to rename.
+  #[serde(default)]
   pub dest_name: String,
 }
 
