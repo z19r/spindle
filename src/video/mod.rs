@@ -39,6 +39,23 @@ pub async fn check_ffmpeg() -> bool {
     .unwrap_or(false)
 }
 
+/// How many decode threads to hand one ffmpeg child when `concurrency`
+/// of them run at once.
+///
+/// ffmpeg defaults to one thread per core, so N children on an N-core
+/// box between them ask for N² threads. Measured on 16 cores against a
+/// 1080x1920 10-bit HEVC clip, 16 concurrent extractions: uncapped
+/// burns 9.4s of CPU in 0.75s of wall clock, capped at one thread each
+/// it finishes *sooner* (0.49s) for 5.9s of CPU. Oversubscription
+/// costs throughput as well as cores, so aim for roughly one thread
+/// per core across all the children.
+pub fn thread_budget(concurrency: usize) -> usize {
+  let cores = std::thread::available_parallelism()
+    .map(|n| n.get())
+    .unwrap_or(1);
+  (cores / concurrency.max(1)).max(1)
+}
+
 pub async fn get_duration(path: &Path) -> Result<f64> {
   let output = tokio::process::Command::new("ffprobe")
     .args([
@@ -74,13 +91,28 @@ pub async fn get_duration(path: &Path) -> Result<f64> {
 pub async fn extract_frame_at(
   path: &Path,
   timestamp_secs: f64,
+  threads: usize,
 ) -> Result<Vec<u8>> {
+  // Downscale inside ffmpeg, to the same edge the still-image path
+  // uploads. Left alone, a 4K 10-bit source encodes to a 16-bit PNG of
+  // several megabytes that is piped back and base64'd for nothing: the
+  // model never sees more than `MAX_EDGE` either way.
+  let max = crate::analyze::image_prep::MAX_EDGE;
+  let scale = format!(
+    "scale='min({max},iw)':'min({max},ih)'\
+     :force_original_aspect_ratio=decrease"
+  );
   let output = tokio::process::Command::new("ffmpeg")
+    .args(["-threads", &threads.max(1).to_string()])
     .args(["-ss", &format!("{timestamp_secs:.3}"), "-i"])
     .arg(path)
     .args([
       "-frames:v",
       "1",
+      "-vf",
+      scale.as_str(),
+      "-pix_fmt",
+      "rgb24",
       "-f",
       "image2pipe",
       "-vcodec",
@@ -120,6 +152,7 @@ pub async fn extract_frame_at(
 pub async fn extract_keyframes(
   path: &Path,
   max_frames: usize,
+  threads: usize,
 ) -> Result<Vec<ExtractedFrame>> {
   if max_frames == 0 {
     return Ok(vec![]);
@@ -137,7 +170,7 @@ pub async fn extract_keyframes(
   let mut frames = Vec::with_capacity(timestamps.len());
 
   for ts in timestamps {
-    match extract_frame_at(path, ts).await {
+    match extract_frame_at(path, ts, threads).await {
       Ok(png_data) => frames.push(ExtractedFrame {
         png_data,
         timestamp_secs: ts,
@@ -171,6 +204,86 @@ fn distribute_timestamps(duration: f64, count: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn thread_budget_divides_cores_between_children() {
+    let cores = std::thread::available_parallelism()
+      .map(|n| n.get())
+      .unwrap_or(1);
+    // One child gets everything; as many children as cores get one each.
+    assert_eq!(thread_budget(1), cores);
+    assert_eq!(thread_budget(cores), 1);
+    // Never zero, however many children there are.
+    assert_eq!(thread_budget(cores * 4), 1);
+    assert_eq!(thread_budget(0), cores);
+    // Between them, children never ask for more than the machine has.
+    for n in 1..=(cores * 2) {
+      assert!(
+        thread_budget(n) * n <= cores.max(n),
+        "{n} children x {} threads exceeds {cores} cores",
+        thread_budget(n)
+      );
+    }
+  }
+
+  /// A frame comes back scaled to `MAX_EDGE` and 8 bits per channel,
+  /// not as the multi-megabyte 16-bit PNG ffmpeg produces by default.
+  #[tokio::test]
+  async fn extracted_frames_are_capped_at_max_edge_and_8_bit() {
+    if !ffmpeg_available() {
+      eprintln!("ffmpeg not on PATH; skipping");
+      return;
+    }
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("tall.mp4");
+    let status = std::process::Command::new("ffmpeg")
+      .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+      .arg("testsrc2=s=1080x1920:r=10:d=2")
+      .args(["-pix_fmt", "yuv420p"])
+      .arg(&path)
+      .status()
+      .unwrap();
+    assert!(status.success());
+
+    let png = extract_frame_at(&path, 1.0, 1).await.unwrap();
+    let img = image::load_from_memory(&png).unwrap();
+    let max_edge = crate::analyze::image_prep::MAX_EDGE;
+    assert_eq!(
+      img.height(),
+      max_edge,
+      "long edge should be MAX_EDGE"
+    );
+    assert_eq!(img.width(), 882, "aspect ratio should be kept");
+    assert!(
+      matches!(img.color(), image::ColorType::Rgb8),
+      "expected 8-bit RGB, got {:?}",
+      img.color()
+    );
+  }
+
+  /// A source already inside the cap is passed through at its own size
+  /// rather than upscaled.
+  #[tokio::test]
+  async fn small_frames_are_not_upscaled() {
+    if !ffmpeg_available() {
+      eprintln!("ffmpeg not on PATH; skipping");
+      return;
+    }
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("small.mp4");
+    let status = std::process::Command::new("ffmpeg")
+      .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+      .arg("testsrc2=s=320x240:r=10:d=2")
+      .args(["-pix_fmt", "yuv420p"])
+      .arg(&path)
+      .status()
+      .unwrap();
+    assert!(status.success());
+
+    let png = extract_frame_at(&path, 1.0, 1).await.unwrap();
+    let img = image::load_from_memory(&png).unwrap();
+    assert_eq!((img.width(), img.height()), (320, 240));
+  }
 
   #[test]
   fn distribute_timestamps_single_frame() {
