@@ -1,0 +1,209 @@
+# Second-run fixture: Organized/ already holds a dozen folders from a
+# previous run (see tests/eval_grouping.rs, which builds the ledger for
+# them). Files marked existing = true belong in one of those folders and
+# count toward the label-reuse metric.
+
+[[file]]
+path = "Documents/comcast_bill_2024-09.txt"
+group = "Finance/Bills/Utilities"
+area = "Finance"
+existing = true
+
+[[file]]
+path = "Documents/comcast_bill_2024-10.txt"
+group = "Finance/Bills/Utilities"
+area = "Finance"
+existing = true
+
+[[file]]
+path = "Documents/globex_electric_2024-09.md"
+group = "Finance/Bills/Utilities"
+area = "Finance"
+existing = true
+
+[[file]]
+path = "Downloads/chase_checking_statement_2024-09.txt"
+group = "Finance/Bank Statements"
+area = "Finance"
+existing = true
+
+[[file]]
+path = "Downloads/chase_checking_statement_2024-10.txt"
+group = "Finance/Bank Statements"
+area = "Finance"
+existing = true
+
+[[file]]
+path = "Documents/2023_property_tax_receipt.txt"
+group = "Finance/Taxes/2023"
+area = "Finance"
+existing = true
+
+[[file]]
+path = "Downloads/2023_student_loan_interest_1098e.txt"
+group = "Finance/Taxes/2023"
+area = "Finance"
+existing = true
+
+[[file]]
+path = "Downloads/running_log_2024_q4.csv"
+group = "Health/Fitness"
+area = "Health"
+existing = true
+
+[[file]]
+path = "Documents/half_marathon_race_results.txt"
+group = "Health/Fitness"
+area = "Health"
+existing = true
+
+[[file]]
+path = "Documents/smith_v_jones_deposition_notice.txt"
+group = "Legal/Smith v Jones"
+area = "Legal"
+existing = true
+
+[[file]]
+path = "Documents/smith_v_jones_settlement_offer.txt"
+group = "Legal/Smith v Jones"
+area = "Legal"
+existing = true
+
+[[file]]
+path = "Downloads/biscuit_grooming_receipt.txt"
+group = "Personal/Pets/Biscuit"
+area = "Personal"
+existing = true
+
+[[file]]
+path = "Documents/biscuit_vaccination_2024.txt"
+group = "Personal/Pets/Biscuit"
+area = "Personal"
+existing = true
+
+[[file]]
+path = "Desktop/lemon_bars.md"
+group = "Personal/Recipes"
+area = "Personal"
+existing = true
+
+[[file]]
+path = "Desktop/chicken_tikka.md"
+group = "Personal/Recipes"
+area = "Personal"
+existing = true
+
+[[file]]
+path = "Desktop/overnight_oats.md"
+group = "Personal/Recipes"
+area = "Personal"
+existing = true
+
+[[file]]
+path = "Documents/japan_2022_photo_captions.md"
+group = "Personal/Travel/Japan 2022"
+area = "Personal"
+existing = true
+
+[[file]]
+path = "Downloads/japan_trip_expense_summary.csv"
+group = "Personal/Travel/Japan 2022"
+area = "Personal"
+existing = true
+alt_areas = ["Finance"]
+
+[[file]]
+path = "Downloads/washing_machine_manual_lg.txt"
+group = "Reference/Manuals"
+area = "Reference"
+existing = true
+
+[[file]]
+path = "Downloads/thermostat_guide_nest.txt"
+group = "Reference/Manuals"
+area = "Reference"
+existing = true
+
+[[file]]
+path = "Downloads/rust_lifetimes_notes.md"
+group = "Software/Rust Notes"
+area = "Software"
+existing = true
+alt_areas = ["Reference"]
+
+[[file]]
+path = "Downloads/rust_traits_cheatsheet.md"
+group = "Software/Rust Notes"
+area = "Software"
+existing = true
+alt_areas = ["Reference"]
+
+[[file]]
+path = "Documents/acme_redesign_meeting_2024-04-15.md"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+existing = true
+
+[[file]]
+path = "Documents/acme_redesign_launch_checklist.md"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+existing = true
+
+[[file]]
+path = "Downloads/acme_redesign_qa_bugs.csv"
+group = "Work/Acme Corp/Website Redesign"
+area = "Work"
+existing = true
+
+[[file]]
+path = "Documents/q4_standup_2024-10-16.md"
+group = "Work/Spindle 2.0/Q4 2024 Launch"
+area = "Work"
+existing = true
+
+[[file]]
+path = "Documents/q4_launch_retro.md"
+group = "Work/Spindle 2.0/Q4 2024 Launch"
+area = "Work"
+existing = true
+
+[[file]]
+path = "Documents/initech_offer_letter.txt"
+group = "Work/Initech/Onboarding"
+area = "Work"
+
+[[file]]
+path = "Documents/initech_onboarding_checklist.md"
+group = "Work/Initech/Onboarding"
+area = "Work"
+
+[[file]]
+path = "Downloads/initech_benefits_summary.txt"
+group = "Work/Initech/Onboarding"
+area = "Work"
+
+[[file]]
+path = "Documents/mochi_adoption_papers.txt"
+group = "Personal/Pets/Mochi"
+area = "Personal"
+
+[[file]]
+path = "Documents/mochi_vet_intake.txt"
+group = "Personal/Pets/Mochi"
+area = "Personal"
+
+[[file]]
+path = "Downloads/2024_w2_initech.txt"
+group = "Finance/Taxes/2024"
+area = "Finance"
+
+[[file]]
+path = "Documents/2024_estimated_tax_payment.txt"
+group = "Finance/Taxes/2024"
+area = "Finance"
+
+[[file]]
+path = "Downloads/2024_charitable_donations.csv"
+group = "Finance/Taxes/2024"
+area = "Finance"
