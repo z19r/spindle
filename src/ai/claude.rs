@@ -739,9 +739,13 @@ impl ClaudeProvider {
           }
           response_text(message)
         }
-        .and_then(|text| {
-          serde_json::from_str::<ContentDescription>(&text)
-            .context("Failed to parse description JSON from Claude")
+        .and_then(|text| parse_description(&text))
+        .or_else(|e| {
+          if e.downcast_ref::<Refused>().is_some() {
+            Ok(sensitive_placeholder())
+          } else {
+            Err(e)
+          }
         }),
         BatchResult::Errored { error } => {
           Err(anyhow::anyhow!("Batch item failed: {error}"))
@@ -815,6 +819,9 @@ fn finish_groups(
 /// Extract the JSON text payload from a successful API response,
 /// rejecting truncated responses.
 fn response_text(api_response: ApiResponse) -> Result<String> {
+  if api_response.stop_reason.as_deref() == Some("refusal") {
+    return Err(Refused("stop_reason refusal".to_string()).into());
+  }
   let raw = api_response
     .content
     .into_iter()
@@ -823,10 +830,94 @@ fn response_text(api_response: ApiResponse) -> Result<String> {
   finish_text(raw, api_response.stop_reason.as_deref())
 }
 
+/// The model declined to describe the content: either the API said so
+/// (`stop_reason: "refusal"`) or the reply was a prose refusal instead
+/// of JSON. Callers turn this into a sensitive-content placeholder.
+#[derive(Debug)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "model declined: {}", self.0)
+  }
+}
+
+impl std::error::Error for Refused {}
+
+/// Prose the model sends instead of JSON when it will not describe
+/// something. Checked only when the reply is not JSON.
+fn looks_like_refusal(text: &str) -> bool {
+  let t = text.trim_start().to_ascii_lowercase();
+  if t.starts_with('{') || t.starts_with('[') {
+    return false;
+  }
+  [
+    "i can't",
+    "i cannot",
+    "i can not",
+    "i'm not able",
+    "i am not able",
+    "i'm unable",
+    "i am unable",
+    "i won't",
+    "i will not",
+    "i apologize",
+    "i'm sorry",
+    "sorry, ",
+    "unable to describe",
+    "not able to describe",
+    "not comfortable",
+  ]
+  .iter()
+  .any(|p| t.contains(p))
+}
+
+/// What a declined description becomes: enough for routing and for the
+/// user to review it themselves, never a fake "a person" summary.
+pub fn sensitive_placeholder() -> ContentDescription {
+  ContentDescription {
+    summary: "Sensitive image the model declined to describe (likely \
+              nudity or other private content). Keep it in Private and \
+              review it yourself."
+      .to_string(),
+    tags: vec![
+      "sensitive".to_string(),
+      "private".to_string(),
+      "explicit-or-private".to_string(),
+      "declined".to_string(),
+    ],
+    suggested_category: "adult".to_string(),
+    confidence: 0.6,
+    source: crate::model::DescriptionSource::Ai,
+  }
+}
+
+/// Parse a description reply; a refusal becomes the sensitive
+/// placeholder instead of a parse error.
+fn parse_description(text: &str) -> Result<ContentDescription> {
+  match serde_json::from_str::<ContentDescription>(text) {
+    Ok(d) => Ok(d),
+    Err(_) if looks_like_refusal(text) => {
+      tracing::info!(
+        reply = %preview(text, 200),
+        "Model declined to describe a file; filed as sensitive"
+      );
+      Ok(sensitive_placeholder())
+    }
+    Err(e) => Err(
+      anyhow::Error::from(e)
+        .context("Failed to parse description JSON from Claude"),
+    ),
+  }
+}
+
 fn finish_text(
   raw: String,
   stop_reason: Option<&str>,
 ) -> Result<String> {
+  if stop_reason == Some("refusal") {
+    return Err(Refused(preview(&raw, 200)).into());
+  }
   if stop_reason == Some("max_tokens") {
     return Err(
       DegenerateReply(format!(
@@ -1090,10 +1181,17 @@ impl AiProvider for ClaudeProvider {
     };
     let request = self.describe_api_request(&payload, context);
 
-    let text = self.send_request(request).await?;
-    let description: ContentDescription = serde_json::from_str(&text)
-      .context("Failed to parse description JSON from Claude")?;
-    Ok(description)
+    match self.send_request(request).await {
+      Ok(text) => parse_description(&text),
+      Err(e) if e.downcast_ref::<Refused>().is_some() => {
+        tracing::info!(
+          file = %context.filename,
+          "Model declined to describe an image; filed as sensitive"
+        );
+        Ok(sensitive_placeholder())
+      }
+      Err(e) => Err(e),
+    }
   }
 
   async fn describe_text(
@@ -1106,10 +1204,13 @@ impl AiProvider for ClaudeProvider {
     };
     let request = self.describe_api_request(&payload, context);
 
-    let text = self.send_request(request).await?;
-    let description: ContentDescription = serde_json::from_str(&text)
-      .context("Failed to parse description JSON from Claude")?;
-    Ok(description)
+    match self.send_request(request).await {
+      Ok(text) => parse_description(&text),
+      Err(e) if e.downcast_ref::<Refused>().is_some() => {
+        Ok(sensitive_placeholder())
+      }
+      Err(e) => Err(e),
+    }
   }
 
   async fn describe_batch(
@@ -1662,6 +1763,90 @@ mod tests {
 
     assert_eq!(result.summary, "A red pixel");
     assert_eq!(result.suggested_category, "photo");
+  }
+
+  #[tokio::test]
+  async fn prose_refusal_becomes_sensitive_placeholder() {
+    let server = MockServer::start().await;
+    let response_body = serde_json::json!({
+      "content": [{"type": "text", "text": "I can't help with describing this image."}],
+      "stop_reason": "end_turn"
+    });
+    Mock::given(method("POST"))
+      .and(path("/v1/messages"))
+      .respond_with(
+        ResponseTemplate::new(200).set_body_json(&response_body),
+      )
+      .mount(&server)
+      .await;
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-sonnet-4-6".to_string(),
+      0,
+    )
+    .with_base_url(server.uri());
+    let ctx = DescribeContext {
+      filename: "IMG_0109.JPG".to_string(),
+      file_type_label: "JPEG".to_string(),
+      file_size: 100,
+      metadata_hint: None,
+    };
+
+    let result = provider
+      .describe_image(&[0xFF], "image/jpeg", &ctx)
+      .await
+      .unwrap();
+
+    assert_eq!(result.suggested_category, "adult");
+    assert!(result.tags.iter().any(|t| t == "sensitive"));
+    assert!(result.summary.contains("declined"));
+  }
+
+  #[tokio::test]
+  async fn api_refusal_stop_reason_becomes_sensitive_placeholder() {
+    let server = MockServer::start().await;
+    let response_body = serde_json::json!({
+      "content": [],
+      "stop_reason": "refusal"
+    });
+    Mock::given(method("POST"))
+      .and(path("/v1/messages"))
+      .respond_with(
+        ResponseTemplate::new(200).set_body_json(&response_body),
+      )
+      .mount(&server)
+      .await;
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-sonnet-4-6".to_string(),
+      0,
+    )
+    .with_base_url(server.uri());
+    let ctx = DescribeContext {
+      filename: "IMG_0110.JPG".to_string(),
+      file_type_label: "JPEG".to_string(),
+      file_size: 100,
+      metadata_hint: None,
+    };
+
+    let result = provider
+      .describe_image(&[0xFF], "image/jpeg", &ctx)
+      .await
+      .unwrap();
+
+    assert_eq!(result.suggested_category, "adult");
+  }
+
+  #[test]
+  fn refusal_detection_ignores_json_and_ordinary_prose() {
+    assert!(looks_like_refusal(
+      "I'm sorry, but I can't describe this."
+    ));
+    assert!(looks_like_refusal("  I cannot help with that request."));
+    assert!(!looks_like_refusal(
+      "{\"summary\":\"I can't believe it's not butter ad\"}"
+    ));
+    assert!(!looks_like_refusal("A beach at sunset."));
   }
 
   #[tokio::test]
