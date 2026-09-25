@@ -14,6 +14,12 @@ const MIN_SCORE: u32 = 90;
 /// Fingerprints shorter than this carry too little signal.
 const MIN_FP_LEN: usize = 32;
 
+/// Whether acoustic matching can run on this machine (chromaprint's
+/// `fpcalc` on PATH). Exposed so the run summary can say when it is off.
+pub fn acoustic_matching_available() -> bool {
+  fpcalc_available()
+}
+
 fn fpcalc_available() -> bool {
   static AVAILABLE: OnceLock<bool> = OnceLock::new();
   *AVAILABLE.get_or_init(|| {

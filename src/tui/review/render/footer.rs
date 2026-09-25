@@ -68,8 +68,8 @@ pub(crate) fn render_footer(
     Span::styled(
       format!(" {mode_label} "),
       Style::default()
-        .fg(theme::WHITE)
-        .bg(theme::PURPLE)
+        .fg(theme::text())
+        .bg(theme::accent())
         .add_modifier(Modifier::BOLD),
     ),
     Span::styled("  ", theme::dim()),
@@ -87,7 +87,7 @@ pub(crate) fn render_footer(
     .block(
       Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::DIM_PURPLE))
+        .border_style(Style::default().fg(theme::subtle()))
         .padding(Padding::new(0, 0, 0, 0)),
     );
 

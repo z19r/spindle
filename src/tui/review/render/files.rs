@@ -59,7 +59,7 @@ pub(crate) fn render_file_list(
         theme::selected()
       } else if is_cursor {
         Style::default()
-          .fg(theme::WHITE)
+          .fg(theme::text())
           .add_modifier(Modifier::BOLD)
       } else {
         theme::normal()
@@ -67,7 +67,7 @@ pub(crate) fn render_file_list(
 
       let mut line_style = Style::default();
       if is_cursor && focused {
-        line_style = line_style.bg(theme::BG_SELECTED);
+        line_style = line_style.bg(theme::selected_bg());
       }
 
       let mut spans = Vec::new();
@@ -82,7 +82,7 @@ pub(crate) fn render_file_list(
           Span::styled(
             "\u{25cf} ",
             Style::default()
-              .fg(theme::PURPLE)
+              .fg(theme::accent())
               .add_modifier(Modifier::BOLD),
           )
         } else {
@@ -112,7 +112,7 @@ pub(crate) fn render_file_list(
       }
       spans.push(Span::styled(
         "  \u{2192}  ",
-        Style::default().fg(theme::DIM_PURPLE),
+        Style::default().fg(theme::subtle()),
       ));
       spans.push(Span::styled(format!("{dest_dir}/"), theme::dim()));
 

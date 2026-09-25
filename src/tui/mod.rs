@@ -2,6 +2,7 @@ mod progress;
 mod review;
 
 pub use progress::{PipelineTuiState, ProgressState, Stage};
+pub use review::theme;
 pub use review::{Mode, ReviewAction, ReviewMode, ReviewState};
 
 use anyhow::Result;
