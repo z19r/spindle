@@ -10,20 +10,20 @@ pub(crate) fn render_header(
 
   let counter_style = if approved_count == total {
     Style::default()
-      .fg(theme::GREEN)
+      .fg(theme::ok())
       .add_modifier(Modifier::BOLD)
   } else {
     Style::default()
-      .fg(theme::RED_SOFT)
+      .fg(theme::error())
       .add_modifier(Modifier::BOLD)
   };
 
   let block = Block::bordered()
     .border_type(BorderType::Rounded)
     .title_top(Line::from(vec![
-      Span::styled(" ", Style::default().bg(theme::BG_HEADER)),
+      Span::styled(" ", Style::default().bg(theme::accent())),
       Span::styled(" spindle ", theme::title_badge()),
-      Span::styled(" ", Style::default().bg(theme::BG_HEADER)),
+      Span::styled(" ", Style::default().bg(theme::accent())),
     ]))
     .title_top(
       Line::from(vec![Span::styled(
@@ -32,7 +32,7 @@ pub(crate) fn render_header(
       )])
       .alignment(Alignment::Right),
     )
-    .border_style(Style::default().fg(theme::BORDER_PURPLE));
+    .border_style(Style::default().fg(theme::border()));
   let banner = Paragraph::new(Line::from(Span::styled(
     format!(" {}", state.banner().unwrap_or("")),
     theme::normal(),
@@ -89,7 +89,7 @@ pub(crate) fn render_group_list(
         Span::styled(
           " \u{25c9} ",
           Style::default()
-            .fg(theme::GREEN)
+            .fg(theme::ok())
             .add_modifier(Modifier::BOLD),
         )
       } else {
@@ -100,7 +100,7 @@ pub(crate) fn render_group_list(
         theme::selected()
       } else if is_cursor {
         Style::default()
-          .fg(theme::WHITE)
+          .fg(theme::text())
           .add_modifier(Modifier::BOLD)
       } else if approved {
         theme::normal()
@@ -115,7 +115,7 @@ pub(crate) fn render_group_list(
 
       let mut line_style = Style::default();
       if is_cursor && focused {
-        line_style = line_style.bg(theme::BG_SELECTED);
+        line_style = line_style.bg(theme::selected_bg());
       }
 
       ListItem::new(Line::from(vec![
@@ -183,7 +183,7 @@ pub(crate) fn render_group_picker(
 
       let mut line_style = Style::default();
       if is_cursor {
-        line_style = line_style.bg(theme::BG_SELECTED);
+        line_style = line_style.bg(theme::selected_bg());
       }
 
       ListItem::new(Line::from(vec![

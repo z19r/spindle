@@ -10,10 +10,7 @@ use crate::pipeline::PipelineEvent;
 
 // One palette with the review screen, so both read on light and dark
 // terminals alike (body text is the terminal's default foreground).
-use super::review::theme::{
-  AMBER as YELLOW, GREEN, PURPLE, SUBTLE, TEXT as CREAM,
-  TEXT as WHITE,
-};
+use super::review::theme;
 
 const SPINNER: [&str; 10] =
   ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -116,16 +113,16 @@ pub fn render_pipeline(frame: &mut Frame, state: &PipelineTuiState) {
                label: String,
                lines: &mut Vec<Line<'static>>| {
     let (icon, style) = if done {
-      ("✓".to_string(), Style::default().fg(GREEN))
+      ("✓".to_string(), Style::default().fg(theme::ok()))
     } else if active {
-      (spin.to_string(), Style::default().fg(PURPLE))
+      (spin.to_string(), Style::default().fg(theme::accent()))
     } else {
-      ("·".to_string(), Style::default().fg(SUBTLE))
+      ("·".to_string(), Style::default().fg(theme::subtle()))
     };
     let text_style = if done || active {
-      Style::default().fg(CREAM)
+      Style::default().fg(theme::text())
     } else {
-      Style::default().fg(SUBTLE)
+      Style::default().fg(theme::subtle())
     };
     lines.push(Line::from(vec![
       Span::styled(format!("  {icon} "), style),
@@ -177,13 +174,13 @@ pub fn render_pipeline(frame: &mut Frame, state: &PipelineTuiState) {
   if let Some(file) = &state.current_file {
     lines.push(Line::from(Span::styled(
       format!("      {file}"),
-      Style::default().fg(SUBTLE),
+      Style::default().fg(theme::subtle()),
     )));
   }
   if state.failed > 0 {
     lines.push(Line::from(Span::styled(
       format!("      {} files failed analysis", state.failed),
-      Style::default().fg(YELLOW),
+      Style::default().fg(theme::warn()),
     )));
   }
 
@@ -207,11 +204,11 @@ pub fn render_pipeline(frame: &mut Frame, state: &PipelineTuiState) {
     .title_top(Line::from(vec![Span::styled(
       " spindle ",
       Style::default()
-        .fg(WHITE)
-        .bg(PURPLE)
+        .fg(theme::text())
+        .bg(theme::accent())
         .add_modifier(Modifier::BOLD),
     )]))
-    .border_style(Style::default().fg(PURPLE))
+    .border_style(Style::default().fg(theme::accent()))
     .padding(Padding::new(1, 1, 0, 0));
   frame.render_widget(Paragraph::new(lines).block(block), panel);
 
@@ -223,7 +220,9 @@ pub fn render_pipeline(frame: &mut Frame, state: &PipelineTuiState) {
       let ratio =
         (state.analyzed as f64 / total as f64).clamp(0.0, 1.0);
       let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(GREEN).bg(Color::Reset))
+        .gauge_style(
+          Style::default().fg(theme::ok()).bg(Color::Reset),
+        )
         .ratio(ratio)
         .label("");
       frame.render_widget(gauge, gauge_area);

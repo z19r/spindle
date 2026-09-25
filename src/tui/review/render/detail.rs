@@ -116,7 +116,7 @@ pub(crate) fn render_detail_file(
       Line::from(Span::styled(
         format!(" {filename} "),
         Style::default()
-          .fg(theme::WHITE)
+          .fg(theme::text())
           .add_modifier(Modifier::BOLD),
       )),
       Line::from(""),
@@ -225,7 +225,7 @@ pub(crate) fn render_detail_file(
     lines.push(Line::from(vec![
       Span::styled(
         "  \u{2514}\u{2500} ",
-        Style::default().fg(theme::DIM_PURPLE),
+        Style::default().fg(theme::subtle()),
       ),
       Span::styled(filename.clone(), theme::value()),
     ]));
@@ -242,7 +242,7 @@ pub(crate) fn render_detail_file(
     lines.push(Line::from(vec![
       Span::styled(
         "  \u{2514}\u{2500} ",
-        Style::default().fg(theme::DIM_PURPLE),
+        Style::default().fg(theme::subtle()),
       ),
       Span::styled(dest_name, theme::value()),
     ]));
@@ -289,7 +289,7 @@ pub(crate) fn render_detail_file(
             Span::styled(
               "Exact duplicate",
               Style::default()
-                .fg(theme::BRIGHT_GREEN)
+                .fg(theme::ok())
                 .add_modifier(Modifier::BOLD),
             ),
           ]));
@@ -326,7 +326,7 @@ pub(crate) fn render_detail_file(
             Span::styled(
               "Close match",
               Style::default()
-                .fg(theme::BRIGHT_YELLOW)
+                .fg(theme::warn())
                 .add_modifier(Modifier::BOLD),
             ),
           ]));
@@ -385,7 +385,7 @@ pub(crate) fn render_detail_group(
       Span::styled(
         format!(" {} ", group.label),
         Style::default()
-          .fg(theme::WHITE)
+          .fg(theme::text())
           .add_modifier(Modifier::BOLD),
       ),
       Span::raw("  "),
@@ -443,7 +443,7 @@ pub(crate) fn render_dupe_reason(
         Span::styled(
           "Exact duplicate",
           Style::default()
-            .fg(theme::BRIGHT_GREEN)
+            .fg(theme::ok())
             .add_modifier(Modifier::BOLD),
         ),
       ]));
@@ -484,7 +484,7 @@ pub(crate) fn render_dupe_reason(
         Span::styled(
           "Close match",
           Style::default()
-            .fg(theme::BRIGHT_YELLOW)
+            .fg(theme::warn())
             .add_modifier(Modifier::BOLD),
         ),
       ]));
@@ -570,7 +570,7 @@ pub(crate) fn push_similarity_verdict(
     Span::styled(
       label.to_string(),
       Style::default()
-        .fg(theme::BRIGHT_YELLOW)
+        .fg(theme::warn())
         .add_modifier(Modifier::BOLD),
     ),
   ]));
@@ -600,7 +600,7 @@ pub(crate) fn render_detail_move_target(
     lines.push(Line::from(Span::styled(
       format!(" Moving: {filename} "),
       Style::default()
-        .fg(theme::WHITE)
+        .fg(theme::text())
         .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));
@@ -616,7 +616,7 @@ pub(crate) fn render_detail_move_target(
       Span::styled(
         group.label.clone(),
         Style::default()
-          .fg(theme::WHITE)
+          .fg(theme::text())
           .add_modifier(Modifier::BOLD),
       ),
     ]));
@@ -655,7 +655,7 @@ pub(crate) fn render_detail_new_group(
     lines.push(Line::from(Span::styled(
       format!(" Moving: {filename} "),
       Style::default()
-        .fg(theme::WHITE)
+        .fg(theme::text())
         .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));

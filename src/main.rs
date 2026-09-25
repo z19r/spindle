@@ -140,6 +140,7 @@ async fn main() -> Result<()> {
   // progress lines for them too.
   let session =
     if std::io::stdout().is_terminal() && !cli.yes && !cli.json {
+      tui::theme::init_from_terminal();
       Some(TerminalSession::enter()?)
     } else {
       None
@@ -197,8 +198,14 @@ async fn main() -> Result<()> {
   } else {
     format!(" · spent ${spent_usd:.2} in {calls} calls")
   };
+  let audio_note =
+    if spindle::fingerprint::audio::acoustic_matching_available() {
+      ""
+    } else {
+      " · audio near-dupes off (install chromaprint)"
+    };
   let summary = format!(
-    "{} groups · {} moves · {} duplicates ({} reclaimable){spent}",
+    "{} groups · {} moves · {} duplicates ({} reclaimable){spent}{audio_note}",
     plan.stats.groups_created,
     plan.moves.len(),
     plan.stats.duplicates_found,
@@ -562,6 +569,7 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
   )
   .with_file_metadata(&fingerprinted);
   review_state.set_dupe_types(dupe_types);
+  tui::theme::init_from_terminal();
   let mut session = TerminalSession::enter()?;
   let review = tui::run_review(review_state, &mut session.terminal);
   drop(session);

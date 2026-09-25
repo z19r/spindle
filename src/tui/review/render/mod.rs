@@ -76,18 +76,18 @@ pub(crate) fn panel_block<'a>(
   focused: bool,
 ) -> Block<'a> {
   let border_color = if focused {
-    theme::BORDER_PURPLE
+    theme::border()
   } else {
-    theme::DIM_PURPLE
+    theme::subtle()
   };
 
   let title_style = if focused {
     Style::default()
-      .fg(theme::WHITE)
+      .fg(theme::text())
       .add_modifier(Modifier::BOLD)
   } else {
     Style::default()
-      .fg(theme::SUBTLE)
+      .fg(theme::subtle())
       .add_modifier(Modifier::BOLD)
   };
 

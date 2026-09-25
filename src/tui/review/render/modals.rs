@@ -17,14 +17,14 @@ pub(crate) fn render_confirm_execute_modal(
         Span::styled(
           format!("{}", moves.len()),
           Style::default()
-            .fg(theme::BRIGHT_GREEN)
+            .fg(theme::ok())
             .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" files into ", theme::normal()),
         Span::styled(
           format!("{}", groups.len()),
           Style::default()
-            .fg(theme::BRIGHT_GREEN)
+            .fg(theme::ok())
             .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" folders:", theme::normal()),
@@ -59,7 +59,7 @@ pub(crate) fn render_confirm_execute_modal(
           Span::styled(
             format!("{}", deletions.len()),
             Style::default()
-              .fg(theme::BRIGHT_YELLOW)
+              .fg(theme::warn())
               .add_modifier(Modifier::BOLD),
           ),
           Span::styled(" files to trash (", theme::normal()),
@@ -80,7 +80,7 @@ pub(crate) fn render_confirm_execute_modal(
         Span::styled(
           format!("{}", deletions.len()),
           Style::default()
-            .fg(theme::BRIGHT_YELLOW)
+            .fg(theme::warn())
             .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" duplicates to trash (", theme::normal()),
@@ -112,7 +112,7 @@ pub(crate) fn render_confirm_execute_modal(
       " Ready to execute? ",
       theme::title_badge(),
     )))
-    .border_style(Style::default().fg(theme::BORDER_PURPLE));
+    .border_style(Style::default().fg(theme::border()));
   frame.render_widget(Paragraph::new(lines).block(block), modal_area);
 }
 
@@ -157,7 +157,7 @@ pub(crate) fn render_help_modal(
       " Keys ",
       theme::title_badge(),
     )))
-    .border_style(Style::default().fg(theme::BORDER_PURPLE));
+    .border_style(Style::default().fg(theme::border()));
   frame.render_widget(Paragraph::new(lines).block(block), modal_area);
 }
 
@@ -193,11 +193,11 @@ pub(crate) fn render_preview_modal(
 
   let block = Block::default()
     .borders(ratatui::widgets::Borders::ALL)
-    .border_style(Style::default().fg(theme::PURPLE))
+    .border_style(Style::default().fg(theme::accent()))
     .title(Span::styled(
       format!(" {} ", filename),
       Style::default()
-        .fg(theme::PURPLE)
+        .fg(theme::accent())
         .add_modifier(Modifier::BOLD),
     ))
     .title_bottom(Line::from(bottom_spans));
@@ -358,14 +358,14 @@ pub(crate) fn render_diff_modal(
         Span::styled(
           format!("  \u{25c9} {p_name}"),
           Style::default()
-            .fg(theme::BRIGHT_GREEN)
+            .fg(theme::ok())
             .add_modifier(Modifier::BOLD),
         ),
         Span::styled("    vs    ", theme::dim()),
         Span::styled(
           format!("\u{25b8} {s_name}"),
           Style::default()
-            .fg(theme::BRIGHT_YELLOW)
+            .fg(theme::warn())
             .add_modifier(Modifier::BOLD),
         ),
         if total_others > 1 {
@@ -392,17 +392,17 @@ pub(crate) fn render_diff_modal(
       .border_type(BorderType::Rounded)
       .title_top(Line::from(Span::styled(
         " primary ",
-        Style::default().fg(theme::BRIGHT_GREEN),
+        Style::default().fg(theme::ok()),
       )))
-      .border_style(Style::default().fg(theme::DIM_PURPLE));
+      .border_style(Style::default().fg(theme::subtle()));
 
     let right_block = Block::bordered()
       .border_type(BorderType::Rounded)
       .title_top(Line::from(Span::styled(
         " compare ",
-        Style::default().fg(theme::BRIGHT_YELLOW),
+        Style::default().fg(theme::warn()),
       )))
-      .border_style(Style::default().fg(theme::DIM_PURPLE));
+      .border_style(Style::default().fg(theme::subtle()));
 
     let left_inner = left_block.inner(img_cols[0]);
     let right_inner = right_block.inner(img_cols[1]);
@@ -471,14 +471,14 @@ pub(crate) fn render_diff_modal(
       Span::styled(
         format!("  \u{25c9} {p_name}"),
         Style::default()
-          .fg(theme::BRIGHT_GREEN)
+          .fg(theme::ok())
           .add_modifier(Modifier::BOLD),
       ),
       Span::styled("    vs    ", theme::dim()),
       Span::styled(
         format!("\u{25b8} {s_name}"),
         Style::default()
-          .fg(theme::BRIGHT_YELLOW)
+          .fg(theme::warn())
           .add_modifier(Modifier::BOLD),
       ),
       if total_others > 1 {
@@ -506,7 +506,7 @@ pub(crate) fn render_diff_modal(
           lines.push(Line::from(Span::styled(
             "  Files are identical",
             Style::default()
-              .fg(theme::BRIGHT_GREEN)
+              .fg(theme::ok())
               .add_modifier(Modifier::BOLD),
           )));
           lines.push(Line::from(""));
@@ -531,12 +531,12 @@ pub(crate) fn render_diff_modal(
                 Span::styled(
                   "+ ",
                   Style::default()
-                    .fg(theme::BRIGHT_GREEN)
+                    .fg(theme::ok())
                     .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                   text.clone(),
-                  Style::default().fg(theme::BRIGHT_GREEN),
+                  Style::default().fg(theme::ok()),
                 ),
               ]));
             }
@@ -546,12 +546,12 @@ pub(crate) fn render_diff_modal(
                 Span::styled(
                   "- ",
                   Style::default()
-                    .fg(theme::RED_SOFT)
+                    .fg(theme::error())
                     .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                   text.clone(),
-                  Style::default().fg(theme::RED_SOFT),
+                  Style::default().fg(theme::error()),
                 ),
               ]));
             }
@@ -598,13 +598,13 @@ pub(crate) fn diff_modal_block<'a>(
     .title_top(Line::from(Span::styled(
       " Diff ",
       Style::default()
-        .fg(theme::WHITE)
+        .fg(theme::text())
         .add_modifier(Modifier::BOLD),
     )))
     .title_bottom(
       Line::from(bottom_spans).alignment(Alignment::Right),
     )
-    .border_style(Style::default().fg(theme::BRIGHT_YELLOW))
+    .border_style(Style::default().fg(theme::warn()))
     .padding(Padding::new(1, 1, 1, 0))
 }
 
@@ -632,14 +632,14 @@ pub(crate) fn render_diff_modal_metadata(
     Span::styled(
       format!("  \u{25c9} {p_name}"),
       Style::default()
-        .fg(theme::BRIGHT_GREEN)
+        .fg(theme::ok())
         .add_modifier(Modifier::BOLD),
     ),
     Span::styled("    vs    ", theme::dim()),
     Span::styled(
       format!("\u{25b8} {s_name}"),
       Style::default()
-        .fg(theme::BRIGHT_YELLOW)
+        .fg(theme::warn())
         .add_modifier(Modifier::BOLD),
     ),
     if total_others > 1 {
@@ -714,7 +714,7 @@ pub(crate) fn render_diff_modal_metadata(
         Span::styled(
           format!("{distance}"),
           Style::default()
-            .fg(theme::BRIGHT_YELLOW)
+            .fg(theme::warn())
             .add_modifier(Modifier::BOLD),
         ),
       ]));
@@ -767,7 +767,7 @@ pub(crate) fn render_confirm_remove(
       Span::styled(
         group_label,
         Style::default()
-          .fg(theme::WHITE)
+          .fg(theme::text())
           .add_modifier(Modifier::BOLD),
       ),
       Span::styled("?", theme::normal()),
