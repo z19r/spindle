@@ -417,7 +417,15 @@ fn parent(label: &str) -> String {
   segs.join("/")
 }
 
-fn key(label: &str) -> String {
+/// How two labels are compared for identity here: segments trimmed,
+/// empties dropped, each one reduced to its alphanumerics in lower
+/// case. `Legal/Smith v. Jones` and `legal/smith v jones` are the same
+/// folder; `Finance/Taxes/2024` and `Finance/Taxes` are not.
+///
+/// Public so the eval can ask whether the validator would rename a
+/// label the fixtures ask for, without reimplementing this and
+/// drifting from it.
+pub fn key(label: &str) -> String {
   label
     .split('/')
     .map(str::trim)
