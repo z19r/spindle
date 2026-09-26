@@ -1054,17 +1054,30 @@ where
   Ok(reply)
 }
 
-/// True when the tail of `text` is one short unit repeated many times,
-/// the signature of a model stuck in a loop.
+/// True when the tail of `text` is one unit repeated over and over, the
+/// signature of a model stuck in a loop.
+///
+/// The unit can be a whole phrase, not just a few characters: observed
+/// loops include `\n\n(placeholder)` (15 bytes) and `Rationale
+/// placeholder.` (22), both of which a short-unit check misses, letting
+/// the generation run to `max_tokens` instead of failing in a few
+/// hundred bytes.
+///
+/// What makes it a loop is that the repeats fill the tail, so that is
+/// the test. The repeat floor only bites for units long enough that
+/// filling the tail would take very few of them. Real replies do not
+/// trip this: a member list repeats its shape but never its bytes,
+/// because the indices differ.
 fn looks_degenerate(text: &str) -> bool {
   const TAIL: usize = 600;
-  const MIN_REPEATS: usize = 40;
+  const MAX_UNIT: usize = 64;
+  const MIN_REPEATS: usize = 8;
   let bytes = text.as_bytes();
   if bytes.len() < TAIL {
     return false;
   }
   let tail = &bytes[bytes.len() - TAIL..];
-  (1..=12).any(|unit| {
+  (1..=MAX_UNIT).any(|unit| {
     let pattern = &tail[TAIL - unit..];
     let repeats = tail
       .rchunks_exact(unit)
@@ -1705,13 +1718,83 @@ mod tests {
   #[test]
   fn looks_degenerate_only_for_long_repeats() {
     assert!(!looks_degenerate("short"));
-    let healthy = "{\"groups\":[{\"label\":\"Work/Acme\",\"rationale\":\"notes and mockups for the redesign\"}]}".repeat(12);
-    assert!(!looks_degenerate(&healthy));
     let looping =
       format!("{{\"rationale\":\"x{}", " ---".repeat(200));
     assert!(looks_degenerate(&looping));
     let dashes = format!("abc{}", "-".repeat(700));
     assert!(looks_degenerate(&dashes));
+  }
+
+  /// A real reply repeats its shape but never its bytes, because the
+  /// labels and indices differ every time.
+  #[test]
+  fn a_long_healthy_reply_is_not_a_loop() {
+    let mut healthy = String::from("{\"groups\":[");
+    for i in 0..40 {
+      healthy.push_str(&format!(
+        "{{\"label\":\"Work/Client {i}/Proposals\",\"rationale\":\"Drafts \
+         and signed copies of the {i}th engagement.\",\"members\":\
+         [{{\"index\":{}}},{{\"index\":{}}}]}},",
+        i * 2,
+        i * 2 + 1
+      ));
+    }
+    healthy.push_str("]}");
+    assert!(
+      !looks_degenerate(&healthy),
+      "varied groups must not read as a loop"
+    );
+  }
+
+  /// The loops seen in a real run: phrase-length units that a
+  /// short-unit check missed, letting the reply run to `max_tokens`.
+  #[test]
+  fn phrase_length_loops_are_caught() {
+    let rationale_filler = format!(
+      "{{\"groups\":[{{\"label\":\"Photos/Family/Babies\",\"rationale\":\
+       \"Infant and newborn photos.{}",
+      "Rationale placeholder.".repeat(60)
+    );
+    assert!(
+      looks_degenerate(&rationale_filler),
+      "22-byte phrase loop must be caught"
+    );
+
+    let parenthesised = format!(
+      "{{\"groups\":[{{\"label\":\"Personal/Family/Kids\",\"rationale\":\
+       \"Everyday candid photos of the kids indoors at home.{}",
+      "\n\n(placeholder)".repeat(60)
+    );
+    assert!(
+      looks_degenerate(&parenthesised),
+      "15-byte phrase loop must be caught"
+    );
+  }
+
+  /// The loop is cut off within a few hundred bytes of starting, not
+  /// after tens of thousands.
+  #[test]
+  fn a_loop_is_caught_soon_after_it_starts() {
+    let prose =
+      "Everyday candid photos of the kids indoors at home, \
+                 playing and resting on beds and couches. "
+        .repeat(8);
+    let unit = "Rationale placeholder.";
+    let mut text = prose.clone();
+    let mut caught = None;
+    for n in 1..200 {
+      text.push_str(unit);
+      if looks_degenerate(&text) {
+        caught = Some(n);
+        break;
+      }
+    }
+    let n = caught.expect("loop must be caught");
+    assert!(
+      n * unit.len() < 1024,
+      "took {n} repeats ({} bytes) to notice",
+      n * unit.len()
+    );
   }
 
   #[tokio::test]
