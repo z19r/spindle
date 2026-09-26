@@ -42,17 +42,17 @@ const GRANULARITY_SLACK: f64 = 0.15;
 /// otherwise say the eval had gone quietly slacker.
 ///
 /// `organize` and `organize-granularity` reach 1.000 — no expected
-/// folder in either is under `MIN_GROUP_SIZE`. `organize-large` keeps
-/// five small folders on purpose, because a large real tree has some,
-/// and pays 0.011 for them. `organize-second-run` sits at 0.900 for a
-/// reason that is not thinness at all: every one of its folders already
-/// exists on disk with files in it, and the granularity term counts
-/// only this run's share. That is #153; when it lands, this entry
-/// should go to 1.000.
+/// folder in either holds fewer than `MIN_GROUP_SIZE` files.
+/// `organize-large` keeps five small folders on purpose, because a
+/// large real tree has some, and pays 0.011 for them.
+/// `organize-second-run` reaches 0.977: twelve of its fifteen folders
+/// already exist and are full, and the three it asks this run to
+/// create from scratch hold two or three files each. That is #156,
+/// the same defect #150 fixed in `organize`.
 const MIN_CEILING: [(&str, f64); 4] = [
   ("organize", 1.000),
   ("organize-large", 0.985),
-  ("organize-second-run", 0.895),
+  ("organize-second-run", 0.975),
   ("organize-granularity", 1.000),
 ];
 
@@ -82,6 +82,14 @@ fn fixtures_root() -> PathBuf {
     .join("fixtures")
 }
 
+/// What the fixture's `Organized/` tree already holds, as the seeded
+/// second run will find it. Empty for a fixture with no such tree.
+fn existing_sizes(name: &str) -> eval::ExistingSizes {
+  eval::ExistingSizes::from_tree(
+    &fixtures_root().join(name).join("Organized"),
+  )
+}
+
 /// The best composite this fixture's own answer key can score.
 ///
 /// Computed rather than recorded, so editing a fixture moves its floor
@@ -98,7 +106,7 @@ fn ceiling(name: &str) -> f64 {
       label: e.group.clone(),
     })
     .collect();
-  eval::score(&expected, &perfect).composite()
+  eval::score(&expected, &perfect, &existing_sizes(name)).composite()
 }
 
 /// Assert a run scored within `slack` of what the fixture allows.
@@ -306,7 +314,8 @@ async fn eval_fixture_with(
     &result.fingerprinted,
     &root,
   );
-  let report = eval::score(&expected, &placements);
+  let report =
+    eval::score(&expected, &placements, &existing_sizes(name));
 
   println!("\n=== fixture: {name} ===");
   print_groups(&placements, &expected);
@@ -439,7 +448,7 @@ fn every_fixture_ground_truth_is_internally_consistent() {
         label: e.group.clone(),
       })
       .collect();
-    let r = eval::score(&expected, &perfect);
+    let r = eval::score(&expected, &perfect, &existing_sizes(name));
     println!("=== {name} ===\n{r}");
     for (metric, value) in [
       ("pairwise f1", r.pairwise_f1),
@@ -589,7 +598,8 @@ fn no_fixture_asks_for_folders_the_validator_would_merge() {
       })
       .collect();
     if let Some(reuse) =
-      eval::score(&expected, &placements).reuse_rate()
+      eval::score(&expected, &placements, &existing_sizes(name))
+        .reuse_rate()
     {
       assert!(
         reuse >= REUSE_FLOOR,

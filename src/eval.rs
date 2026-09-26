@@ -64,6 +64,73 @@ pub struct Placement {
   pub label: String,
 }
 
+/// How many files each already-organised folder holds, before this
+/// run adds anything to it.
+///
+/// The shape metrics ask what a reviewer finds on opening a folder,
+/// and that is everything in the folder — not the share this run
+/// happened to contribute. A second run that drops two photos into a
+/// `Personal/Pets/Biscuit` that already holds four has produced a
+/// six-file folder, and [`Granularity`] calling it thin is the metric
+/// misreading its own input. The validator already agrees: since its
+/// size floor learned about existing folders it declines to fold
+/// exactly the groups scored as thin here, so without this the eval
+/// penalises the behaviour the pipeline was fixed to have.
+///
+/// Empty is a first run, and is [`Default`].
+#[derive(Debug, Clone, Default)]
+pub struct ExistingSizes(HashMap<String, usize>);
+
+impl ExistingSizes {
+  /// Count the files under every directory of an already-organised
+  /// tree, keyed by the label that directory stands for.
+  ///
+  /// A `root` that does not exist gives an empty set, which scores as
+  /// a first run. Files loose at the root belong to no folder and are
+  /// skipped.
+  pub fn from_tree(root: &Path) -> Self {
+    let mut sizes: HashMap<String, usize> = HashMap::new();
+    for entry in walkdir::WalkDir::new(root)
+      .into_iter()
+      .filter_map(std::result::Result::ok)
+      .filter(|e| e.file_type().is_file())
+    {
+      let Ok(rel) = entry.path().strip_prefix(root) else {
+        continue;
+      };
+      let Some(parent) = rel.parent() else { continue };
+      let label = parent.to_string_lossy();
+      if label.is_empty() {
+        continue;
+      }
+      *sizes.entry(normalize_label(&label)).or_default() += 1;
+    }
+    Self(sizes)
+  }
+
+  /// Record a folder that already holds `files` files.
+  pub fn insert(&mut self, label: &str, files: usize) {
+    self.0.insert(normalize_label(label), files);
+  }
+
+  /// Files already filed under `label`; zero if this run invented it.
+  ///
+  /// Keyed like every other label comparison here, so a case or
+  /// punctuation variant of the folder on disk still counts as it.
+  pub fn get(&self, label: &str) -> usize {
+    self.0.get(&normalize_label(label)).copied().unwrap_or(0)
+  }
+
+  /// The labels this set knows about.
+  pub fn len(&self) -> usize {
+    self.0.len()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.0.is_empty()
+  }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Hygiene {
   pub total_groups: usize,
@@ -323,9 +390,14 @@ fn is_system_label(label: &str) -> bool {
     .any(|s| s.eq_ignore_ascii_case(label.trim()))
 }
 
+/// Score a run against its answer key.
+///
+/// `existing` is what the output tree already held before this run;
+/// pass `&ExistingSizes::default()` for a first run.
 pub fn score(
   expected: &ExpectedSet,
   actual: &[Placement],
+  existing: &ExistingSizes,
 ) -> EvalReport {
   let actual_by_path: HashMap<&str, &str> = actual
     .iter()
@@ -409,9 +481,9 @@ pub fn score(
       .map(|e| normalize_label(&e.group))
       .collect::<HashSet<_>>()
       .len(),
-    produced_groups: hygiene(actual).total_groups,
-    hygiene: hygiene(actual),
-    granularity: granularity(actual),
+    produced_groups: hygiene(actual, existing).total_groups,
+    hygiene: hygiene(actual, existing),
+    granularity: granularity(actual, existing),
     reuse_expected,
     reuse_matched,
   }
@@ -428,7 +500,14 @@ fn ratio(num: usize, den: usize) -> f64 {
 }
 
 /// Label hygiene over the actual groups (system groups excluded).
-pub fn hygiene(actual: &[Placement]) -> Hygiene {
+///
+/// `existing` lets a folder that already has files in it out of the
+/// singleton count: one more file into a folder of ten is not a
+/// one-file folder, and the validator no longer collapses it either.
+pub fn hygiene(
+  actual: &[Placement],
+  existing: &ExistingSizes,
+) -> Hygiene {
   let mut members: HashMap<&str, usize> = HashMap::new();
   for p in actual {
     if is_system_label(&p.label) {
@@ -448,7 +527,7 @@ pub fn hygiene(actual: &[Placement]) -> Hygiene {
     let has_type_word =
       segs.iter().any(|s| type_words.contains(s.as_str()));
     let too_deep = segs.len() > MAX_LABEL_DEPTH;
-    let singleton = count == 1;
+    let singleton = count + existing.get(label) == 1;
     if has_type_word {
       h.type_word_groups += 1;
     } else if too_deep {
@@ -465,7 +544,14 @@ pub fn hygiene(actual: &[Placement]) -> Hygiene {
 /// System groups are excluded, as in [`hygiene`]: `Unsorted` is a
 /// holding pen rather than a proposal, and counting it as one enormous
 /// group would hide exactly the thinness this measures.
-pub fn granularity(actual: &[Placement]) -> Granularity {
+///
+/// Sizes are what the folder holds once this run is applied, so a
+/// group is measured against [`ExistingSizes`] as well as its own
+/// members. See that type for why.
+pub fn granularity(
+  actual: &[Placement],
+  existing: &ExistingSizes,
+) -> Granularity {
   let mut members: HashMap<&str, usize> = HashMap::new();
   for p in actual {
     if is_system_label(&p.label) {
@@ -480,10 +566,14 @@ pub fn granularity(actual: &[Placement]) -> Granularity {
     ..Default::default()
   };
   for (label, count) in &members {
-    sizes.push(*count);
+    // What the reviewer opens, not what this run contributed.
+    let on_disk = count + existing.get(label);
+    sizes.push(on_disk);
     g.placed_files += count;
-    if *count < MIN_GROUP_SIZE {
+    if on_disk < MIN_GROUP_SIZE {
       g.thin_groups += 1;
+      // Still this run's files: `placed_files` is the denominator,
+      // and a run is not charged for what a previous one placed.
       g.files_in_thin_groups += count;
     }
     if segments(label).len() == MAX_LABEL_DEPTH {
@@ -500,6 +590,23 @@ pub fn granularity(actual: &[Placement]) -> Granularity {
 mod tests {
   use super::*;
 
+  /// Score as a first run: nothing was organised before, so no group
+  /// is measured against an existing folder.
+  fn scored(
+    expected: &ExpectedSet,
+    actual: &[Placement],
+  ) -> EvalReport {
+    score(expected, actual, &ExistingSizes::default())
+  }
+
+  fn gran(actual: &[Placement]) -> Granularity {
+    granularity(actual, &ExistingSizes::default())
+  }
+
+  fn hyg(actual: &[Placement]) -> Hygiene {
+    hygiene(actual, &ExistingSizes::default())
+  }
+
   fn existing(path: &str, group: &str) -> ExpectedFile {
     ExpectedFile {
       existing: true,
@@ -514,6 +621,114 @@ mod tests {
     }
   }
 
+  /// A folder with `files` already in it.
+  fn already(label: &str, files: usize) -> ExistingSizes {
+    let mut e = ExistingSizes::default();
+    e.insert(label, files);
+    e
+  }
+
+  /// Two more photos into a folder that already holds two is a
+  /// four-file folder, and a reviewer opening it finds four.
+  #[test]
+  fn a_folder_that_already_has_files_is_not_thin() {
+    let run = group_of(2, "Personal/Pets/Biscuit");
+    let g = granularity(&run, &already("Personal/Pets/Biscuit", 2));
+    assert_eq!(g.thin_groups, 0);
+    assert_eq!(g.files_in_thin_groups, 0);
+    assert_eq!(g.score(), 1.0);
+  }
+
+  /// The same two files, in a folder this run invented, still are.
+  #[test]
+  fn the_same_two_files_are_thin_in_a_new_folder() {
+    let g = gran(&group_of(2, "Personal/Pets/Mochi"));
+    assert_eq!(g.thin_groups, 1);
+    assert_eq!(g.files_in_thin_groups, 2);
+    assert_eq!(g.score(), 0.0);
+  }
+
+  /// A run is credited with what it placed, not with what it found.
+  /// `placed_files` is the denominator of the score, so counting the
+  /// previous run's files there would dilute this run's mistakes.
+  #[test]
+  fn existing_files_are_not_counted_as_this_runs() {
+    let run = group_of(2, "Personal/Recipes");
+    let g = granularity(&run, &already("Personal/Recipes", 9));
+    assert_eq!(g.placed_files, 2);
+    assert_eq!(g.total_groups, 1);
+  }
+
+  /// The median reports the size a folder really has once the run is
+  /// applied, which is the only size anyone can go and look at.
+  #[test]
+  fn the_median_counts_what_the_folder_will_hold() {
+    let run = group_of(1, "Work/Acme Corp/Website Redesign");
+    let g = granularity(
+      &run,
+      &already("Work/Acme Corp/Website Redesign", 7),
+    );
+    assert_eq!(g.median_group_size, 8);
+  }
+
+  /// Labels are compared the way they are everywhere else here, so a
+  /// folder on disk is recognised through case and punctuation.
+  #[test]
+  fn an_existing_folder_is_matched_loosely() {
+    let run = group_of(2, "Legal/Smith v. Jones");
+    let g = granularity(&run, &already("legal/smith v jones", 2));
+    assert_eq!(g.thin_groups, 0);
+  }
+
+  /// One file into a folder of ten is not a one-file folder, and the
+  /// validator stopped collapsing it — hygiene has to agree.
+  #[test]
+  fn one_file_into_an_existing_folder_is_not_a_singleton() {
+    let run = group_of(1, "Reference/Manuals");
+    let h = hygiene(&run, &already("Reference/Manuals", 10));
+    assert_eq!(h.singleton_groups, 0);
+    assert_eq!(h.score(), 1.0);
+    // The same lone file in a folder nobody has is still a singleton.
+    assert_eq!(hyg(&run).singleton_groups, 1);
+  }
+
+  /// A folder nobody has yet contributes nothing.
+  #[test]
+  fn an_unknown_label_has_no_existing_files() {
+    assert_eq!(already("Work/Acme Corp", 4).get("Work/Initech"), 0);
+  }
+
+  #[test]
+  fn from_tree_counts_the_files_under_each_folder() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    for (rel, n) in
+      [("Finance/Taxes/2023", 3), ("Personal/Recipes", 1)]
+    {
+      std::fs::create_dir_all(root.join(rel)).unwrap();
+      for i in 0..n {
+        std::fs::write(root.join(rel).join(format!("{i}.txt")), "x")
+          .unwrap();
+      }
+    }
+    // A file loose at the root is in no folder at all.
+    std::fs::write(root.join("stray.txt"), "x").unwrap();
+
+    let e = ExistingSizes::from_tree(root);
+    assert_eq!(e.get("Finance/Taxes/2023"), 3);
+    assert_eq!(e.get("Personal/Recipes"), 1);
+    assert_eq!(e.len(), 2);
+  }
+
+  /// A first run has no tree to read, and that is not an error.
+  #[test]
+  fn from_tree_on_a_missing_root_is_empty() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let e = ExistingSizes::from_tree(&dir.path().join("Organized"));
+    assert!(e.is_empty());
+    assert_eq!(e.get("Anything"), 0);
+  }
+
   /// `n` files, all filed under one label.
   fn group_of(n: usize, label: &str) -> Vec<Placement> {
     (0..n).map(|i| pl(&format!("{label}/{i}"), label)).collect()
@@ -521,7 +736,7 @@ mod tests {
 
   #[test]
   fn a_full_group_is_not_thin() {
-    let g = granularity(&group_of(MIN_GROUP_SIZE, "Work/Acme Corp"));
+    let g = gran(&group_of(MIN_GROUP_SIZE, "Work/Acme Corp"));
     assert_eq!(g.thin_groups, 0);
     assert_eq!(g.files_in_thin_groups, 0);
     assert_eq!(g.score(), 1.0);
@@ -532,8 +747,8 @@ mod tests {
   #[test]
   fn a_group_below_the_floor_is_thin_where_hygiene_sees_nothing() {
     let files = group_of(MIN_GROUP_SIZE - 1, "Work/Acme Corp");
-    assert_eq!(hygiene(&files).score(), 1.0);
-    let g = granularity(&files);
+    assert_eq!(hyg(&files).score(), 1.0);
+    let g = gran(&files);
     assert_eq!(g.thin_groups, 1);
     assert_eq!(g.files_in_thin_groups, 3);
     assert_eq!(g.score(), 0.0);
@@ -545,7 +760,7 @@ mod tests {
   fn thinness_is_weighted_by_files_not_by_groups() {
     let mut files = group_of(18, "Work/Acme Corp");
     files.extend(group_of(2, "Work/Odds and Ends"));
-    let g = granularity(&files);
+    let g = gran(&files);
     assert_eq!((g.total_groups, g.thin_groups), (2, 1));
     // Half the groups are thin; a tenth of the files are.
     assert!((g.score() - 0.9).abs() < 1e-9, "got {}", g.score());
@@ -560,16 +775,15 @@ mod tests {
       split.extend(group_of(2, &format!("Work/Thing {i}")));
     }
     let whole = group_of(20, "Work/Acme Corp");
-    assert_eq!(granularity(&split).score(), 0.0);
-    assert_eq!(granularity(&whole).score(), 1.0);
+    assert_eq!(gran(&split).score(), 0.0);
+    assert_eq!(gran(&whole).score(), 1.0);
   }
 
   /// A legal label at the depth cap is reported but not penalised: a
   /// full third-level folder is the shape the prompt asks for.
   #[test]
   fn depth_at_the_cap_is_counted_but_not_scored() {
-    let g =
-      granularity(&group_of(8, "Work/Acme Corp/Website Redesign"));
+    let g = gran(&group_of(8, "Work/Acme Corp/Website Redesign"));
     assert_eq!(g.deepest_groups, 1);
     assert_eq!(g.score(), 1.0);
   }
@@ -578,7 +792,7 @@ mod tests {
   fn the_holding_pen_is_not_a_group() {
     let mut files = group_of(6, "Work/Acme Corp");
     files.extend(group_of(40, "Unsorted"));
-    let g = granularity(&files);
+    let g = gran(&files);
     assert_eq!((g.total_groups, g.placed_files), (1, 6));
     assert_eq!(g.score(), 1.0);
   }
@@ -588,15 +802,15 @@ mod tests {
     let mut files = group_of(1, "Work/A");
     files.extend(group_of(5, "Work/B"));
     files.extend(group_of(9, "Work/C"));
-    assert_eq!(granularity(&files).median_group_size, 5);
+    assert_eq!(gran(&files).median_group_size, 5);
     // Even count: the upper middle, so the answer is never a fraction.
     files.extend(group_of(11, "Work/D"));
-    assert_eq!(granularity(&files).median_group_size, 9);
+    assert_eq!(gran(&files).median_group_size, 9);
   }
 
   #[test]
   fn no_groups_at_all_is_vacuously_full() {
-    assert_eq!(granularity(&[]).score(), 1.0);
+    assert_eq!(gran(&[]).score(), 1.0);
   }
 
   /// The whole point of the term: a run that shreds correct groups
@@ -621,8 +835,8 @@ mod tests {
       .map(|(i, e)| pl(&e.path, &format!("Work/Acme Corp {}", i / 2)))
       .collect();
 
-    let whole = score(&expected, &whole);
-    let shredded = score(&expected, &shredded);
+    let whole = scored(&expected, &whole);
+    let shredded = scored(&expected, &shredded);
     assert_eq!(whole.granularity.score(), 1.0);
     assert_eq!(shredded.granularity.score(), 0.0);
     assert!(
@@ -649,7 +863,7 @@ mod tests {
       pl("c.txt", "Personal/Recipes/Baking"),
       pl("d.txt", "Work/Initech/Onboarding"),
     ];
-    let report = score(&expected, &actual);
+    let report = scored(&expected, &actual);
     assert_eq!(report.reuse_expected, 3);
     assert_eq!(report.reuse_matched, 2);
     assert!((report.reuse_rate().unwrap() - 2.0 / 3.0).abs() < 1e-9);
@@ -663,7 +877,7 @@ mod tests {
     let expected = ExpectedSet {
       files: vec![exp("a.txt", "Work/Acme")],
     };
-    let report = score(&expected, &[pl("a.txt", "Work/Acme")]);
+    let report = scored(&expected, &[pl("a.txt", "Work/Acme")]);
     assert_eq!(report.reuse_rate(), None);
     assert!(!report.to_string().contains("label reuse"));
   }
@@ -711,7 +925,7 @@ mod tests {
       put("c.txt", "Legal/Lease"),
       put("d.txt", "Legal/Lease"),
     ];
-    let r = score(&expected(), &actual);
+    let r = scored(&expected(), &actual);
     assert_eq!(r.placed_files, 4);
     assert!((r.pairwise_f1 - 1.0).abs() < 1e-9);
     assert!((r.top_level_accuracy - 1.0).abs() < 1e-9);
@@ -733,7 +947,7 @@ mod tests {
         actual.push(put(&path, label));
       }
     }
-    let r = score(&ExpectedSet { files }, &actual);
+    let r = scored(&ExpectedSet { files }, &actual);
     assert!(
       (r.composite() - 1.0).abs() < 1e-9,
       "composite was {:.6}",
@@ -749,7 +963,7 @@ mod tests {
       put("c.txt", "Legal/Lease"),
       put("d.txt", "legal/lease"),
     ];
-    let r = score(&expected(), &actual);
+    let r = scored(&expected(), &actual);
     assert!((r.pairwise_f1 - 1.0).abs() < 1e-9);
     assert!((r.top_level_accuracy - 1.0).abs() < 1e-9);
   }
@@ -762,7 +976,7 @@ mod tests {
       put("c.txt", "Personal"),
       put("d.txt", "Personal"),
     ];
-    let r = score(&expected(), &actual);
+    let r = scored(&expected(), &actual);
     // 2 true pairs of 6 total pairs.
     assert!((r.pairwise_recall - 1.0).abs() < 1e-9);
     assert!((r.pairwise_precision - 2.0 / 6.0).abs() < 1e-9);
@@ -776,7 +990,7 @@ mod tests {
       put("c.txt", "Legal/Lease"),
       put("d.txt", "Legal/Lease"),
     ];
-    let r = score(&expected(), &actual);
+    let r = scored(&expected(), &actual);
     assert_eq!(r.placed_files, 3);
     assert!((r.placed_fraction() - 0.75).abs() < 1e-9);
     // Pair (a,b) is a false negative: recall 1/2.
@@ -794,7 +1008,7 @@ mod tests {
       put("c.txt", "Personal/Lease"),
       put("d.txt", "Personal/Lease"),
     ];
-    let r = score(&expected(), &actual);
+    let r = scored(&expected(), &actual);
     assert!((r.top_level_accuracy - 0.5).abs() < 1e-9);
     // Grouping itself is still perfect.
     assert!((r.pairwise_f1 - 1.0).abs() < 1e-9);
@@ -810,7 +1024,7 @@ mod tests {
       put("c.txt", "Housing/Lease"),
       put("d.txt", "Housing/Lease"),
     ];
-    let r = score(&set, &actual);
+    let r = scored(&set, &actual);
     // c accepts Housing, d does not.
     assert!((r.top_level_accuracy - 0.75).abs() < 1e-9);
   }
@@ -827,7 +1041,7 @@ mod tests {
       put("g", "Good/Group"),
       put("h", "Good/Group"),
     ];
-    let h = hygiene(&actual);
+    let h = hyg(&actual);
     assert_eq!(h.total_groups, 4);
     assert_eq!(h.type_word_groups, 1);
     assert_eq!(h.singleton_groups, 1);
@@ -839,7 +1053,7 @@ mod tests {
   fn hygiene_counts_each_group_once() {
     // Type word AND singleton AND too deep: one violation.
     let actual = vec![put("a", "A/B/C/Files")];
-    let h = hygiene(&actual);
+    let h = hyg(&actual);
     assert_eq!(h.total_groups, 1);
     assert_eq!(h.type_word_groups, 1);
     assert_eq!(h.singleton_groups, 0);
@@ -849,7 +1063,7 @@ mod tests {
 
   #[test]
   fn empty_expected_set_is_vacuously_perfect() {
-    let r = score(&ExpectedSet::default(), &[]);
+    let r = scored(&ExpectedSet::default(), &[]);
     assert!((r.composite() - 1.0).abs() < 1e-9);
   }
 
@@ -932,7 +1146,7 @@ area = "Finance"
       put("c.txt", "Legal/Lease"),
       put("d.txt", "Unsorted"),
     ];
-    let r = score(&expected(), &actual);
+    let r = scored(&expected(), &actual);
     assert_eq!(r.expected_groups, 2);
     assert_eq!(r.produced_groups, 3);
     assert!(r.to_string().contains("3 produced / 2 expected"));
@@ -940,7 +1154,7 @@ area = "Finance"
 
   #[test]
   fn report_display_lists_every_metric() {
-    let r = score(&expected(), &[]);
+    let r = scored(&expected(), &[]);
     let text = r.to_string();
     for key in [
       "placed",
