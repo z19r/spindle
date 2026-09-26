@@ -5,7 +5,8 @@ pub(crate) fn render_detail(
   area: Rect,
   state: &mut ReviewState,
 ) {
-  let focused = false;
+  let focused =
+    state.focus == Pane::Detail && state.mode == Mode::Normal;
   let block = panel_block("Detail", focused);
 
   if state.groups.is_empty() {
@@ -18,16 +19,18 @@ pub(crate) fn render_detail(
     return;
   }
 
+  // `detail_of`, not `focus`: tabbing into the detail column to scroll
+  // it must not swap the file's facts out for the group's summary.
   let in_files =
-    state.mode == Mode::Normal && state.focus == Pane::Files;
-  if state.focus == Pane::Files {
+    state.mode == Mode::Normal && state.detail_of == Pane::Files;
+  if state.detail_of == Pane::Files {
     state.ensure_facts_for_current();
   }
   let show_image = state.has_image_preview() && in_files;
   let show_loading = state.is_image_loading() && in_files;
 
   let lines = match &state.mode {
-    Mode::Normal if state.focus == Pane::Files => {
+    Mode::Normal if state.detail_of == Pane::Files => {
       render_detail_file(state)
     }
     Mode::Normal => render_detail_group(state),

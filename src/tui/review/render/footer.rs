@@ -100,6 +100,20 @@ pub(crate) fn key_table(
   review_mode: ReviewMode,
   pane: Option<Pane>,
 ) -> Vec<(&'static str, &'static str)> {
+  // The detail column has no cursor and no actions of its own; every
+  // list-pane key would be a lie there.
+  if pane == Some(Pane::Detail) {
+    return vec![
+      ("j/k", "scroll"),
+      ("pgup/pgdn", "page"),
+      ("home/end", "top/bottom"),
+      ("tab", "pane"),
+      ("x", "execute"),
+      ("?", "help"),
+      ("q", "quit"),
+    ];
+  }
+
   let groups = pane != Some(Pane::Files);
   let files = pane != Some(Pane::Groups);
   let organize = review_mode == ReviewMode::Organize;
@@ -108,12 +122,14 @@ pub(crate) fn key_table(
   match pane {
     Some(Pane::Groups) => k.push(("\u{23ce}", "open files")),
     Some(Pane::Files) => k.push(("\u{23ce}", "preview")),
-    None => k.push(("\u{23ce}", "open (files / preview)")),
+    Some(Pane::Detail) | None => {
+      k.push(("\u{23ce}", "open (files / preview)"))
+    }
   }
   match pane {
     Some(Pane::Groups) => k.push(("\u{2423}", "approve")),
     Some(Pane::Files) => k.push(("\u{2423}", "keep/delete")),
-    None => {
+    Some(Pane::Detail) | None => {
       k.push(("\u{2423}", "toggle (approve group / keep file)"))
     }
   }
