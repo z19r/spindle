@@ -38,6 +38,27 @@ fn init_theme(cli: &CliArgs, config: &Config) {
   }
 }
 
+/// Negotiate the best image protocol the terminal offers, falling back
+/// to halfblocks rather than to no preview at all.
+///
+/// The query fails when the terminal answers nothing in time — under
+/// tmux without `allow-passthrough`, or on a slow pty. That says the
+/// terminal has no *graphics* protocol, not that it cannot draw:
+/// half blocks render through ordinary coloured cells anywhere, and
+/// `Picker::halfblocks` assumes a cell size rather than asking. That
+/// assumption only sets the aspect ratio, and being a little wrong
+/// about that beats an empty pane.
+fn query_picker() -> ratatui_image::picker::Picker {
+  use ratatui_image::picker::Picker;
+  match Picker::from_query_stdio() {
+    Ok(p) => p,
+    Err(e) => {
+      tracing::debug!(%e, "no graphics protocol; using half blocks");
+      Picker::halfblocks()
+    }
+  }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
   dotenv().ok();
@@ -240,7 +261,7 @@ async fn main() -> Result<()> {
     return Ok(());
   }
 
-  let picker = ratatui_image::picker::Picker::from_query_stdio().ok();
+  let picker = Some(query_picker());
 
   let review_state = ReviewState::new(
     plan.groups.clone(),
@@ -615,7 +636,7 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
   let (groups, moves, dupe_types) =
     dupes_to_groups(&dupes, &fingerprinted);
 
-  let picker = ratatui_image::picker::Picker::from_query_stdio().ok();
+  let picker = Some(query_picker());
   let mut review_state = ReviewState::new(
     groups,
     moves,

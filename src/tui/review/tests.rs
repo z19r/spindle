@@ -1042,6 +1042,78 @@ fn preview_state_defaults_none() {
   assert!(!state.is_image_loading());
 }
 
+/// A video selected in the files pane used to preview as nothing at
+/// all. It now shows a still from a little way in.
+#[test]
+fn decode_video_still_returns_a_frame() {
+  if std::process::Command::new("ffmpeg")
+    .arg("-version")
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map(|s| !s.success())
+    .unwrap_or(true)
+  {
+    eprintln!("ffmpeg not on PATH; skipping");
+    return;
+  }
+  let dir = tempfile::TempDir::new().unwrap();
+  let path = dir.path().join("clip.mp4");
+  assert!(std::process::Command::new("ffmpeg")
+    .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+    .arg("testsrc2=s=320x240:r=10:d=2")
+    .args(["-pix_fmt", "yuv420p"])
+    .arg(&path)
+    .status()
+    .unwrap()
+    .success());
+
+  let img = super::state::decode_video_still(&path)
+    .expect("a two-second clip has a frame at one second");
+  assert_eq!((img.width(), img.height()), (320, 240));
+}
+
+/// Shorter than the seek point, so the one-second seek fails and the
+/// retry at the start is what produces the preview.
+#[test]
+fn decode_video_still_falls_back_to_the_start() {
+  if std::process::Command::new("ffmpeg")
+    .arg("-version")
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map(|s| !s.success())
+    .unwrap_or(true)
+  {
+    eprintln!("ffmpeg not on PATH; skipping");
+    return;
+  }
+  let dir = tempfile::TempDir::new().unwrap();
+  let path = dir.path().join("blink.mp4");
+  assert!(std::process::Command::new("ffmpeg")
+    .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+    .arg("testsrc2=s=64x64:r=10:d=0.3")
+    .args(["-pix_fmt", "yuv420p"])
+    .arg(&path)
+    .status()
+    .unwrap()
+    .success());
+
+  let img = super::state::decode_video_still(&path)
+    .expect("a clip shorter than the seek still has a first frame");
+  assert_eq!((img.width(), img.height()), (64, 64));
+}
+
+/// Not every file is previewable, and a decoder that invents an image
+/// for a text file would be worse than an empty pane.
+#[test]
+fn decode_video_still_gives_up_on_a_non_video() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let path = dir.path().join("notes.txt");
+  std::fs::write(&path, "not a video").unwrap();
+  assert!(super::state::decode_video_still(&path).is_none());
+}
+
 #[test]
 fn poll_image_decode_clears_on_disconnect() {
   let mut state = make_state();

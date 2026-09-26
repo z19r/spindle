@@ -2,6 +2,36 @@
 
 use super::*;
 
+/// A still from a little way into a video, for the preview pane.
+///
+/// One second in, not zero: the opening frame of a video is very often
+/// black or a fade, which makes for a preview that says nothing about
+/// the file. Anything shorter than that has no second to seek to, so a
+/// failed seek retries at the start rather than giving up.
+///
+/// One decode thread. This runs while the reviewer is scrolling, and a
+/// preview is not worth taking the machine away from them.
+pub(crate) fn decode_video_still(
+  path: &Path,
+) -> Option<image::DynamicImage> {
+  const SEEK_SECS: f64 = 1.0;
+  let png = crate::video::extract_frame_at_blocking(
+    path, SEEK_SECS, 1,
+  )
+  .or_else(|e| {
+    tracing::debug!(?path, %e, "no frame at 1s; trying the start");
+    crate::video::extract_frame_at_blocking(path, 0.0, 1)
+  })
+  .ok()?;
+  match image::load_from_memory(&png) {
+    Ok(img) => Some(img),
+    Err(e) => {
+      tracing::debug!(?path, %e, "ffmpeg frame did not decode");
+      None
+    }
+  }
+}
+
 pub(crate) fn decode_image(
   path: &Path,
 ) -> Option<image::DynamicImage> {
@@ -716,16 +746,15 @@ impl ReviewState {
     let Some(picker) = &self.picker else { return };
     let Some(path) = path else { return };
 
-    let is_image = path
+    let file_type = path
       .extension()
       .and_then(|e| e.to_str())
-      .map(FileType::from_extension)
-      .map(|ft| ft.is_image())
-      .unwrap_or(false);
-
-    if !is_image {
+      .map(FileType::from_extension);
+    let Some(file_type) = file_type else { return };
+    if !file_type.is_image() && !file_type.is_video() {
       return;
     }
+    let is_video = file_type.is_video();
 
     self.preview = PreviewState::Loading;
 
@@ -734,7 +763,12 @@ impl ReviewState {
     self.image_rx = Some(rx);
 
     thread::spawn(move || {
-      if let Some(img) = decode_image(&path) {
+      let img = if is_video {
+        decode_video_still(&path)
+      } else {
+        decode_image(&path)
+      };
+      if let Some(img) = img {
         let protocol = picker_clone.new_resize_protocol(img);
         let _ = tx.send((path, protocol));
       }
