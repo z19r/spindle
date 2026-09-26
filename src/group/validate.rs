@@ -58,13 +58,24 @@ pub struct Normalisation {
   /// Leaf groups folded into their parent label: too few files to be
   /// worth a folder of their own.
   pub collapsed: usize,
-  /// Labels rewritten (type words dropped, depth capped, whitespace).
+  /// Labels rewritten: type words dropped, depth capped, whitespace
+  /// tidied, or the area re-parented to reconcile a split topic.
   pub rewritten: usize,
 }
 
 /// Note attached to members of a group whose label was nothing but type
 /// words: it carried no subject, so the files go to `Unsorted`.
 pub const TYPE_ONLY_NOTE: &str = "grouped only by file type";
+
+/// Areas whose membership is a decision rather than a routing guess.
+/// A group under one of these never reconciles into another area.
+///
+/// The pipeline pre-routes explicit content to `Private` without
+/// consulting the router at all. Folding `Private/Identification
+/// Documents` into `Legal/Identification Documents` because the two
+/// share a name would quietly undo that, which is the one mistake in
+/// this module a user cannot shrug off.
+pub const STICKY_AREAS: &[&str] = &["private"];
 
 /// Sibling groups that differ only by a trailing token are merged unless
 /// the result would hold more files than this.
@@ -162,10 +173,142 @@ pub fn validate_groups(
     out = merge_by_key(out, &mut n.merged);
   }
 
+  out = reconcile_across_areas(out, &mut n.rewritten);
+  // Re-parenting can make two labels identical; this is what merges
+  // them. Both run before the size floor, so a topic that is only thin
+  // because it was split keeps its specific label.
+  out = merge_by_key(out, &mut n.merged);
   out = fold_thin_leaves(out, &mut n);
 
   out.extend(system);
   (out, n)
+}
+
+/// Unify a topic that routing split across two taxonomy areas.
+///
+/// Routing picks an area per batch, independently, and
+/// `ensure_area_prefix` then nails that choice into the label. When two
+/// batches route the same topic differently, the result is two parallel
+/// trees: `Reference/Linux System Administration/Network Diagnostics`
+/// alongside `Software/Linux System Administration/Samba Share
+/// Manager`. No within-area rule can see that, because every other pass
+/// compares whole labels and the whole labels genuinely differ — right
+/// down to the leaf, which is why comparing tails does not catch it
+/// either. The shared thing is the *topic segment*, the one right after
+/// the area.
+///
+/// So each topic is counted by area, and every group under a losing
+/// area is re-parented into the winning one. Merging is left to
+/// [`merge_by_key`], which runs next and folds whatever labels this
+/// made identical; groups that only shared a subtree keep their own
+/// leaves and simply end up under one roof.
+///
+/// Ties go to the area of the earliest group, so the result does not
+/// depend on map iteration order. [`reconcilable`] holds the guards.
+fn reconcile_across_areas(
+  groups: Vec<ProposedGroup>,
+  rewritten: &mut usize,
+) -> Vec<ProposedGroup> {
+  // Normalised topic → area as spelled → (files under it, first pos).
+  let mut by_topic: HashMap<String, HashMap<String, (usize, usize)>> =
+    HashMap::new();
+  for (pos, g) in groups.iter().enumerate() {
+    if !reconcilable(&g.label) {
+      continue;
+    }
+    let seen = by_topic
+      .entry(normalize_segment(topic_of(&g.label)))
+      .or_default()
+      .entry(area_of(&g.label).to_string())
+      .or_insert((0, pos));
+    seen.0 += g.member_indices.len();
+    seen.1 = seen.1.min(pos);
+  }
+
+  // Normalised topic → the one area all its groups belong under.
+  let mut winners: HashMap<String, String> = HashMap::new();
+  for (topic, areas) in by_topic {
+    if areas.len() < 2 {
+      continue;
+    }
+    // Most files wins; the earliest of equals wins, for determinism.
+    let (area, _) = areas
+      .iter()
+      .max_by_key(|(_, &(files, first))| {
+        (files, std::cmp::Reverse(first))
+      })
+      .expect("areas is non-empty");
+    winners.insert(topic, area.clone());
+  }
+  if winners.is_empty() {
+    return groups;
+  }
+
+  let mut out = groups;
+  for g in &mut out {
+    if !reconcilable(&g.label) {
+      continue;
+    }
+    let Some(area) =
+      winners.get(&normalize_segment(topic_of(&g.label)))
+    else {
+      continue;
+    };
+    if area == area_of(&g.label) {
+      continue;
+    }
+    let mut segments: Vec<&str> = g
+      .label
+      .split('/')
+      .map(str::trim)
+      .filter(|s| !s.is_empty())
+      .collect();
+    segments[0] = area.as_str();
+    let moved = segments.join("/");
+    g.label = moved;
+    *rewritten += 1;
+  }
+  out
+}
+
+/// Whether a group may be moved between areas at all.
+///
+/// A bare area is not a topic, so `Work` never swallows `Personal`.
+/// [`STICKY_AREAS`] never move, in either direction: their membership
+/// was decided rather than guessed.
+///
+/// There is deliberately no guard for topic segments that name a file
+/// type rather than a subject — `Finance/Documents` beside
+/// `Legal/Documents`. [`TYPE_WORDS`] stripping runs first and takes
+/// those segments off entirely, which leaves a bare area that the
+/// depth test already excludes.
+fn reconcilable(label: &str) -> bool {
+  !is_system_label(label)
+    && depth(label) >= 2
+    && !STICKY_AREAS
+      .contains(&normalize_segment(area_of(label)).as_str())
+    && !TYPE_WORDS
+      .contains(&normalize_segment(topic_of(label)).as_str())
+}
+
+/// A label's first segment: the taxonomy area routing chose.
+fn area_of(label: &str) -> &str {
+  label
+    .split('/')
+    .map(str::trim)
+    .find(|s| !s.is_empty())
+    .unwrap_or("")
+}
+
+/// The segment right after the area — what the group is *about*,
+/// independent of where it was filed.
+fn topic_of(label: &str) -> &str {
+  label
+    .split('/')
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+    .nth(1)
+    .unwrap_or("")
 }
 
 /// Fold every deepest-level group holding fewer than
@@ -584,6 +727,151 @@ mod tests {
 
   fn labels(groups: &[ProposedGroup]) -> Vec<&str> {
     groups.iter().map(|g| g.label.as_str()).collect()
+  }
+
+  /// The reported case: routing filed the same topic under two
+  /// different areas, and every other pass compares whole labels, so
+  /// nothing could see it.
+  #[test]
+  fn the_same_topic_in_two_areas_moves_to_the_larger() {
+    let (out, n) = validate_groups(vec![
+      g("Legal/Identification Cards", &[0, 1]),
+      g("Work/Identification Cards", &[2, 3, 4]),
+    ]);
+    assert_eq!(labels(&out), vec!["Work/Identification Cards"]);
+    assert_eq!(out[0].member_indices, vec![0, 1, 2, 3, 4]);
+    assert_eq!(n.merged, 1);
+    assert_eq!(n.rewritten, 1);
+  }
+
+  /// Explicit content is pre-routed to `Private` deliberately, not by
+  /// the router. Reconciling it away on a shared name would put it
+  /// back in a general folder — the one failure here that matters.
+  #[test]
+  fn private_never_reconciles_into_another_area() {
+    let (out, n) = validate_groups(vec![
+      g("Personal/Selfies", &[0, 1, 2, 3, 4, 5]),
+      g("Private/Selfies", &[6, 7]),
+    ]);
+    assert_eq!(
+      labels(&out),
+      vec!["Personal/Selfies", "Private/Selfies"]
+    );
+    assert_eq!(n.merged, 0);
+    // Nor in the other direction, whichever is larger.
+    let (out, _) = validate_groups(vec![
+      g("Private/Selfies", &[0, 1, 2, 3, 4, 5]),
+      g("Personal/Selfies", &[6, 7]),
+    ]);
+    assert_eq!(
+      labels(&out),
+      vec!["Private/Selfies", "Personal/Selfies"]
+    );
+  }
+
+  /// The case from the real run: one subtree, two areas, and *no two
+  /// leaves alike*. Nothing here merges — the whole point is that the
+  /// four folders end up under one roof instead of two.
+  #[test]
+  fn a_subtree_routed_to_two_areas_gathers_under_one_area() {
+    let (out, n) = validate_groups(vec![
+      g(
+        "Software/Linux System Administration/Bootloader",
+        &[0, 1, 2, 3],
+      ),
+      g("Software/Linux System Administration/Samba", &[4, 5, 6, 7]),
+      g(
+        "Reference/Linux System Administration/Network",
+        &[8, 9, 10, 11],
+      ),
+      g(
+        "Reference/Linux System Administration/Mounts",
+        &[12, 13, 14, 15],
+      ),
+    ]);
+    assert_eq!(
+      labels(&out),
+      vec![
+        "Software/Linux System Administration/Bootloader",
+        "Software/Linux System Administration/Samba",
+        "Software/Linux System Administration/Network",
+        "Software/Linux System Administration/Mounts",
+      ]
+    );
+    assert_eq!(n.merged, 0);
+    assert_eq!(n.rewritten, 2);
+  }
+
+  /// Equal sizes must not resolve by hash order.
+  #[test]
+  fn equal_sized_areas_resolve_to_the_first_label() {
+    let one = vec![
+      g("Legal/Identification Cards", &[0, 1]),
+      g("Health/Identification Cards", &[2, 3]),
+    ];
+    let mut two = one.clone();
+    two.reverse();
+    let (a, _) = validate_groups(one);
+    let (b, _) = validate_groups(two);
+    assert_eq!(labels(&a), vec!["Legal/Identification Cards"]);
+    assert_eq!(labels(&b), vec!["Health/Identification Cards"]);
+    // Whichever label wins, every file is in exactly one group.
+    assert_eq!(a[0].member_indices.len(), 4);
+    assert_eq!(b[0].member_indices.len(), 4);
+  }
+
+  /// A bare area is not a topic, so `Work` and `Personal` must not
+  /// collapse into each other on an empty topic segment.
+  #[test]
+  fn bare_areas_never_reconcile() {
+    let (out, _) = validate_groups(vec![
+      g("Work", &[0, 1, 2, 3]),
+      g("Personal", &[4, 5, 6, 7]),
+    ]);
+    assert_eq!(labels(&out), vec!["Work", "Personal"]);
+  }
+
+  /// Two areas' paperwork must not gather under one just because both
+  /// said "Documents". Nothing in this pass guards that: the type-word
+  /// stripping upstream takes the segment off first, leaving bare
+  /// areas that the depth test excludes. If that stripping is ever
+  /// loosened, this test is what notices.
+  #[test]
+  fn a_type_word_topic_never_reconciles() {
+    let (out, n) = validate_groups(vec![
+      g("Finance/Documents", &[0, 1, 2, 3, 4, 5]),
+      g("Legal/Documents", &[6, 7, 8, 9]),
+    ]);
+    assert_eq!(labels(&out), vec!["Finance", "Legal"]);
+    assert_eq!(n.merged, 0);
+  }
+
+  /// Reconciling runs before the size floor, so a topic that is only
+  /// thin because it was split across areas keeps its specific label
+  /// instead of being folded up to its parent.
+  #[test]
+  fn reconciling_first_saves_a_split_topic_from_the_size_floor() {
+    let (out, _) = validate_groups(vec![
+      g("Reference/Apple Devices/Repairs", &[0, 1]),
+      g("Software/Apple Devices/Repairs", &[2, 3]),
+    ]);
+    assert_eq!(labels(&out), vec!["Reference/Apple Devices/Repairs"]);
+    assert_eq!(out[0].member_indices.len(), 4);
+  }
+
+  /// Different topics that merely sit at the same depth stay apart.
+  #[test]
+  fn different_topics_in_different_areas_are_left_alone() {
+    let (out, n) = validate_groups(vec![
+      g("Work/Invoices", &[0, 1, 2, 3]),
+      g("Personal/Receipts", &[4, 5, 6, 7]),
+    ]);
+    assert_eq!(
+      labels(&out),
+      vec!["Work/Invoices", "Personal/Receipts"]
+    );
+    assert_eq!(n.merged, 0);
+    assert_eq!(n.rewritten, 0);
   }
 
   #[test]
