@@ -21,18 +21,41 @@ use spindle::pipeline::{self, PipelineConfig, PipelineEvent};
 /// score its own `expected.toml` gets when every file lands exactly
 /// where the answer key says, and that is not 1.000 for every
 /// fixture: the granularity term reads the *shape* of the folders, so
-/// a fixture built from pairs caps itself. `organize` tops out at
-/// 0.944 and `organize-second-run` at 0.900, because their ground
-/// truth holds groups of two and three. Comparing four fixtures with
-/// four different ceilings against one absolute number compares
-/// nothing, and the reading drifts silently every time a fixture
-/// gains a file. These preserve the headroom the absolute floors
-/// allowed — 0.90, 0.85, 0.85 against a ceiling then assumed to be
-/// 1.000 — so a run that passed before still passes.
+/// a fixture built from pairs caps itself, and `organize-second-run`
+/// still does. Comparing four fixtures with four different ceilings
+/// against one absolute number compares nothing, and the reading
+/// drifts silently every time a fixture gains a file. These preserve
+/// the headroom the absolute floors allowed — 0.90, 0.85, 0.85
+/// against a ceiling then assumed to be 1.000 — so a run that passed
+/// before still passes. Each fixture's ceiling is written down in
+/// [`MIN_CEILING`], which is what stops one drifting down unnoticed.
 const SLACK: f64 = 0.10;
 const LARGE_SLACK: f64 = 0.15;
 const SECOND_RUN_SLACK: f64 = 0.15;
 const GRANULARITY_SLACK: f64 = 0.15;
+/// The lowest each fixture's own answer key may score against itself.
+///
+/// A fixture's ceiling is a property of the fixture, and it moves when
+/// files are added to it. Recording it here makes that move deliberate:
+/// splitting one expected folder into two thin ones drops the ceiling,
+/// every floor derived from it drops in step, and nothing would
+/// otherwise say the eval had gone quietly slacker.
+///
+/// `organize` and `organize-granularity` reach 1.000 — no expected
+/// folder in either is under `MIN_GROUP_SIZE`. `organize-large` keeps
+/// five small folders on purpose, because a large real tree has some,
+/// and pays 0.011 for them. `organize-second-run` sits at 0.900 for a
+/// reason that is not thinness at all: every one of its folders already
+/// exists on disk with files in it, and the granularity term counts
+/// only this run's share. That is #153; when it lands, this entry
+/// should go to 1.000.
+const MIN_CEILING: [(&str, f64); 4] = [
+  ("organize", 1.000),
+  ("organize-large", 0.985),
+  ("organize-second-run", 0.895),
+  ("organize-granularity", 1.000),
+];
+
 /// Share of files whose folder already existed and that landed under
 /// exactly that label.
 const REUSE_FLOOR: f64 = 0.75;
@@ -429,9 +452,13 @@ fn every_fixture_ground_truth_is_internally_consistent() {
         "{name}: its own answer key scores {value:.4} on {metric}"
       );
     }
+    let (_, floor) = MIN_CEILING
+      .iter()
+      .find(|(n, _)| *n == name)
+      .unwrap_or_else(|| panic!("{name} has no recorded ceiling"));
     assert!(
-      ceiling(name) - GRANULARITY_SLACK.max(SLACK) > 0.0,
-      "{name}: ceiling {:.3} leaves no room for a floor",
+      ceiling(name) >= *floor - 1e-9,
+      "{name}: ceiling {:.3} has slipped below the recorded {floor:.3};        a run that gets everything right now scores less than it used to",
       ceiling(name)
     );
   }

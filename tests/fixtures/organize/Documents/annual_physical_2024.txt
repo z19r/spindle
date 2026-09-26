@@ -1,0 +1,7 @@
+Providence Internal Medicine - Visit Summary
+Patient: Jordan Alvarez, DOB 1988-02-11
+Visit date: 2024-08-22     Provider: Dr. Chen
+
+Annual physical. BP 118/76, HR 64, BMI 23.1.
+Reviewed 2024-08-15 bloodwork: vitamin D low, start 2000 IU daily.
+Return in 12 months, or sooner if symptoms change.
