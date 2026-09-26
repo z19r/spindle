@@ -21,7 +21,7 @@ Or download a binary from [Releases](https://github.com/z19r/spindle/releases).
 ## Usage
 
 ```bash
-# Scan and organize (dry-run by default)
+# Scan and propose a plan; nothing moves until you approve it
 spindle /path/to/messy/folder
 
 # Find duplicates only
@@ -41,7 +41,67 @@ spindle --json /path/to/folder > plan.json
 
 # Execute the proposed plan without the review screen (undoable)
 spindle --yes /path/to/folder
+
+# Only photos and videos
+spindle --type photo,video /path/to/folder
+
+# Stop before spending more than a dollar on analysis
+spindle --max-cost 1.00 /path/to/folder
 ```
+
+## Undoing a run
+
+Every executed run is journalled, and nothing is deleted outright:
+files spindle would remove are staged in a trash directory instead.
+Both live under your data directory (`~/.local/share/spindle` on
+Linux).
+
+```bash
+# What can be undone, newest first
+spindle --list-undo
+
+# Put the most recent run back
+spindle --undo
+
+# Put a specific run back
+spindle --undo-run <RUN_ID>
+```
+
+Undo moves files back where they came from and restores deletions out
+of the staged trash. If some files cannot be restored — you moved one
+yourself since the run, say — spindle reports them and keeps the
+journal, so you can clear the obstruction and undo again.
+
+Staged deletions still occupy disk. Reclaim the space once you are
+sure you want them gone:
+
+```bash
+# Empty the staged trash
+spindle --purge
+
+# Only the parts older than a week
+spindle --purge --older-than 7
+```
+
+## Options
+
+`spindle --help` is the full list. The ones worth knowing:
+
+| Flag | What it does |
+| --- | --- |
+| `-n, --dry-run` | Print what you approved on the review screen and exit without moving anything. |
+| `-y, --yes` | Execute without the review screen. Undoable. |
+| `--json` | Print the plan as JSON and exit; no terminal needed. |
+| `-o, --output <DIR>` | Where organized files go. |
+| `-t, --type <LIST>` | Only these categories: image, video, audio, document, archive, installer (aliases: photo, movie, music, pdf, zip, app). Comma-separated. |
+| `--max-cost <USD>` | Stop before spending more than this on analysis. |
+| `--max-files <N>` | Cap how many files go to the model. |
+| `--batch` | Use the Batch API: half the price, minutes to hours. |
+| `--dupes-only` | Exact duplicates only — no AI, no grouping, no review screen. |
+| `--no-ai` | Skip analysis entirely; hash-based dedup only. |
+| `--include-trash` | Scan trash and recycle-bin folders too. |
+| `-c, --config <PATH>` | Config file to use instead of the default. |
+| `-v, --verbose` | Repeatable: `-v`, `-vv`, `-vvv`. |
 
 ## Configuration
 
