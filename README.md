@@ -103,6 +103,11 @@ Below that, **Also fits** lists up to three other groups whose files share tags
 with this one, with the shared tags and a couple of member filenames so you
 can judge without navigating. Press `1`, `2` or `3` to move the file there.
 
+`Tab` cycles the focus through all three columns, so when a description runs
+past the bottom of the pane you can Tab into it and scroll with `j`/`k`, the
+arrows, `PageUp`/`PageDown` or `Home`/`End`. From any column, `[` and `]`
+scroll it without moving the focus.
+
 ### Learning from your review
 
 When you rename a group, merge groups, or move files in the review screen and
