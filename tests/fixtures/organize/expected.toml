@@ -2,6 +2,14 @@
 # folder; the scorer only checks that files sharing a group land
 # together and that the first label segment matches `area` (or one
 # of `alt_areas` when a reasonable organizer could file it elsewhere).
+#
+# Every folder here holds at least MIN_GROUP_SIZE files, which is the
+# smallest the validator will leave standing. An answer key built from
+# pairs asks for folders no run can produce, and it also pins the
+# granularity score near zero, so the fixture cannot tell a run that
+# shreds a topic into pairs from one that does not — the very mistake
+# that metric exists to catch. Keep it that way when adding files: a
+# new folder needs four members or it belongs in an existing one.
 
 # --- Work: Acme Corp website redesign ---
 [[file]]
@@ -105,6 +113,12 @@ group = "Photos/Pets/Biscuit"
 area = "Photos"
 alt_areas = ["Personal", "Pets", "Media"]
 
+[[file]]
+path = "Desktop/biscuit_snow.jpg"
+group = "Photos/Pets/Biscuit"
+area = "Photos"
+alt_areas = ["Personal", "Pets"]
+
 # --- Recipes ---
 [[file]]
 path = "Desktop/grandma_lasagna.md"
@@ -114,6 +128,18 @@ alt_areas = ["Recipes", "Food"]
 
 [[file]]
 path = "Desktop/sourdough_notes.md"
+group = "Personal/Recipes"
+area = "Personal"
+alt_areas = ["Recipes", "Food"]
+
+[[file]]
+path = "Desktop/thai_green_curry.md"
+group = "Personal/Recipes"
+area = "Personal"
+alt_areas = ["Recipes", "Food"]
+
+[[file]]
+path = "Desktop/skillet_cornbread.md"
 group = "Personal/Recipes"
 area = "Personal"
 alt_areas = ["Recipes", "Food"]
@@ -154,6 +180,16 @@ path = "Documents/smith_v_jones_discovery_request.txt"
 group = "Legal/Smith v Jones"
 area = "Legal"
 
+[[file]]
+path = "Documents/smith_v_jones_answer.txt"
+group = "Legal/Smith v Jones"
+area = "Legal"
+
+[[file]]
+path = "Documents/smith_v_jones_deposition_notice.txt"
+group = "Legal/Smith v Jones"
+area = "Legal"
+
 # --- Taxes 2023 ---
 [[file]]
 path = "Documents/2023_w2_acme.txt"
@@ -169,6 +205,12 @@ alt_areas = ["Taxes"]
 
 [[file]]
 path = "Documents/turbotax_receipt_2023.txt"
+group = "Finance/Taxes/2023"
+area = "Finance"
+alt_areas = ["Taxes"]
+
+[[file]]
+path = "Documents/2023_charitable_donations.txt"
 group = "Finance/Taxes/2023"
 area = "Finance"
 alt_areas = ["Taxes"]
@@ -192,6 +234,12 @@ group = "Finance/Bills"
 area = "Finance"
 alt_areas = ["Personal", "Home", "Housing", "Utilities"]
 
+[[file]]
+path = "Documents/portland_water_bill_2024-08.txt"
+group = "Finance/Bills"
+area = "Finance"
+alt_areas = ["Personal", "Home", "Housing", "Utilities"]
+
 # --- Health ---
 [[file]]
 path = "Documents/bloodwork_results_2024.txt"
@@ -204,6 +252,18 @@ path = "Documents/dentist_invoice_2024.txt"
 group = "Health"
 area = "Health"
 alt_areas = ["Personal", "Medical", "Finance"]
+
+[[file]]
+path = "Documents/annual_physical_2024.txt"
+group = "Health"
+area = "Health"
+alt_areas = ["Personal", "Medical"]
+
+[[file]]
+path = "Documents/allergy_prescription_2024.txt"
+group = "Health"
+area = "Health"
+alt_areas = ["Personal", "Medical"]
 
 # --- Software installers ---
 [[file]]
@@ -224,6 +284,12 @@ group = "Software/Installers"
 area = "Software"
 alt_areas = ["Downloads", "Apps", "Applications"]
 
+[[file]]
+path = "Downloads/Docker-4.28.0.dmg"
+group = "Software/Installers"
+area = "Software"
+alt_areas = ["Downloads", "Apps", "Applications"]
+
 # --- Podcasts ---
 [[file]]
 path = "Downloads/podcast_ep12_rust_async.mp3"
@@ -233,6 +299,18 @@ alt_areas = ["Audio", "Podcasts", "Reference"]
 
 [[file]]
 path = "Downloads/podcast_ep13_tokio_internals.mp3"
+group = "Media/Podcasts"
+area = "Media"
+alt_areas = ["Audio", "Podcasts", "Reference"]
+
+[[file]]
+path = "Downloads/podcast_ep14_embedded_rust.mp3"
+group = "Media/Podcasts"
+area = "Media"
+alt_areas = ["Audio", "Podcasts", "Reference"]
+
+[[file]]
+path = "Downloads/podcast_ep15_wasm_runtimes.mp3"
 group = "Media/Podcasts"
 area = "Media"
 alt_areas = ["Audio", "Podcasts", "Reference"]
@@ -250,6 +328,18 @@ group = "Personal/Job Search"
 area = "Personal"
 alt_areas = ["Work", "Career"]
 
+[[file]]
+path = "Downloads/cover_letter_hooli.txt"
+group = "Personal/Job Search"
+area = "Personal"
+alt_areas = ["Work", "Career"]
+
+[[file]]
+path = "Downloads/interview_prep_questions.md"
+group = "Personal/Job Search"
+area = "Personal"
+alt_areas = ["Work", "Career"]
+
 # --- Rust reference notes ---
 [[file]]
 path = "Downloads/rust_async_cheatsheet.md"
@@ -259,6 +349,18 @@ alt_areas = ["Work", "Personal", "Tech", "Programming", "Learning"]
 
 [[file]]
 path = "Downloads/tokio_notes.md"
+group = "Reference/Rust"
+area = "Reference"
+alt_areas = ["Work", "Personal", "Tech", "Programming", "Learning"]
+
+[[file]]
+path = "Downloads/rust_error_handling_notes.md"
+group = "Reference/Rust"
+area = "Reference"
+alt_areas = ["Work", "Personal", "Tech", "Programming", "Learning"]
+
+[[file]]
+path = "Downloads/serde_field_attributes.md"
 group = "Reference/Rust"
 area = "Reference"
 alt_areas = ["Work", "Personal", "Tech", "Programming", "Learning"]
