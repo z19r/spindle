@@ -2,7 +2,20 @@
 
 use super::*;
 
+/// Rows PageUp/PageDown move the detail column by.
+const DETAIL_PAGE: i16 = 10;
+
 impl ReviewState {
+  /// Move focus, remembering which list pane the detail column is
+  /// describing. Tabbing into [`Pane::Detail`] must not change what it
+  /// shows, so the renderer keys off `detail_of` rather than `focus`.
+  pub(crate) fn set_focus(&mut self, pane: Pane) {
+    if pane != Pane::Detail {
+      self.detail_of = pane;
+    }
+    self.focus = pane;
+  }
+
   pub fn handle_key(&mut self, code: KeyCode) {
     // The detail pane has no cursor of its own; it shows whatever the
     // group and file cursors point at. Any key that moves them starts
@@ -46,11 +59,42 @@ impl ReviewState {
 
   pub(crate) fn handle_normal_key(&mut self, code: KeyCode) {
     match code {
-      KeyCode::Tab => {
-        self.focus = match self.focus {
-          Pane::Groups => Pane::Files,
-          Pane::Files => Pane::Groups,
-        };
+      KeyCode::Tab => self.set_focus(match self.focus {
+        Pane::Groups => Pane::Files,
+        Pane::Files => Pane::Detail,
+        Pane::Detail => Pane::Groups,
+      }),
+      KeyCode::BackTab => self.set_focus(match self.focus {
+        Pane::Groups => Pane::Detail,
+        Pane::Files => Pane::Groups,
+        Pane::Detail => Pane::Files,
+      }),
+
+      // The detail column has no cursor, so while it holds focus the
+      // movement keys drive its scroll offset instead. A page is
+      // deliberately coarse: the offset is clamped to the rendered
+      // content, so overshooting lands on the last screen.
+      KeyCode::Char('j') | KeyCode::Down
+        if self.focus == Pane::Detail =>
+      {
+        self.scroll_detail(1)
+      }
+      KeyCode::Char('k') | KeyCode::Up
+        if self.focus == Pane::Detail =>
+      {
+        self.scroll_detail(-1)
+      }
+      KeyCode::PageDown if self.focus == Pane::Detail => {
+        self.scroll_detail(DETAIL_PAGE)
+      }
+      KeyCode::PageUp if self.focus == Pane::Detail => {
+        self.scroll_detail(-DETAIL_PAGE)
+      }
+      KeyCode::Home if self.focus == Pane::Detail => {
+        self.detail_scroll = 0
+      }
+      KeyCode::End if self.focus == Pane::Detail => {
+        self.detail_scroll = u16::MAX
       }
 
       KeyCode::Char('j') | KeyCode::Down => match self.focus {
@@ -99,12 +143,13 @@ impl ReviewState {
           }
         }
         Pane::Files => self.toggle_file_keep(),
+        Pane::Detail => {}
       },
 
       // Enter always opens: a group opens its files, a file its preview.
       KeyCode::Enter => match self.focus {
         Pane::Groups if !self.current_group_moves().is_empty() => {
-          self.focus = Pane::Files;
+          self.set_focus(Pane::Files);
         }
         Pane::Files => self.enter_preview(),
         _ => {}

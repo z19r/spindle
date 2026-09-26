@@ -109,6 +109,7 @@ impl ReviewState {
       selected: 0,
       file_selected: 0,
       focus: Pane::Groups,
+      detail_of: Pane::Groups,
       action: None,
       group_moves,
       mode: Mode::Normal,

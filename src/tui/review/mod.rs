@@ -41,6 +41,10 @@ pub enum ReviewAction {
 pub enum Pane {
   Groups,
   Files,
+  /// The detail column. It has no cursor of its own — it shows
+  /// whatever the group or file cursor points at — so focusing it
+  /// only redirects the movement keys to its scroll offset.
+  Detail,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +113,12 @@ pub struct ReviewState {
   selected: usize,
   file_selected: usize,
   focus: Pane,
+  /// The list pane whose cursor the detail column is describing:
+  /// [`Pane::Groups`] or [`Pane::Files`], never [`Pane::Detail`].
+  ///
+  /// Focusing the detail column must not change what it shows, so the
+  /// renderer reads this rather than `focus`.
+  detail_of: Pane,
   action: Option<ReviewAction>,
   group_moves: Vec<Vec<FileMove>>,
   mode: Mode,

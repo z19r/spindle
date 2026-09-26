@@ -305,7 +305,74 @@ fn tab_switches_focus() {
   state.handle_key(KeyCode::Tab);
   assert_eq!(state.focus(), Pane::Files);
   state.handle_key(KeyCode::Tab);
+  assert_eq!(state.focus(), Pane::Detail);
+  state.handle_key(KeyCode::Tab);
   assert_eq!(state.focus(), Pane::Groups);
+}
+
+#[test]
+fn shift_tab_walks_the_panes_backwards() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::BackTab);
+  assert_eq!(state.focus(), Pane::Detail);
+  state.handle_key(KeyCode::BackTab);
+  assert_eq!(state.focus(), Pane::Files);
+  state.handle_key(KeyCode::BackTab);
+  assert_eq!(state.focus(), Pane::Groups);
+}
+
+/// The detail column is the only pane the movement keys scroll, and
+/// they must not disturb either list cursor while it holds focus.
+#[test]
+fn the_detail_pane_scrolls_when_focused() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Tab);
+  assert_eq!(state.focus(), Pane::Detail);
+  let (group, file) = (state.selected_index(), state.file_selected);
+
+  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Char('j'));
+  assert_eq!(state.detail_scroll, 2);
+  state.handle_key(KeyCode::Char('k'));
+  assert_eq!(state.detail_scroll, 1);
+  state.handle_key(KeyCode::PageDown);
+  assert_eq!(state.detail_scroll, 11);
+  state.handle_key(KeyCode::Home);
+  assert_eq!(state.detail_scroll, 0);
+  state.handle_key(KeyCode::End);
+  assert_eq!(state.detail_scroll, u16::MAX);
+
+  assert_eq!(state.selected_index(), group);
+  assert_eq!(state.file_selected, file);
+}
+
+/// Focusing the detail column to scroll it must not swap the file's
+/// facts out for the group summary: what it shows follows the last
+/// list pane, not focus.
+#[test]
+fn focusing_the_detail_pane_keeps_showing_the_file() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Tab);
+  assert_eq!(state.detail_of, Pane::Files);
+  state.handle_key(KeyCode::Tab);
+  assert_eq!(state.focus(), Pane::Detail);
+  assert_eq!(state.detail_of, Pane::Files);
+  state.handle_key(KeyCode::Tab);
+  assert_eq!(state.detail_of, Pane::Groups);
+}
+
+/// Leaving the detail column starts the next item at the top rather
+/// than inheriting an offset that meant something for the last one.
+#[test]
+fn leaving_the_detail_pane_resets_its_scroll() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::PageDown);
+  assert!(state.detail_scroll > 0);
+  state.handle_key(KeyCode::Tab);
+  assert_eq!(state.detail_scroll, 0);
 }
 
 #[test]
@@ -338,7 +405,7 @@ fn group_change_resets_file_cursor() {
   state.handle_key(KeyCode::Tab);
   state.handle_key(KeyCode::Char('j'));
   assert_eq!(state.file_selected(), 1);
-  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::BackTab);
   state.handle_key(KeyCode::Char('j'));
   assert_eq!(state.file_selected(), 0);
 }
@@ -908,7 +975,7 @@ fn marks_clear_on_group_navigation() {
   state.handle_key(KeyCode::Tab);
   state.handle_key(KeyCode::Char('v'));
   assert!(state.is_file_marked(0, 0));
-  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::BackTab);
   state.handle_key(KeyCode::Char('j'));
   assert!(!state.is_file_marked(0, 0));
 }
@@ -1247,6 +1314,26 @@ fn key_table_matches_pane_and_mode() {
   assert!(all.contains(&"r") && all.contains(&"v"));
   let dupes = keys(ReviewMode::Dupes, Some(Pane::Files));
   assert!(dupes.contains(&"D") && !dupes.contains(&"m"));
+  // The detail column has no cursor and no actions: it advertises the
+  // scroll keys and nothing that would not work there.
+  let detail = keys(ReviewMode::Organize, Some(Pane::Detail));
+  assert!(
+    detail.contains(&"j/k")
+      && detail.contains(&"pgup/pgdn")
+      && detail.contains(&"home/end")
+  );
+  for absent in ["v", "m", "r", "M", "d", "D", "\u{2423}", "\u{23ce}"]
+  {
+    assert!(
+      !detail.contains(&absent),
+      "detail pane advertises {absent}, which does nothing there"
+    );
+  }
+  assert!(
+    detail.contains(&"x")
+      && detail.contains(&"?")
+      && detail.contains(&"q")
+  );
   for k in [&groups, &files, &all, &dupes] {
     assert!(k.contains(&"x") && k.contains(&"?") && k.contains(&"q"));
     assert!(k.contains(&"\u{2423}") && k.contains(&"\u{23ce}"));
