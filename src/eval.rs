@@ -16,6 +16,10 @@ use crate::model::{FingerprintedFile, ReorgPlan};
 /// the pipeline enforces.
 pub use crate::group::validate::TYPE_WORDS;
 
+/// Smallest folder worth making. Shared with the validator's size
+/// floor so the eval judges the shape the pipeline aims for.
+pub use crate::group::validate::MIN_GROUP_SIZE;
+
 /// Groups the pipeline itself creates; excluded from hygiene checks.
 pub const SYSTEM_LABELS: &[&str] = &["Needs Review", "Unsorted"];
 
@@ -83,6 +87,59 @@ impl Hygiene {
   }
 }
 
+/// How the produced folders are *shaped*, as distinct from whether
+/// the right files are in them.
+///
+/// [`Hygiene`] counts the groups that are outright malformed: named
+/// for a file type, deeper than the cap, holding exactly one file.
+/// None of that notices what a real run of 1226 files actually did —
+/// 58% of its folders held two or three files and 72% of its labels
+/// sat at the depth cap. Every one of those folders is defensible on
+/// its own. It is the distribution that is wrong, and a per-group
+/// pass/fail cannot see a distribution.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Granularity {
+  /// Non-system groups.
+  pub total_groups: usize,
+  /// Groups holding fewer than [`MIN_GROUP_SIZE`] files.
+  pub thin_groups: usize,
+  /// Files sitting in one of those.
+  pub files_in_thin_groups: usize,
+  /// Files in any non-system group; the denominator for the score.
+  pub placed_files: usize,
+  /// Groups whose label is exactly [`MAX_LABEL_DEPTH`] deep. Legal,
+  /// but a tree that is nearly all of them is reaching for the cap
+  /// rather than finding a shape.
+  pub deepest_groups: usize,
+  /// Middle group size — the upper of the two middles when the count
+  /// is even, so the number is always a size some folder really has.
+  pub median_group_size: usize,
+}
+
+impl Granularity {
+  /// Share of placed files that landed somewhere worth opening.
+  ///
+  /// Counted by file, not by group, on purpose: by group, a run that
+  /// files two hundred documents well and strands six pairs scores
+  /// the same as one that puts half of everything in pairs. What goes
+  /// wrong when folders are too thin is the reviewer's click through
+  /// a near-empty folder, and that happens once per file.
+  ///
+  /// Depth is deliberately not scored. `Work/Acme Corp/Website
+  /// Redesign` holding eight files is exactly right, and a depth term
+  /// would push the prompt towards a flat tree that is no better.
+  /// Depth at the cap is a symptom of thinness rather than a fault of
+  /// its own — in the measured run, depth-3 labels fell from 134 to 76
+  /// purely because the size floor merged the thin ones. So
+  /// [`Self::deepest_groups`] is reported and left out of the number.
+  pub fn score(&self) -> f64 {
+    if self.placed_files == 0 {
+      return 1.0;
+    }
+    1.0 - self.files_in_thin_groups as f64 / self.placed_files as f64
+  }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EvalReport {
   pub expected_files: usize,
@@ -97,6 +154,7 @@ pub struct EvalReport {
   pub pairwise_f1: f64,
   pub top_level_accuracy: f64,
   pub hygiene: Hygiene,
+  pub granularity: Granularity,
   /// Files whose expected folder already existed before the run.
   pub reuse_expected: usize,
   /// Of those, how many landed under exactly that label.
@@ -119,12 +177,23 @@ impl EvalReport {
   }
 
   /// Single number to compare runs: grouping agreement dominates,
-  /// then top-level routing, then coverage and label hygiene.
+  /// then top-level routing, then coverage, label hygiene and the
+  /// shape of the folders.
+  ///
+  /// Granularity is weighted like hygiene rather than like agreement.
+  /// A run that splits one right group into two thin ones is still a
+  /// run that understood the files, and the pairwise F1 already docks
+  /// it for the split; this term is what makes the same mistake
+  /// visible when the fixture is small enough that F1 barely moves.
+  ///
+  /// Adding a fifth term rescales the whole number, so composites
+  /// recorded before it are not comparable with ones recorded after.
   pub fn composite(&self) -> f64 {
-    0.5 * self.pairwise_f1
-      + 0.3 * self.top_level_accuracy
+    0.45 * self.pairwise_f1
+      + 0.25 * self.top_level_accuracy
       + 0.1 * self.placed_fraction()
       + 0.1 * self.hygiene.score()
+      + 0.1 * self.granularity.score()
   }
 }
 
@@ -168,6 +237,17 @@ impl std::fmt::Display for EvalReport {
       self.hygiene.type_word_groups,
       self.hygiene.singleton_groups,
       self.hygiene.too_deep_groups
+    )?;
+    writeln!(
+      f,
+      "granularity            {:.3} (thin {}/{} groups, {} files; median {}; at depth {} {})",
+      self.granularity.score(),
+      self.granularity.thin_groups,
+      self.granularity.total_groups,
+      self.granularity.files_in_thin_groups,
+      self.granularity.median_group_size,
+      MAX_LABEL_DEPTH,
+      self.granularity.deepest_groups
     )?;
     if let Some(rate) = self.reuse_rate() {
       writeln!(
@@ -331,6 +411,7 @@ pub fn score(
       .len(),
     produced_groups: hygiene(actual).total_groups,
     hygiene: hygiene(actual),
+    granularity: granularity(actual),
     reuse_expected,
     reuse_matched,
   }
@@ -379,6 +460,42 @@ pub fn hygiene(actual: &[Placement]) -> Hygiene {
   h
 }
 
+/// Group-shape statistics over the actual groups.
+///
+/// System groups are excluded, as in [`hygiene`]: `Unsorted` is a
+/// holding pen rather than a proposal, and counting it as one enormous
+/// group would hide exactly the thinness this measures.
+pub fn granularity(actual: &[Placement]) -> Granularity {
+  let mut members: HashMap<&str, usize> = HashMap::new();
+  for p in actual {
+    if is_system_label(&p.label) {
+      continue;
+    }
+    *members.entry(p.label.as_str()).or_default() += 1;
+  }
+
+  let mut sizes: Vec<usize> = Vec::with_capacity(members.len());
+  let mut g = Granularity {
+    total_groups: members.len(),
+    ..Default::default()
+  };
+  for (label, count) in &members {
+    sizes.push(*count);
+    g.placed_files += count;
+    if *count < MIN_GROUP_SIZE {
+      g.thin_groups += 1;
+      g.files_in_thin_groups += count;
+    }
+    if segments(label).len() == MAX_LABEL_DEPTH {
+      g.deepest_groups += 1;
+    }
+  }
+  sizes.sort_unstable();
+  g.median_group_size =
+    sizes.get(sizes.len() / 2).copied().unwrap_or(0);
+  g
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -395,6 +512,125 @@ mod tests {
       path: path.to_string(),
       label: label.to_string(),
     }
+  }
+
+  /// `n` files, all filed under one label.
+  fn group_of(n: usize, label: &str) -> Vec<Placement> {
+    (0..n).map(|i| pl(&format!("{label}/{i}"), label)).collect()
+  }
+
+  #[test]
+  fn a_full_group_is_not_thin() {
+    let g = granularity(&group_of(MIN_GROUP_SIZE, "Work/Acme Corp"));
+    assert_eq!(g.thin_groups, 0);
+    assert_eq!(g.files_in_thin_groups, 0);
+    assert_eq!(g.score(), 1.0);
+  }
+
+  /// One short of the floor is thin, even though [`Hygiene`] calls it
+  /// clean — a three-file folder is neither a singleton nor too deep.
+  #[test]
+  fn a_group_below_the_floor_is_thin_where_hygiene_sees_nothing() {
+    let files = group_of(MIN_GROUP_SIZE - 1, "Work/Acme Corp");
+    assert_eq!(hygiene(&files).score(), 1.0);
+    let g = granularity(&files);
+    assert_eq!(g.thin_groups, 1);
+    assert_eq!(g.files_in_thin_groups, 3);
+    assert_eq!(g.score(), 0.0);
+  }
+
+  /// The score counts files, not groups: one stray pair beside a large
+  /// well-filed run barely moves it.
+  #[test]
+  fn thinness_is_weighted_by_files_not_by_groups() {
+    let mut files = group_of(18, "Work/Acme Corp");
+    files.extend(group_of(2, "Work/Odds and Ends"));
+    let g = granularity(&files);
+    assert_eq!((g.total_groups, g.thin_groups), (2, 1));
+    // Half the groups are thin; a tenth of the files are.
+    assert!((g.score() - 0.9).abs() < 1e-9, "got {}", g.score());
+  }
+
+  /// The same two groups, sized the other way round, score far worse —
+  /// which a per-group ratio could not tell apart.
+  #[test]
+  fn many_thin_groups_score_worse_than_one() {
+    let mut split: Vec<Placement> = Vec::new();
+    for i in 0..10 {
+      split.extend(group_of(2, &format!("Work/Thing {i}")));
+    }
+    let whole = group_of(20, "Work/Acme Corp");
+    assert_eq!(granularity(&split).score(), 0.0);
+    assert_eq!(granularity(&whole).score(), 1.0);
+  }
+
+  /// A legal label at the depth cap is reported but not penalised: a
+  /// full third-level folder is the shape the prompt asks for.
+  #[test]
+  fn depth_at_the_cap_is_counted_but_not_scored() {
+    let g =
+      granularity(&group_of(8, "Work/Acme Corp/Website Redesign"));
+    assert_eq!(g.deepest_groups, 1);
+    assert_eq!(g.score(), 1.0);
+  }
+
+  #[test]
+  fn the_holding_pen_is_not_a_group() {
+    let mut files = group_of(6, "Work/Acme Corp");
+    files.extend(group_of(40, "Unsorted"));
+    let g = granularity(&files);
+    assert_eq!((g.total_groups, g.placed_files), (1, 6));
+    assert_eq!(g.score(), 1.0);
+  }
+
+  #[test]
+  fn the_median_is_a_size_some_folder_has() {
+    let mut files = group_of(1, "Work/A");
+    files.extend(group_of(5, "Work/B"));
+    files.extend(group_of(9, "Work/C"));
+    assert_eq!(granularity(&files).median_group_size, 5);
+    // Even count: the upper middle, so the answer is never a fraction.
+    files.extend(group_of(11, "Work/D"));
+    assert_eq!(granularity(&files).median_group_size, 9);
+  }
+
+  #[test]
+  fn no_groups_at_all_is_vacuously_full() {
+    assert_eq!(granularity(&[]).score(), 1.0);
+  }
+
+  /// The whole point of the term: a run that shreds correct groups
+  /// into pairs must score below one that keeps them whole, even
+  /// though both put every file in the right area.
+  #[test]
+  fn over_splitting_shows_up_in_the_composite() {
+    let expected: Vec<ExpectedFile> = (0..8)
+      .map(|i| exp(&format!("Work/Acme Corp/{i}"), "Work/Acme Corp"))
+      .collect();
+    let expected = ExpectedSet { files: expected };
+
+    let whole: Vec<Placement> = expected
+      .files
+      .iter()
+      .map(|e| pl(&e.path, "Work/Acme Corp"))
+      .collect();
+    let shredded: Vec<Placement> = expected
+      .files
+      .iter()
+      .enumerate()
+      .map(|(i, e)| pl(&e.path, &format!("Work/Acme Corp {}", i / 2)))
+      .collect();
+
+    let whole = score(&expected, &whole);
+    let shredded = score(&expected, &shredded);
+    assert_eq!(whole.granularity.score(), 1.0);
+    assert_eq!(shredded.granularity.score(), 0.0);
+    assert!(
+      shredded.composite() < whole.composite() - 0.1,
+      "shredding scored {:.3} against {:.3}",
+      shredded.composite(),
+      whole.composite()
+    );
   }
 
   #[test]
@@ -461,8 +697,14 @@ mod tests {
     }
   }
 
+  /// Every file in exactly the right folder. The agreement metrics
+  /// are perfect; the composite is not, because this fixture's folders
+  /// hold two files each and [`Granularity`] says so. Matching the
+  /// ground truth is all the scorer can ask of the model — it cannot
+  /// make a four-file folder out of a two-file fixture — so the shape
+  /// term docks the *fixture*, which is the honest reading.
   #[test]
-  fn perfect_match_scores_one() {
+  fn perfect_match_scores_one_on_every_agreement_metric() {
     let actual = vec![
       put("a.txt", "Finance/Taxes"),
       put("b.txt", "Finance/Taxes"),
@@ -474,7 +716,29 @@ mod tests {
     assert!((r.pairwise_f1 - 1.0).abs() < 1e-9);
     assert!((r.top_level_accuracy - 1.0).abs() < 1e-9);
     assert!((r.hygiene.score() - 1.0).abs() < 1e-9);
-    assert!((r.composite() - 1.0).abs() < 1e-9);
+    assert!((r.placed_fraction() - 1.0).abs() < 1e-9);
+    assert_eq!(r.granularity.thin_groups, 2);
+  }
+
+  /// The same perfect match on folders that are full scores one
+  /// outright, which is what pins the composite's weights together.
+  #[test]
+  fn a_perfect_match_on_full_folders_scores_one() {
+    let mut files = Vec::new();
+    let mut actual = Vec::new();
+    for (label, n) in [("Finance/Taxes", 4), ("Legal/Lease", 5)] {
+      for i in 0..n {
+        let path = format!("{label}/{i}");
+        files.push(exp(&path, label));
+        actual.push(put(&path, label));
+      }
+    }
+    let r = score(&ExpectedSet { files }, &actual);
+    assert!(
+      (r.composite() - 1.0).abs() < 1e-9,
+      "composite was {:.6}",
+      r.composite()
+    );
   }
 
   #[test]

@@ -1,0 +1,257 @@
+# Ground truth for tests/eval_grouping.rs.
+#
+# Every cluster here is one thing whose members are individually
+# distinguishable: one renovation across four trades, one job search
+# across three companies, one trip across two cities, one injury
+# across four providers. Splitting any of them along that inner seam
+# produces folders that are each defensible and a tree that is wrong.
+# That is the failure this fixture exists to score, so no expected
+# group holds fewer than MIN_GROUP_SIZE files and a perfect run
+# scores 1.000 on granularity.
+
+# --- Personal/Kitchen Renovation ---
+
+[[file]]
+path = "Documents/reno_permit_application.txt"
+group = "Personal/Kitchen Renovation"
+area = "Personal"
+
+[[file]]
+path = "Documents/reno_plumber_scope.md"
+group = "Personal/Kitchen Renovation"
+area = "Personal"
+
+[[file]]
+path = "Desktop/reno_electrical_scope.md"
+group = "Personal/Kitchen Renovation"
+area = "Personal"
+
+[[file]]
+path = "Desktop/reno_cabinet_order.txt"
+group = "Personal/Kitchen Renovation"
+area = "Personal"
+
+[[file]]
+path = "Downloads/reno_countertop_samples.md"
+group = "Personal/Kitchen Renovation"
+area = "Personal"
+
+[[file]]
+path = "Documents/reno_contractor_schedule.txt"
+group = "Personal/Kitchen Renovation"
+area = "Personal"
+
+[[file]]
+path = "Desktop/reno_appliance_list.md"
+group = "Personal/Kitchen Renovation"
+area = "Personal"
+
+[[file]]
+path = "Downloads/reno_punch_list.md"
+group = "Personal/Kitchen Renovation"
+area = "Personal"
+
+# --- Work/Job Search ---
+
+[[file]]
+path = "Documents/resume_alvarez_v3.md"
+group = "Work/Job Search"
+area = "Work"
+
+[[file]]
+path = "Documents/cover_letter_northwind.md"
+group = "Work/Job Search"
+area = "Work"
+
+[[file]]
+path = "Desktop/cover_letter_globex.md"
+group = "Work/Job Search"
+area = "Work"
+
+[[file]]
+path = "Desktop/cover_letter_initech.md"
+group = "Work/Job Search"
+area = "Work"
+
+[[file]]
+path = "Documents/interview_notes_northwind.md"
+group = "Work/Job Search"
+area = "Work"
+
+[[file]]
+path = "Downloads/interview_notes_globex.md"
+group = "Work/Job Search"
+area = "Work"
+
+[[file]]
+path = "Downloads/salary_research_2024.md"
+group = "Work/Job Search"
+area = "Work"
+
+[[file]]
+path = "Documents/job_search_tracker.txt"
+group = "Work/Job Search"
+area = "Work"
+
+[[file]]
+path = "Desktop/references_list.md"
+group = "Work/Job Search"
+area = "Work"
+
+# --- Personal/Japan Trip ---
+
+[[file]]
+path = "Documents/japan_itinerary.md"
+group = "Personal/Japan Trip"
+area = "Personal"
+
+[[file]]
+path = "Desktop/japan_flight_confirmation.txt"
+group = "Personal/Japan Trip"
+area = "Personal"
+
+[[file]]
+path = "Desktop/japan_hotel_tokyo.txt"
+group = "Personal/Japan Trip"
+area = "Personal"
+
+[[file]]
+path = "Documents/japan_hotel_kyoto.txt"
+group = "Personal/Japan Trip"
+area = "Personal"
+
+[[file]]
+path = "Downloads/japan_rail_pass_notes.md"
+group = "Personal/Japan Trip"
+area = "Personal"
+
+[[file]]
+path = "Downloads/japan_restaurant_list.md"
+group = "Personal/Japan Trip"
+area = "Personal"
+
+[[file]]
+path = "Desktop/japan_packing_list.md"
+group = "Personal/Japan Trip"
+area = "Personal"
+
+[[file]]
+path = "Documents/japan_phrases.md"
+group = "Personal/Japan Trip"
+area = "Personal"
+
+# --- Health/Knee Surgery ---
+
+[[file]]
+path = "Documents/knee_mri_report.txt"
+group = "Health/Knee Surgery"
+area = "Health"
+
+[[file]]
+path = "Documents/orthopedist_consult_notes.md"
+group = "Health/Knee Surgery"
+area = "Health"
+
+[[file]]
+path = "Desktop/presurgery_instructions.txt"
+group = "Health/Knee Surgery"
+area = "Health"
+
+[[file]]
+path = "Documents/surgery_discharge_summary.txt"
+group = "Health/Knee Surgery"
+area = "Health"
+
+[[file]]
+path = "Downloads/physio_week1.md"
+group = "Health/Knee Surgery"
+area = "Health"
+
+[[file]]
+path = "Downloads/physio_week6.md"
+group = "Health/Knee Surgery"
+area = "Health"
+
+[[file]]
+path = "Desktop/knee_recovery_log.md"
+group = "Health/Knee Surgery"
+area = "Health"
+
+# --- Work/Mercury Rebrand ---
+
+[[file]]
+path = "Documents/mercury_brand_brief.md"
+group = "Work/Mercury Rebrand"
+area = "Work"
+
+[[file]]
+path = "Desktop/mercury_logo_directions.md"
+group = "Work/Mercury Rebrand"
+area = "Work"
+
+[[file]]
+path = "Desktop/mercury_type_scale.md"
+group = "Work/Mercury Rebrand"
+area = "Work"
+
+[[file]]
+path = "Documents/mercury_color_notes.md"
+group = "Work/Mercury Rebrand"
+area = "Work"
+
+[[file]]
+path = "Downloads/mercury_web_copy.md"
+group = "Work/Mercury Rebrand"
+area = "Work"
+
+[[file]]
+path = "Downloads/mercury_print_specs.md"
+group = "Work/Mercury Rebrand"
+area = "Work"
+
+[[file]]
+path = "Desktop/mercury_review_round2.md"
+group = "Work/Mercury Rebrand"
+area = "Work"
+
+[[file]]
+path = "Documents/mercury_launch_checklist.md"
+group = "Work/Mercury Rebrand"
+area = "Work"
+
+# --- Finance/2023 Taxes ---
+
+[[file]]
+path = "Documents/2023_w2_lumon.txt"
+group = "Finance/2023 Taxes"
+area = "Finance"
+
+[[file]]
+path = "Documents/2023_1099int_meridian.txt"
+group = "Finance/2023 Taxes"
+area = "Finance"
+
+[[file]]
+path = "Desktop/2023_1099div_brokerage.txt"
+group = "Finance/2023 Taxes"
+area = "Finance"
+
+[[file]]
+path = "Desktop/2023_1098_mortgage_interest.txt"
+group = "Finance/2023 Taxes"
+area = "Finance"
+
+[[file]]
+path = "Downloads/2023_charitable_receipts.txt"
+group = "Finance/2023 Taxes"
+area = "Finance"
+
+[[file]]
+path = "Downloads/2023_tax_prep_checklist.md"
+group = "Finance/2023 Taxes"
+area = "Finance"
+
+[[file]]
+path = "Documents/2023_return_summary.txt"
+group = "Finance/2023 Taxes"
+area = "Finance"
