@@ -38,13 +38,25 @@ pub const SYSTEM_LABELS: &[&str] = &["Unsorted", "Needs Review"];
 /// Deepest label kept (segments).
 pub const MAX_DEPTH: usize = 3;
 
+/// Files a deepest-level group needs to justify being its own folder.
+///
+/// The model splits eagerly. A 1226-file run came out as 170 groups, 74
+/// of them holding three files or fewer and 123 of them labelled at the
+/// full [`MAX_DEPTH`]; `Finance/Receipts/Dining & Events` holding two
+/// files says nothing `Finance/Receipts` does not, and a folder per pair
+/// is what makes an organised tree feel unorganised. Folding those
+/// leaves up took the same run to 154 groups, 49 thin, 76 at full depth,
+/// with the median group going from 4 files to 5.
+pub const MIN_GROUP_SIZE: usize = 4;
+
 /// What validation changed, for the progress display.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Normalisation {
   /// Groups folded into another because their labels matched after
   /// normalisation.
   pub merged: usize,
-  /// Lone-file leaf groups folded into their parent label.
+  /// Leaf groups folded into their parent label: too few files to be
+  /// worth a folder of their own.
   pub collapsed: usize,
   /// Labels rewritten (type words dropped, depth capped, whitespace).
   pub rewritten: usize,
@@ -150,8 +162,44 @@ pub fn validate_groups(
     out = merge_by_key(out, &mut n.merged);
   }
 
+  out = fold_thin_leaves(out, &mut n);
+
   out.extend(system);
   (out, n)
+}
+
+/// Fold every deepest-level group holding fewer than
+/// [`MIN_GROUP_SIZE`] files into its parent label, then merge whatever
+/// lands together. Repeated, so that a group still thin at its new
+/// depth keeps rising.
+///
+/// A two-segment label is left alone however thin, because the level it
+/// would fold into is a bare taxonomy area: `Work/Markbin` with three
+/// files is a client, and `Work` is not. Three segments are where the
+/// model invents distinctions the file count cannot support.
+fn fold_thin_leaves(
+  groups: Vec<ProposedGroup>,
+  n: &mut Normalisation,
+) -> Vec<ProposedGroup> {
+  let mut out = groups;
+  loop {
+    let mut folded_any = false;
+    for g in &mut out {
+      if g.member_indices.len() >= MIN_GROUP_SIZE
+        || is_system_label(&g.label)
+        || depth(&g.label) < 3
+      {
+        continue;
+      }
+      g.label = parent(&g.label);
+      n.collapsed += 1;
+      folded_any = true;
+    }
+    if !folded_any {
+      return out;
+    }
+    out = merge_by_key(out, &mut n.merged);
+  }
 }
 
 fn is_system_label(label: &str) -> bool {
@@ -542,7 +590,7 @@ mod tests {
   fn clean_labels_pass_through_unchanged() {
     let input = vec![
       g("Work/Acme Corp", &[0, 1]),
-      g("Finance/Taxes/2023", &[2, 3]),
+      g("Finance/Taxes/2023", &[2, 3, 4, 5]),
     ];
     let (out, n) = validate_groups(input.clone());
     assert_eq!(labels(&out), labels(&input));
@@ -599,14 +647,14 @@ mod tests {
   #[test]
   fn lone_file_leaf_folders_collapse_into_the_parent() {
     let (out, n) = validate_groups(vec![
-      g("Photos/Pets/Biscuit", &[0, 1]),
-      g("Photos/Pets/Stray Cat", &[2]),
+      g("Photos/Pets/Biscuit", &[0, 1, 2, 3]),
+      g("Photos/Pets/Stray Cat", &[4]),
     ]);
     assert_eq!(
       labels(&out),
       vec!["Photos/Pets/Biscuit", "Photos/Pets"]
     );
-    assert_eq!(out[1].member_indices, vec![2]);
+    assert_eq!(out[1].member_indices, vec![4]);
     assert_eq!(n.collapsed, 1);
   }
 
@@ -633,7 +681,7 @@ mod tests {
   fn depth_is_capped_at_three_segments() {
     let (out, n) = validate_groups(vec![g(
       "Housing/418 Maple St/Utility Bills/2024-08",
-      &[0, 1],
+      &[0, 1, 2, 3],
     )]);
     assert_eq!(
       labels(&out),
@@ -704,10 +752,10 @@ mod tests {
   #[test]
   fn tax_year_folders_stay_separate() {
     let input = vec![
-      g("Finance/Taxes/2022", &[0, 1]),
-      g("Finance/Taxes/2023", &[2, 3]),
-      g("Design/Logo/v1", &[4, 5]),
-      g("Design/Logo/v2", &[6, 7]),
+      g("Finance/Taxes/2022", &[0, 1, 2, 3]),
+      g("Finance/Taxes/2023", &[4, 5, 6, 7]),
+      g("Design/Logo/v1", &[8, 9, 10, 11]),
+      g("Design/Logo/v2", &[12, 13, 14, 15]),
     ];
     let (out, n) = validate_groups(input.clone());
     assert_eq!(labels(&out), labels(&input));
@@ -785,19 +833,75 @@ mod tests {
   fn a_bare_area_singleton_does_not_swallow_its_children() {
     let input = vec![
       g("Reference", &[0]),
-      g("Reference/Programming/Python", &[1, 2]),
-      g("Reference/Programming/Rust", &[3, 4]),
+      g("Reference/Programming/Python", &[1, 2, 3, 4]),
+      g("Reference/Programming/Rust", &[5, 6, 7, 8]),
     ];
     let (out, n) = validate_groups(input.clone());
     assert_eq!(labels(&out), labels(&input));
     assert_eq!(n.merged, 0);
   }
 
+  /// Two thin leaves under the same parent become one folder that holds
+  /// enough files to be worth opening.
+  #[test]
+  fn thin_leaf_folders_fold_into_their_parent() {
+    let (out, n) = validate_groups(vec![
+      g("Finance/Receipts/Dining & Events", &[0, 1]),
+      g("Finance/Receipts/Retail & Store Visits", &[2, 3]),
+    ]);
+    assert_eq!(labels(&out), vec!["Finance/Receipts"]);
+    assert_eq!(out[0].member_indices, vec![0, 1, 2, 3]);
+    assert_eq!(n.collapsed, 2);
+    assert_eq!(n.merged, 1);
+  }
+
+  /// A thin leaf joins the parent group that already exists rather than
+  /// sitting beside it.
+  #[test]
+  fn a_thin_leaf_joins_an_existing_parent_group() {
+    let (out, n) = validate_groups(vec![
+      g("Finance/Receipts", &[0, 1, 2, 3, 4]),
+      g("Finance/Receipts/Dining & Events", &[5, 6]),
+    ]);
+    assert_eq!(labels(&out), vec!["Finance/Receipts"]);
+    assert_eq!(out[0].member_indices, vec![0, 1, 2, 3, 4, 5, 6]);
+    assert_eq!(n.collapsed, 1);
+  }
+
+  /// The floor stops at two segments: the level above is a bare taxonomy
+  /// area, and two thin clients under `Work` are still two clients.
+  #[test]
+  fn thin_two_segment_groups_are_left_alone() {
+    let input = vec![
+      g("Work/Markbin", &[0, 1, 2]),
+      g("Work/Crmolly CRM", &[3, 4, 5]),
+    ];
+    let (out, n) = validate_groups(input.clone());
+    assert_eq!(labels(&out), labels(&input));
+    assert_eq!(n.collapsed, 0);
+  }
+
+  /// A leaf that clears the floor keeps its own folder even when a thin
+  /// sibling folds out from under it.
+  #[test]
+  fn a_leaf_at_the_floor_survives_its_thin_siblings() {
+    let (out, n) = validate_groups(vec![
+      g("Media/TV Shows/Streaming Screenshots", &[0, 1, 2, 3]),
+      g("Media/TV Shows/Period Drama", &[4, 5]),
+    ]);
+    assert_eq!(
+      labels(&out),
+      vec!["Media/TV Shows/Streaming Screenshots", "Media/TV Shows"]
+    );
+    assert_eq!(out[1].member_indices, vec![4, 5]);
+    assert_eq!(n.collapsed, 1);
+  }
+
   #[test]
   fn a_parent_with_two_files_keeps_its_children_separate() {
     let input = vec![
-      g("Health/Fitness", &[0, 5]),
-      g("Health/Fitness/Marathon Training 2024", &[1, 2]),
+      g("Health/Fitness", &[0, 9]),
+      g("Health/Fitness/Marathon Training 2024", &[1, 2, 3, 4]),
     ];
     let (out, n) = validate_groups(input.clone());
     assert_eq!(labels(&out), labels(&input));
