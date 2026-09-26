@@ -655,7 +655,8 @@ async fn run_ai_pipeline<P: AiProvider>(
   .await
   {
     tracing::info!("Reused cached grouping (no Claude call)");
-    let groups = validate_and_report(groups, tx).await;
+    let groups =
+      validate_and_report(groups, existing_labels, tx).await;
     return Ok((
       add_unsorted(groups, &summaries, skipped, failed_notes),
       descriptions,
@@ -734,7 +735,7 @@ async fn run_ai_pipeline<P: AiProvider>(
       })
       .await;
   }
-  let groups = validate_and_report(groups, tx).await;
+  let groups = validate_and_report(groups, existing_labels, tx).await;
   Ok((
     add_unsorted(groups, &summaries, skipped, failed_notes),
     descriptions,
@@ -745,9 +746,11 @@ async fn run_ai_pipeline<P: AiProvider>(
 /// Run label validation and tell the progress display what changed.
 async fn validate_and_report(
   groups: Vec<ProposedGroup>,
+  existing_labels: &[String],
   tx: &mpsc::Sender<PipelineEvent>,
 ) -> Vec<ProposedGroup> {
-  let (groups, n) = crate::group::validate::validate_groups(groups);
+  let (groups, n) =
+    crate::group::validate::validate_groups(groups, existing_labels);
   if n != crate::group::validate::Normalisation::default() {
     let _ = tx
       .send(PipelineEvent::LabelsNormalised {
