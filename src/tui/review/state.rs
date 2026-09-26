@@ -32,6 +32,92 @@ pub(crate) fn decode_video_still(
   }
 }
 
+/// Longest a frame may be held, and the shortest.
+///
+/// The floor is the interesting one. GIFs routinely declare a 0ms or
+/// 10ms delay, which browsers have clamped to 100ms for decades, and
+/// here there is a second reason: every advance re-sends the whole
+/// frame to the terminal. Measured payloads are 907 KiB per frame
+/// under kitty, 200 under iTerm2, 123 under sixel. At 10fps that is
+/// already 9 MiB/s down the pty for a kitty terminal, which a local
+/// one shrugs off and an ssh session does not. Faster is not worth
+/// what it costs.
+const MIN_FRAME_DELAY: Duration = Duration::from_millis(100);
+/// A malformed or absent delay becomes this, the GIF convention.
+const DEFAULT_FRAME_DELAY: Duration = Duration::from_millis(100);
+
+/// Frames are downscaled to this long edge before being kept.
+///
+/// A preview pane is around 60x30 cells, so under kitty's typical
+/// 8x16 cell it is about 480x480 pixels. Holding the source
+/// resolution would buy nothing visible and cost several times the
+/// memory.
+const MAX_ANIMATION_EDGE: u32 = 480;
+
+/// Ceilings on how much of a GIF is kept, whichever is reached first.
+///
+/// Decoded frames are RGBA in memory, so a long GIF is not small:
+/// eight million pixels is about 32 MiB, or roughly sixty frames at
+/// the preview size. The frame ceiling catches the other shape of the
+/// problem, a GIF of hundreds of tiny frames. Past either, the rest
+/// is dropped and what was kept loops.
+const MAX_ANIMATION_PIXELS: u64 = 8_000_000;
+const MAX_ANIMATION_FRAMES: usize = 240;
+
+/// The frames of an animated GIF, or `None` if it has only one.
+///
+/// A still GIF is deliberately not an animation: it would otherwise
+/// take the animated path and re-render an unchanging frame forever.
+pub(crate) fn decode_animation(
+  path: &Path,
+) -> Option<Vec<AnimationFrame>> {
+  use image::AnimationDecoder;
+
+  let file = std::fs::File::open(path).ok()?;
+  let decoder = image::codecs::gif::GifDecoder::new(
+    std::io::BufReader::new(file),
+  )
+  .map_err(|e| tracing::debug!(?path, %e, "not a readable gif"))
+  .ok()?;
+
+  let mut frames = Vec::new();
+  let mut pixels: u64 = 0;
+  for frame in decoder.into_frames() {
+    let Ok(frame) = frame else { break };
+    let delay = Duration::from(frame.delay()).max(MIN_FRAME_DELAY);
+    let delay = if delay.is_zero() {
+      DEFAULT_FRAME_DELAY
+    } else {
+      delay
+    };
+    let image = image::DynamicImage::ImageRgba8(frame.into_buffer());
+    let image =
+      if image.width().max(image.height()) > MAX_ANIMATION_EDGE {
+        image.resize(
+          MAX_ANIMATION_EDGE,
+          MAX_ANIMATION_EDGE,
+          image::imageops::FilterType::Triangle,
+        )
+      } else {
+        image
+      };
+    pixels += u64::from(image.width()) * u64::from(image.height());
+    frames.push(AnimationFrame { image, delay });
+    if pixels >= MAX_ANIMATION_PIXELS
+      || frames.len() >= MAX_ANIMATION_FRAMES
+    {
+      tracing::debug!(
+        ?path,
+        kept = frames.len(),
+        "gif truncated; looping what fits"
+      );
+      break;
+    }
+  }
+
+  (frames.len() > 1).then_some(frames)
+}
+
 pub(crate) fn decode_image(
   path: &Path,
 ) -> Option<image::DynamicImage> {
@@ -417,15 +503,77 @@ impl ReviewState {
     self.current_group_moves().get(self.file_selected)
   }
 
+  /// Turn what the decode thread sent into a preview state.
+  ///
+  /// An animation whose picker has gone away cannot be played, so it
+  /// falls back to its own first frame as a still — which is what the
+  /// preview used to show for every GIF.
+  fn start_preview(&self, decoded: Decoded) -> PreviewState {
+    match decoded {
+      Decoded::Still(protocol) => PreviewState::Ready(protocol),
+      Decoded::Animation(frames) => {
+        let Some(picker) = &self.picker else {
+          return PreviewState::None;
+        };
+        let Some(first) = frames.first() else {
+          return PreviewState::None;
+        };
+        let protocol =
+          Box::new(picker.new_resize_protocol(first.image.clone()));
+        PreviewState::Animated(Box::new(Animation {
+          frames,
+          current: 0,
+          protocol,
+          shown_at: Instant::now(),
+        }))
+      }
+    }
+  }
+
+  /// Show the next frame if the current one has had its time.
+  ///
+  /// Called once per event-loop iteration alongside
+  /// [`Self::poll_image_decode`]. It is a no-op unless a GIF is
+  /// selected, and it rebuilds exactly one protocol when a frame is
+  /// actually due — never once per iteration, which at an 80ms tick
+  /// would outrun most GIFs anyway.
+  ///
+  pub fn advance_animation(&mut self) {
+    let Some(picker) = self.picker.clone() else {
+      return;
+    };
+    let PreviewState::Animated(anim) = &mut self.preview else {
+      return;
+    };
+    let due = anim
+      .frames
+      .get(anim.current)
+      .map(|f| f.delay)
+      .unwrap_or(DEFAULT_FRAME_DELAY);
+    if anim.shown_at.elapsed() < due {
+      return;
+    }
+    anim.current = (anim.current + 1) % anim.frames.len();
+    let image = anim.frames[anim.current].image.clone();
+    *anim.protocol = picker.new_resize_protocol(image);
+    // From now, not from when the frame was due: a slow draw should
+    // not make the next frame arrive early to catch up.
+    anim.shown_at = Instant::now();
+  }
+
   pub fn image_state_mut(&mut self) -> Option<&mut StatefulProtocol> {
     match &mut self.preview {
       PreviewState::Ready(protocol) => Some(protocol.as_mut()),
+      PreviewState::Animated(anim) => Some(anim.protocol.as_mut()),
       _ => None,
     }
   }
 
   pub fn has_image_preview(&self) -> bool {
-    matches!(self.preview, PreviewState::Ready(_))
+    matches!(
+      self.preview,
+      PreviewState::Ready(_) | PreviewState::Animated(_)
+    )
   }
 
   pub fn is_image_loading(&self) -> bool {
@@ -762,7 +910,19 @@ impl ReviewState {
     let (tx, rx) = mpsc::channel();
     self.image_rx = Some(rx);
 
+    let is_gif = matches!(
+      file_type,
+      FileType::Image(crate::model::ImageFormat::Gif)
+    );
     thread::spawn(move || {
+      // A GIF that turns out to hold one frame falls through to the
+      // still path rather than animating a static image.
+      if is_gif {
+        if let Some(frames) = decode_animation(&path) {
+          let _ = tx.send((path, Decoded::Animation(frames)));
+          return;
+        }
+      }
       let img = if is_video {
         decode_video_still(&path)
       } else {
@@ -770,7 +930,7 @@ impl ReviewState {
       };
       if let Some(img) = img {
         let protocol = picker_clone.new_resize_protocol(img);
-        let _ = tx.send((path, protocol));
+        let _ = tx.send((path, Decoded::Still(Box::new(protocol))));
       }
     });
   }
@@ -778,9 +938,9 @@ impl ReviewState {
   pub fn poll_image_decode(&mut self) {
     if let Some(rx) = &self.image_rx {
       match rx.try_recv() {
-        Ok((path, protocol)) => {
+        Ok((path, decoded)) => {
           if Some(&path) == self.preview_path.as_ref() {
-            self.preview = PreviewState::Ready(Box::new(protocol));
+            self.preview = self.start_preview(decoded);
           }
           self.image_rx = None;
         }

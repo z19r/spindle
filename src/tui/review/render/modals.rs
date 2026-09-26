@@ -220,6 +220,14 @@ pub(crate) fn render_preview_modal(
         let img = ratatui_image::StatefulImage::new();
         frame.render_stateful_widget(img, inner, protocol.as_mut());
       }
+      PreviewState::Animated(anim) => {
+        let img = ratatui_image::StatefulImage::new();
+        frame.render_stateful_widget(
+          img,
+          inner,
+          anim.protocol.as_mut(),
+        );
+      }
       PreviewState::Loading => {
         let loading = Paragraph::new(Span::styled(
           "Loading preview\u{2026}",
@@ -419,6 +427,14 @@ pub(crate) fn render_diff_modal(
             protocol.as_mut(),
           );
         }
+        PreviewState::Animated(anim) => {
+          let iw = ratatui_image::StatefulImage::new();
+          frame.render_stateful_widget(
+            iw,
+            left_inner,
+            anim.protocol.as_mut(),
+          );
+        }
         PreviewState::Loading => {
           let loading = Paragraph::new(Span::styled(
             "Loading\u{2026}",
@@ -441,6 +457,14 @@ pub(crate) fn render_diff_modal(
             iw,
             right_inner,
             protocol.as_mut(),
+          );
+        }
+        PreviewState::Animated(anim) => {
+          let iw = ratatui_image::StatefulImage::new();
+          frame.render_stateful_widget(
+            iw,
+            right_inner,
+            anim.protocol.as_mut(),
           );
         }
         PreviewState::Loading => {

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -71,6 +72,46 @@ pub enum PreviewState {
   None,
   Loading,
   Ready(Box<StatefulProtocol>),
+  /// An animated GIF, playing. Boxed because the frames make this
+  /// variant far larger than the others.
+  Animated(Box<Animation>),
+}
+
+/// What the preview thread hands back: one image, or a GIF's frames.
+///
+/// The still arrives as a finished protocol because the worker has a
+/// picker clone and nothing else to do with it. The animation arrives
+/// as frames, because its first protocol is built at the same moment
+/// as every later one and there is no reason to special-case it.
+pub enum Decoded {
+  Still(Box<StatefulProtocol>),
+  Animation(Vec<AnimationFrame>),
+}
+
+/// One decoded frame and how long it stays on screen.
+pub struct AnimationFrame {
+  pub image: image::DynamicImage,
+  pub delay: Duration,
+}
+
+/// A GIF being played in the preview pane.
+///
+/// The frames are kept as images and the protocol for the visible one
+/// is rebuilt on each advance, rather than building every frame's
+/// protocol up front. Measured on this machine (see
+/// `examples/measure_gif_protocol.rs`), a rebuild costs 0.3ms under
+/// kitty and 5.1ms under sixel — the worst case is 6.8% of the
+/// review screen's 80ms tick — while holding sixty ready-made
+/// protocols costs their encoded payload for as long as the file
+/// stays selected. Time is the cheap resource here and memory is not.
+pub struct Animation {
+  pub frames: Vec<AnimationFrame>,
+  /// Index of the frame on screen.
+  pub current: usize,
+  /// The protocol for that frame.
+  pub protocol: Box<StatefulProtocol>,
+  /// When it went up, so the next advance knows if it is due.
+  pub shown_at: Instant,
 }
 
 enum DiffLine {
@@ -127,7 +168,7 @@ pub struct ReviewState {
   picker: Option<Picker>,
   preview: PreviewState,
   preview_path: Option<PathBuf>,
-  image_rx: Option<Receiver<(PathBuf, StatefulProtocol)>>,
+  image_rx: Option<Receiver<(PathBuf, Decoded)>>,
   file_keep: Vec<Vec<bool>>,
   file_marked: Vec<HashSet<usize>>,
   review_mode: ReviewMode,

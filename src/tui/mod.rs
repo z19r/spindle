@@ -172,6 +172,9 @@ pub fn run_review(
   let result = loop {
     if let Screen::Review(state) = &mut app.screen {
       state.poll_image_decode();
+      // Before the draw, so a frame that came due during the last
+      // `event::poll` is the one that goes up.
+      state.advance_animation();
     }
 
     terminal.draw(|frame| match &mut app.screen {
