@@ -2,6 +2,15 @@
 # previous run (see tests/eval_grouping.rs, which builds the ledger for
 # them). Files marked existing = true belong in one of those folders and
 # count toward the label-reuse metric.
+#
+# Every folder here ends up holding at least MIN_GROUP_SIZE files, which
+# is the smallest the validator will leave standing. For an existing
+# folder that counts what is already under Organized/ as well as what
+# this run adds, so two new files into a folder of two is enough. A
+# folder this run creates from scratch has only its own members, and
+# needs four of them or the validator folds it into its parent — and
+# then the answer key is asking for output no run can produce. Keep it
+# that way when adding files.
 
 [[file]]
 path = "Documents/comcast_bill_2024-09.txt"
@@ -207,3 +216,23 @@ area = "Finance"
 path = "Downloads/2024_charitable_donations.csv"
 group = "Finance/Taxes/2024"
 area = "Finance"
+
+[[file]]
+path = "Downloads/2024_1099_int_chase.txt"
+group = "Finance/Taxes/2024"
+area = "Finance"
+
+[[file]]
+path = "Documents/mochi_microchip_registration.txt"
+group = "Personal/Pets/Mochi"
+area = "Personal"
+
+[[file]]
+path = "Downloads/mochi_pet_insurance_policy.txt"
+group = "Personal/Pets/Mochi"
+area = "Personal"
+
+[[file]]
+path = "Documents/initech_first_week_agenda.md"
+group = "Work/Initech/Onboarding"
+area = "Work"

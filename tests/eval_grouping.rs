@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use spindle::ai::ClaudeProvider;
 use spindle::config::AiConfig;
 use spindle::eval::{self, ExpectedSet, Placement};
+use spindle::group::validate::validate_groups;
+use spindle::model::ProposedGroup;
 use spindle::pipeline::{self, PipelineConfig, PipelineEvent};
 
 /// How far below a fixture's own ceiling a run may fall before it
@@ -21,8 +23,8 @@ use spindle::pipeline::{self, PipelineConfig, PipelineEvent};
 /// score its own `expected.toml` gets when every file lands exactly
 /// where the answer key says, and that is not 1.000 for every
 /// fixture: the granularity term reads the *shape* of the folders, so
-/// a fixture built from pairs caps itself, and `organize-second-run`
-/// still does. Comparing four fixtures with four different ceilings
+/// a fixture built from pairs caps itself, as `organize-large` does
+/// deliberately. Comparing four fixtures with four different ceilings
 /// against one absolute number compares nothing, and the reading
 /// drifts silently every time a fixture gains a file. These preserve
 /// the headroom the absolute floors allowed — 0.90, 0.85, 0.85
@@ -41,30 +43,41 @@ const GRANULARITY_SLACK: f64 = 0.15;
 /// every floor derived from it drops in step, and nothing would
 /// otherwise say the eval had gone quietly slacker.
 ///
-/// `organize` and `organize-granularity` reach 1.000 — no expected
-/// folder in either holds fewer than `MIN_GROUP_SIZE` files.
+/// Three of the four reach 1.000 — no expected folder in them holds
+/// fewer than `MIN_GROUP_SIZE` files once the run is applied.
 /// `organize-large` keeps five small folders on purpose, because a
 /// large real tree has some, and pays 0.011 for them.
-/// `organize-second-run` reaches 0.977: twelve of its fifteen folders
-/// already exist and are full, and the three it asks this run to
-/// create from scratch hold two or three files each. That is #156,
-/// the same defect #150 fixed in `organize`.
+/// `organize-second-run` reaches it too, counting what is already
+/// under its `Organized/` tree alongside what the run adds.
 const MIN_CEILING: [(&str, f64); 4] = [
   ("organize", 1.000),
   ("organize-large", 0.985),
-  ("organize-second-run", 0.975),
+  ("organize-second-run", 1.000),
   ("organize-granularity", 1.000),
 ];
 
 /// Share of files whose folder already existed and that landed under
-/// exactly that label.
+/// exactly that label. A judgement call like [`SHAPE_FLOOR`], held
+/// achievable by the same guard.
 const REUSE_FLOOR: f64 = 0.75;
 /// Share of files that landed in a folder holding at least
-/// `MIN_GROUP_SIZE`. Absolute rather than headroom: the granularity
-/// fixture's ground truth has no thin folder in it, so 1.000 really is
-/// available. Provisional until #65 records a real baseline; set where
-/// a run may strand roughly one cluster before it counts as a
-/// regression.
+/// `MIN_GROUP_SIZE`.
+///
+/// Absolute rather than headroom, because the shape a fixture allows
+/// is not the shape it caps: `organize-granularity`'s ground truth
+/// has no thin folder in it, so 1.000 really is available and
+/// subtracting a slack from it would only invent room to fail in.
+///
+/// A judgement call, set where a run may strand roughly one cluster
+/// before it counts as a regression, and no issue is pending on it —
+/// a number nobody has managed to fail is a number nobody can
+/// calibrate. What keeps it honest is
+/// [`every_fixture_ground_truth_is_internally_consistent`], which
+/// checks that a run placing every file correctly would clear it.
+/// That is the check [`REUSE_FLOOR`] needed and did not have: it
+/// asserted 0.75 against an achievable 0.481 for as long as the size
+/// floor ignored existing folders, and being API-gated, nothing said
+/// so.
 const SHAPE_FLOOR: f64 = 0.70;
 
 /// Every fixture with an answer key, so a new one is checked by the
@@ -352,7 +365,8 @@ async fn grouping_quality_meets_floor() {
 }
 
 /// ~140 files, 29 groups, ambiguous items, office/ebook files, exact
-/// and near duplicates. Floor is recorded on #98 once a baseline exists.
+/// and near duplicates. Graded against its own ceiling like the rest,
+/// by `LARGE_SLACK`.
 #[tokio::test]
 #[ignore = "real API; run via `just eval`"]
 async fn large_fixture_quality_meets_floor() {
@@ -525,6 +539,59 @@ fn existing_labels(name: &str) -> Vec<String> {
   labels
 }
 
+/// A fixture's answer key, put through the validator the way a real
+/// run's groups are: what the key asks for, and what the validator
+/// makes of it.
+///
+/// This is the closest thing to a perfect run the eval can build
+/// without paying for one, so it is what the guards below measure.
+fn validated_answer_key(
+  name: &str,
+) -> (
+  ExpectedSet,
+  BTreeMap<String, Vec<usize>>,
+  Vec<ProposedGroup>,
+) {
+  let root = fixtures_root().join(name);
+  let expected = eval::load_expected(&root.join("expected.toml"))
+    .unwrap_or_else(|e| panic!("{name}/expected.toml: {e}"));
+
+  let mut by_label: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+  for (i, f) in expected.files.iter().enumerate() {
+    by_label.entry(f.group.clone()).or_default().push(i);
+  }
+  let groups: Vec<ProposedGroup> = by_label
+    .iter()
+    .map(|(label, members)| ProposedGroup {
+      label: label.clone(),
+      rationale: String::new(),
+      member_indices: members.clone(),
+      member_destinations: vec![],
+      member_notes: vec![],
+    })
+    .collect();
+
+  let (out, _) = validate_groups(groups, &existing_labels(name));
+  (expected, by_label, out)
+}
+
+/// Where a perfect run's files land once the validator has had its
+/// say — what the scorer would see if the model got everything right.
+fn perfect_placements(
+  expected: &ExpectedSet,
+  out: &[ProposedGroup],
+) -> Vec<Placement> {
+  out
+    .iter()
+    .flat_map(|g| {
+      g.member_indices.iter().map(move |&i| Placement {
+        path: expected.files[i].path.clone(),
+        label: g.label.clone(),
+      })
+    })
+    .collect()
+}
+
 /// No answer key may ask for two folders the validator will merge into
 /// one.
 ///
@@ -540,36 +607,27 @@ fn existing_labels(name: &str) -> Vec<String> {
 /// `Finance/Taxes/2024` and `Personal/Pets/Biscuit` into
 /// `Personal/Pets/Mochi`, capping a perfect run at F1 0.833.
 ///
-/// Labels are allowed to change: a thin *new* leaf folding up to its
-/// parent keeps the same files together, and the scorer reads groups,
-/// not names. Only files being merged across groups is a fault.
+/// A rename is a fault too, for a different reason. The scorer reads
+/// groups rather than names, so `Work/Initech/Onboarding` folding up
+/// to `Work/Initech` costs a run nothing directly — but the answer key
+/// is then naming a folder the pipeline will not emit, and a fixture
+/// that does that is not a specification of good output any more. It
+/// is also how #156 hid: three folders too thin to survive, and the
+/// only symptom was the composite ceiling sitting 0.023 low, which
+/// took a throwaway probe script to trace back to them. This says
+/// which label, and why.
+///
+/// Compared on [`validate::key`], the validator's own notion of label
+/// identity, so `tidy_label` tidying punctuation or case — which a
+/// real run reproduces — does not trip it. A segment disappearing
+/// does.
 #[test]
 fn no_fixture_asks_for_folders_the_validator_would_merge() {
-  use spindle::group::validate::validate_groups;
-  use spindle::model::ProposedGroup;
+  use spindle::group::validate::key;
 
   for name in FIXTURES {
-    let root = fixtures_root().join(name);
-    let expected = eval::load_expected(&root.join("expected.toml"))
-      .unwrap_or_else(|e| panic!("{name}/expected.toml: {e}"));
-
-    let mut by_label: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (i, f) in expected.files.iter().enumerate() {
-      by_label.entry(f.group.clone()).or_default().push(i);
-    }
+    let (_, by_label, out) = validated_answer_key(name);
     let wanted = by_label.len();
-    let groups: Vec<ProposedGroup> = by_label
-      .iter()
-      .map(|(label, members)| ProposedGroup {
-        label: label.clone(),
-        rationale: String::new(),
-        member_indices: members.clone(),
-        member_destinations: vec![],
-        member_notes: vec![],
-      })
-      .collect();
-
-    let (out, _) = validate_groups(groups, &existing_labels(name));
 
     // Which expected groups each surviving group drew its files from.
     let origin: BTreeMap<usize, &str> = by_label
@@ -593,6 +651,14 @@ fn no_fixture_asks_for_folders_the_validator_would_merge() {
          ({:?}), so no run can score them apart",
         g.label
       );
+      let [source] = sources[..] else { continue };
+      assert_eq!(
+        key(&g.label),
+        key(source),
+        "{name}: the validator renames {source:?} to {:?}, so the \
+         answer key is asking for a folder no run will produce",
+        g.label
+      );
     }
     assert_eq!(
       out.len(),
@@ -600,29 +666,47 @@ fn no_fixture_asks_for_folders_the_validator_would_merge() {
       "{name}: {wanted} expected groups came out as {}",
       out.len()
     );
+  }
+}
 
-    // A floor no perfect run could clear is not a floor. `REUSE_FLOOR`
-    // was 0.75 against an achievable 0.481 for as long as the size
-    // floor ignored existing folders, so `second_run_reuses_existing_
-    // folders` could not have passed however well the model did — and
-    // being API-gated, nothing said so.
-    let files = &expected.files;
-    let placements: Vec<Placement> = out
-      .iter()
-      .flat_map(|g| {
-        g.member_indices.iter().map(move |&i| Placement {
-          path: files[i].path.clone(),
-          label: g.label.clone(),
-        })
-      })
-      .collect();
-    if let Some(reuse) =
-      eval::score(&expected, &placements, &existing_sizes(name))
-        .reuse_rate()
-    {
+/// No hard floor may ask for more than a perfect run could give.
+///
+/// [`SHAPE_FLOOR`] and [`REUSE_FLOOR`] are the two absolute numbers
+/// left in this file — judgement calls rather than a ceiling minus a
+/// slack — and a fixture can quietly put either out of reach. One
+/// thin folder added to an answer key caps the shape any run can
+/// score; a folder the validator declines to keep caps the reuse.
+///
+/// That is not hypothetical. `REUSE_FLOOR` asserted 0.75 against an
+/// achievable 0.481 for as long as the size floor ignored existing
+/// folders, so `second_run_reuses_existing_folders` could not have
+/// passed however well the model did — and being API-gated, nothing
+/// said so until somebody paid for a run to find out.
+#[test]
+fn no_floor_asks_for_more_than_a_perfect_run_could_score() {
+  for name in FIXTURES {
+    let (expected, _, out) = validated_answer_key(name);
+    let placements = perfect_placements(&expected, &out);
+    let perfect =
+      eval::score(&expected, &placements, &existing_sizes(name));
+
+    let shape = perfect.granularity.score();
+    assert!(
+      shape >= SHAPE_FLOOR,
+      "{name}: a run that placed every file correctly would score \
+       {shape:.3} on folder shape, under the {SHAPE_FLOOR:.3} floor \
+       the eval asserts; {} of {} folders hold fewer than {} files",
+      perfect.granularity.thin_groups,
+      perfect.granularity.total_groups,
+      spindle::eval::MIN_GROUP_SIZE
+    );
+
+    if let Some(reuse) = perfect.reuse_rate() {
       assert!(
         reuse >= REUSE_FLOOR,
-        "{name}: a run that placed every file correctly would reuse          {reuse:.3} of its existing folders, under the {REUSE_FLOOR:.3}          floor the eval asserts"
+        "{name}: a run that placed every file correctly would reuse \
+         {reuse:.3} of its existing folders, under the \
+         {REUSE_FLOOR:.3} floor the eval asserts"
       );
     }
   }
