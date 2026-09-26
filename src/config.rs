@@ -29,7 +29,12 @@ pub struct CliArgs {
   pub no_ai: bool,
 
   /// Anthropic API key
-  #[arg(long, env = "ANTHROPIC_API_KEY")]
+  ///
+  /// `hide_env_values` because clap otherwise prints what the
+  /// variable currently holds, and `--help` is the command people run
+  /// before pasting their terminal into a bug report. The name still
+  /// shows, so nothing is lost but the secret.
+  #[arg(long, env = "ANTHROPIC_API_KEY", hide_env_values = true)]
   pub api_key: Option<String>,
 
   /// Maximum number of files to analyze with AI
@@ -46,7 +51,10 @@ pub struct CliArgs {
   pub batch: bool,
 
   /// Anthropic API base URL (for proxies like whetstone)
-  #[arg(long, env = "ANTHROPIC_BASE_URL")]
+  ///
+  /// Hidden for the same reason as the key: a proxy URL is somewhere
+  /// people put a token, and it leaks through the same paste.
+  #[arg(long, env = "ANTHROPIC_BASE_URL", hide_env_values = true)]
   pub api_base_url: Option<String>,
 
   /// Verbosity level (-v, -vv, -vvv)
@@ -884,5 +892,26 @@ max_archive_file_size_mb = 10
     assert!(cli.yes && cli.json);
     let cli = CliArgs::parse_from(["spindle", "-y", "/tmp/x"]);
     assert!(cli.yes && !cli.json);
+  }
+
+  /// `--help` names the environment variables it reads without
+  /// printing what they hold. Without `hide_env_values` clap appends
+  /// `={value}` — empty when the variable is unset, the whole API key
+  /// when it is not — so the absence of the `=` is the property to
+  /// assert, and it holds whatever the environment looks like.
+  #[test]
+  fn help_names_env_vars_but_never_their_values() {
+    use clap::CommandFactory;
+    let help = CliArgs::command().render_long_help().to_string();
+    for var in ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] {
+      assert!(
+        help.contains(&format!("[env: {var}]")),
+        "--help should still say it reads {var}"
+      );
+      assert!(
+        !help.contains(&format!("{var}=")),
+        "--help printed the value of {var}"
+      );
+    }
   }
 }
