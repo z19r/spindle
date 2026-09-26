@@ -415,18 +415,25 @@ fn pdf_facts(path: &Path, size: u64, out: &mut Vec<Fact>) {
 }
 
 /// "D:20240115093000Z" → "2024-01-15 09:30"; anything else unchanged.
+///
+/// Counts characters rather than bytes. The value reaches us through
+/// `String::from_utf8_lossy`, so a single bad byte in the PDF becomes
+/// a three-byte U+FFFD, and a byte index into that string lands inside
+/// a character and panics the run.
 fn pdf_date(s: &str) -> String {
   let digits = s.strip_prefix("D:").unwrap_or(s);
-  if digits.len() >= 12
-    && digits[..12].chars().all(|c| c.is_ascii_digit())
-  {
+  let head: Vec<char> = digits.chars().take(12).collect();
+  if head.len() == 12 && head.iter().all(char::is_ascii_digit) {
+    let part = |range: std::ops::Range<usize>| -> String {
+      head[range].iter().collect()
+    };
     format!(
       "{}-{}-{} {}:{}",
-      &digits[..4],
-      &digits[4..6],
-      &digits[6..8],
-      &digits[8..10],
-      &digits[10..12]
+      part(0..4),
+      part(4..6),
+      part(6..8),
+      part(8..10),
+      part(10..12)
     )
   } else {
     s.to_string()
@@ -707,6 +714,28 @@ mod tests {
   fn pdf_dates_are_humanised() {
     assert_eq!(pdf_date("D:20240115093000Z"), "2024-01-15 09:30");
     assert_eq!(pdf_date("yesterday"), "yesterday");
+  }
+
+  /// The caller builds this string with `from_utf8_lossy`, so one bad
+  /// byte in the PDF becomes a three-byte U+FFFD. Ten digits plus one
+  /// of those is 13 bytes and 11 characters: a byte index of 12 falls
+  /// inside the replacement character and used to panic the run.
+  #[test]
+  fn a_pdf_date_cut_short_by_a_bad_byte_does_not_panic() {
+    let raw: Vec<u8> =
+      b"D:0123456789".iter().copied().chain([0xFF]).collect();
+    let lossy = String::from_utf8_lossy(&raw).to_string();
+
+    assert_eq!(
+      pdf_date(&lossy),
+      lossy,
+      "unparseable dates pass through"
+    );
+
+    // Multi-byte characters past the twelfth are just as harmless.
+    assert_eq!(pdf_date("D:20240115093000é"), "2024-01-15 09:30");
+    // And a date whose first twelve characters are not all digits.
+    assert_eq!(pdf_date("D:2024é115093000"), "D:2024é115093000");
   }
 
   #[test]
