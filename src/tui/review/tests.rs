@@ -1740,3 +1740,216 @@ fn detail_scroll_resets_when_the_cursor_moves() {
     "detail kept the previous item's scroll offset"
   );
 }
+
+// --- Animated GIF preview tests ---
+
+/// Write a GIF of `n` frames, each `w`x`h`, with the given delay.
+fn write_gif(
+  path: &std::path::Path,
+  n: usize,
+  w: u32,
+  h: u32,
+  delay_ms: u32,
+) {
+  use image::codecs::gif::GifEncoder;
+  use image::{Delay, Frame, Rgba, RgbaImage};
+
+  let file = std::fs::File::create(path).unwrap();
+  let mut enc = GifEncoder::new(file);
+  let frames: Vec<Frame> = (0..n)
+    .map(|i| {
+      let shade = (i * 40 % 256) as u8;
+      let buf =
+        RgbaImage::from_pixel(w, h, Rgba([shade, 20, 200, 255]));
+      Frame::from_parts(
+        buf,
+        0,
+        0,
+        Delay::from_saturating_duration(Duration::from_millis(
+          delay_ms.into(),
+        )),
+      )
+    })
+    .collect();
+  enc.encode_frames(frames).unwrap();
+}
+
+/// An animated GIF used to decode once and show frame 0 forever. The
+/// decoder now hands back every frame.
+#[test]
+fn decode_animation_keeps_every_frame() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let path = dir.path().join("spin.gif");
+  write_gif(&path, 5, 64, 48, 120);
+
+  let frames = super::state::decode_animation(&path)
+    .expect("five frames is an animation");
+  assert_eq!(frames.len(), 5);
+  assert!(frames
+    .iter()
+    .all(|f| (f.image.width(), f.image.height()) == (64, 48)));
+  assert!(frames
+    .iter()
+    .all(|f| f.delay == Duration::from_millis(120)));
+}
+
+/// A GIF with one frame is a picture. Animating it would re-render an
+/// unchanging image forever for nothing.
+#[test]
+fn a_single_frame_gif_is_not_an_animation() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let path = dir.path().join("still.gif");
+  write_gif(&path, 1, 32, 32, 100);
+  assert!(super::state::decode_animation(&path).is_none());
+}
+
+/// GIFs routinely declare a 0ms or 10ms delay. Playing one at its word
+/// would re-send the whole frame to the terminal a hundred times a
+/// second; browsers have clamped this for decades and so does this.
+#[test]
+fn an_impossibly_fast_gif_is_slowed_to_the_floor() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let path = dir.path().join("fast.gif");
+  write_gif(&path, 4, 32, 32, 10);
+
+  let frames = super::state::decode_animation(&path).unwrap();
+  assert!(
+    frames.iter().all(|f| f.delay >= Duration::from_millis(100)),
+    "got {:?}",
+    frames.iter().map(|f| f.delay).collect::<Vec<_>>()
+  );
+}
+
+/// Frames are held in memory as RGBA, so a big GIF is not small. The
+/// preview pane cannot show more than a few hundred pixels an edge
+/// anyway.
+#[test]
+fn oversized_frames_are_scaled_down_to_the_preview_size() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let path = dir.path().join("big.gif");
+  write_gif(&path, 3, 1200, 900, 100);
+
+  let frames = super::state::decode_animation(&path).unwrap();
+  for f in &frames {
+    assert_eq!(f.image.width().max(f.image.height()), 480);
+    // Aspect ratio survives the downscale.
+    assert_eq!(f.image.height(), 360);
+  }
+}
+
+/// Past the memory ceiling the rest of the GIF is dropped rather than
+/// decoded, and what was kept loops.
+#[test]
+fn a_gif_too_big_to_hold_is_truncated() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let path = dir.path().join("long.gif");
+  // 480x480 is 230_400 pixels; 8_000_000 allows 34 of them.
+  write_gif(&path, 60, 480, 480, 100);
+
+  let frames = super::state::decode_animation(&path).unwrap();
+  assert!(
+    (2..60).contains(&frames.len()),
+    "expected a truncated animation, got {} frames",
+    frames.len()
+  );
+  let pixels: u64 = frames
+    .iter()
+    .map(|f| u64::from(f.image.width()) * u64::from(f.image.height()))
+    .sum();
+  assert!(pixels < 9_000_000, "kept {pixels} pixels");
+}
+
+#[test]
+fn decode_animation_gives_up_on_a_non_gif() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let path = dir.path().join("notes.txt");
+  std::fs::write(&path, "plain text, not a gif").unwrap();
+  assert!(super::state::decode_animation(&path).is_none());
+}
+
+/// A GIF's frames only change when the one on screen has had its
+/// declared time; the event loop ticks far faster than that.
+#[test]
+fn a_frame_stays_up_for_its_declared_delay() {
+  let mut state = make_state();
+  state.picker = Some(Picker::halfblocks());
+  state.preview =
+    animation(&mut state.picker.clone().unwrap(), 3, 10_000);
+
+  state.advance_animation();
+  state.advance_animation();
+  assert_eq!(current_frame(&state), 0, "nothing was due yet");
+}
+
+/// When a frame is due the next one goes up, and the last frame wraps
+/// to the first rather than stopping.
+#[test]
+fn a_due_frame_advances_and_the_last_one_loops() {
+  let mut state = make_state();
+  state.picker = Some(Picker::halfblocks());
+  state.preview = animation(&mut state.picker.clone().unwrap(), 3, 0);
+
+  for expected in [1, 2, 0, 1] {
+    expire(&mut state);
+    state.advance_animation();
+    assert_eq!(current_frame(&state), expected);
+  }
+}
+
+/// Selecting something else stops the animation; nothing keeps
+/// re-encoding a file the reviewer has moved off.
+#[test]
+fn moving_off_the_file_ends_the_animation() {
+  let mut state = make_state();
+  state.picker = Some(Picker::halfblocks());
+  state.preview = animation(&mut state.picker.clone().unwrap(), 3, 0);
+  state.preview_path = Some(PathBuf::from("/dl/spin.gif"));
+
+  state.update_image_preview();
+  assert!(
+    !matches!(state.preview, PreviewState::Animated(_)),
+    "the animation outlived its file"
+  );
+}
+
+fn animation(
+  picker: &mut Picker,
+  n: usize,
+  delay_ms: u64,
+) -> PreviewState {
+  let frames: Vec<AnimationFrame> = (0..n)
+    .map(|i| AnimationFrame {
+      image: image::DynamicImage::ImageRgba8(
+        image::RgbaImage::from_pixel(
+          8,
+          8,
+          image::Rgba([i as u8 * 10, 0, 0, 255]),
+        ),
+      ),
+      delay: Duration::from_millis(delay_ms),
+    })
+    .collect();
+  let protocol =
+    Box::new(picker.new_resize_protocol(frames[0].image.clone()));
+  PreviewState::Animated(Box::new(Animation {
+    frames,
+    current: 0,
+    protocol,
+    shown_at: Instant::now(),
+  }))
+}
+
+fn current_frame(state: &ReviewState) -> usize {
+  match &state.preview {
+    PreviewState::Animated(a) => a.current,
+    _ => panic!("not animating"),
+  }
+}
+
+/// Backdate the current frame so the next advance finds it due,
+/// without the test sleeping for it.
+fn expire(state: &mut ReviewState) {
+  if let PreviewState::Animated(a) = &mut state.preview {
+    a.shown_at = Instant::now() - Duration::from_secs(60);
+  }
+}
