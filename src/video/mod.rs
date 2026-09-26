@@ -93,32 +93,11 @@ pub async fn extract_frame_at(
   timestamp_secs: f64,
   threads: usize,
 ) -> Result<Vec<u8>> {
-  // Downscale inside ffmpeg, to the same edge the still-image path
-  // uploads. Left alone, a 4K 10-bit source encodes to a 16-bit PNG of
-  // several megabytes that is piped back and base64'd for nothing: the
-  // model never sees more than `MAX_EDGE` either way.
-  let max = crate::analyze::image_prep::MAX_EDGE;
-  let scale = format!(
-    "scale='min({max},iw)':'min({max},ih)'\
-     :force_original_aspect_ratio=decrease"
-  );
+  let args = frame_args(timestamp_secs, threads);
   let output = tokio::process::Command::new("ffmpeg")
-    .args(["-threads", &threads.max(1).to_string()])
-    .args(["-ss", &format!("{timestamp_secs:.3}"), "-i"])
+    .args(&args[..5])
     .arg(path)
-    .args([
-      "-frames:v",
-      "1",
-      "-vf",
-      scale.as_str(),
-      "-pix_fmt",
-      "rgb24",
-      "-f",
-      "image2pipe",
-      "-vcodec",
-      "png",
-      "-",
-    ])
+    .args(&args[5..])
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped())
     .output()
@@ -130,6 +109,77 @@ pub async fn extract_frame_at(
       )
     })?;
 
+  frame_output(output, path, timestamp_secs)
+}
+
+/// The blocking twin of [`extract_frame_at`], for callers with no
+/// runtime to await on — the review screen decodes its previews on a
+/// plain thread.
+pub fn extract_frame_at_blocking(
+  path: &Path,
+  timestamp_secs: f64,
+  threads: usize,
+) -> Result<Vec<u8>> {
+  let args = frame_args(timestamp_secs, threads);
+  let output = std::process::Command::new("ffmpeg")
+    .args(&args[..5])
+    .arg(path)
+    .args(&args[5..])
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .output()
+    .with_context(|| {
+      format!(
+        "Failed to run ffmpeg on {} at {timestamp_secs}s",
+        path.display()
+      )
+    })?;
+
+  frame_output(output, path, timestamp_secs)
+}
+
+/// ffmpeg arguments for one frame as a PNG on stdout. The input path
+/// goes after the first five, immediately after the `-i` that expects
+/// it; everything from index five on follows the path.
+///
+/// Downscaling happens inside ffmpeg, to the same edge the still-image
+/// path uploads. Left alone, a 4K 10-bit source encodes to a 16-bit
+/// PNG of several megabytes that is piped back and base64'd for
+/// nothing: nothing downstream sees more than `MAX_EDGE` either way.
+fn frame_args(timestamp_secs: f64, threads: usize) -> Vec<String> {
+  let max = crate::analyze::image_prep::MAX_EDGE;
+  let scale = format!(
+    "scale='min({max},iw)':'min({max},ih)'\
+     :force_original_aspect_ratio=decrease"
+  );
+  [
+    "-threads",
+    &threads.max(1).to_string(),
+    "-ss",
+    &format!("{timestamp_secs:.3}"),
+    "-i",
+    "-frames:v",
+    "1",
+    "-vf",
+    scale.as_str(),
+    "-pix_fmt",
+    "rgb24",
+    "-f",
+    "image2pipe",
+    "-vcodec",
+    "png",
+    "-",
+  ]
+  .iter()
+  .map(|s| (*s).to_string())
+  .collect()
+}
+
+fn frame_output(
+  output: std::process::Output,
+  path: &Path,
+  timestamp_secs: f64,
+) -> Result<Vec<u8>> {
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     anyhow::bail!(
@@ -259,6 +309,32 @@ mod tests {
       "expected 8-bit RGB, got {:?}",
       img.color()
     );
+  }
+
+  /// The blocking path must build the same command as the async one —
+  /// the input path goes after `-i`, and an off-by-one in that split
+  /// feeds ffmpeg the path as a timestamp.
+  #[tokio::test]
+  async fn blocking_and_async_extraction_agree() {
+    if !ffmpeg_available() {
+      eprintln!("ffmpeg not on PATH; skipping");
+      return;
+    }
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("agree.mp4");
+    let status = std::process::Command::new("ffmpeg")
+      .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+      .arg("testsrc2=s=320x240:r=10:d=2")
+      .args(["-pix_fmt", "yuv420p"])
+      .arg(&path)
+      .status()
+      .unwrap();
+    assert!(status.success());
+
+    let a = extract_frame_at(&path, 1.0, 1).await.unwrap();
+    let b = extract_frame_at_blocking(&path, 1.0, 1).unwrap();
+    assert_eq!(a, b, "the two paths decoded different frames");
+    assert!(!b.is_empty());
   }
 
   /// A source already inside the cap is passed through at its own size
