@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+  # No branch filter: the filter matches the *base*, so limiting it to
+  # main leaves a stacked PR with no checks at all until its whole
+  # stack lands.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
