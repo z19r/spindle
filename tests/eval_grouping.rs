@@ -519,12 +519,23 @@ fn existing_labels(name: &str) -> Vec<String> {
 /// `Finance/Taxes/2024` and `Personal/Pets/Biscuit` into
 /// `Personal/Pets/Mochi`, capping a perfect run at F1 0.833.
 ///
-/// Labels are allowed to change: a thin *new* leaf folding up to its
-/// parent keeps the same files together, and the scorer reads groups,
-/// not names. Only files being merged across groups is a fault.
+/// A rename is a fault too, for a different reason. The scorer reads
+/// groups rather than names, so `Work/Initech/Onboarding` folding up
+/// to `Work/Initech` costs a run nothing directly — but the answer key
+/// is then naming a folder the pipeline will not emit, and a fixture
+/// that does that is not a specification of good output any more. It
+/// is also how #156 hid: three folders too thin to survive, and the
+/// only symptom was the composite ceiling sitting 0.023 low, which
+/// took a throwaway probe script to trace back to them. This says
+/// which label, and why.
+///
+/// Compared on [`validate::key`], the validator's own notion of label
+/// identity, so `tidy_label` tidying punctuation or case — which a
+/// real run reproduces — does not trip it. A segment disappearing
+/// does.
 #[test]
 fn no_fixture_asks_for_folders_the_validator_would_merge() {
-  use spindle::group::validate::validate_groups;
+  use spindle::group::validate::{key, validate_groups};
   use spindle::model::ProposedGroup;
 
   for name in FIXTURES {
@@ -570,6 +581,14 @@ fn no_fixture_asks_for_folders_the_validator_would_merge() {
         sources.len() <= 1,
         "{name}: the validator merges {sources:?} into one group \
          ({:?}), so no run can score them apart",
+        g.label
+      );
+      let [source] = sources[..] else { continue };
+      assert_eq!(
+        key(&g.label),
+        key(source),
+        "{name}: the validator renames {source:?} to {:?}, so the \
+         answer key is asking for a folder no run will produce",
         g.label
       );
     }
