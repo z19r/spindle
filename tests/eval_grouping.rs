@@ -21,8 +21,8 @@ use spindle::pipeline::{self, PipelineConfig, PipelineEvent};
 /// score its own `expected.toml` gets when every file lands exactly
 /// where the answer key says, and that is not 1.000 for every
 /// fixture: the granularity term reads the *shape* of the folders, so
-/// a fixture built from pairs caps itself, and `organize-second-run`
-/// still does. Comparing four fixtures with four different ceilings
+/// a fixture built from pairs caps itself, as `organize-large` does
+/// deliberately. Comparing four fixtures with four different ceilings
 /// against one absolute number compares nothing, and the reading
 /// drifts silently every time a fixture gains a file. These preserve
 /// the headroom the absolute floors allowed — 0.90, 0.85, 0.85
@@ -41,18 +41,16 @@ const GRANULARITY_SLACK: f64 = 0.15;
 /// every floor derived from it drops in step, and nothing would
 /// otherwise say the eval had gone quietly slacker.
 ///
-/// `organize` and `organize-granularity` reach 1.000 — no expected
-/// folder in either holds fewer than `MIN_GROUP_SIZE` files.
+/// Three of the four reach 1.000 — no expected folder in them holds
+/// fewer than `MIN_GROUP_SIZE` files once the run is applied.
 /// `organize-large` keeps five small folders on purpose, because a
 /// large real tree has some, and pays 0.011 for them.
-/// `organize-second-run` reaches 0.977: twelve of its fifteen folders
-/// already exist and are full, and the three it asks this run to
-/// create from scratch hold two or three files each. That is #156,
-/// the same defect #150 fixed in `organize`.
+/// `organize-second-run` reaches it too, counting what is already
+/// under its `Organized/` tree alongside what the run adds.
 const MIN_CEILING: [(&str, f64); 4] = [
   ("organize", 1.000),
   ("organize-large", 0.985),
-  ("organize-second-run", 0.975),
+  ("organize-second-run", 1.000),
   ("organize-granularity", 1.000),
 ];
 
