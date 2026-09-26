@@ -72,6 +72,11 @@ of the staged trash. If some files cannot be restored — you moved one
 yourself since the run, say — spindle reports them and keeps the
 journal, so you can clear the obstruction and undo again.
 
+Undo never overwrites. If something else has taken an original path
+since the run — a re-download with the same name, say — the restored
+file lands beside it as `name (1).ext` and spindle names every path it
+had to do that for.
+
 Staged deletions still occupy disk. Reclaim the space once you are
 sure you want them gone:
 

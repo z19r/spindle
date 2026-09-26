@@ -238,6 +238,10 @@ pub struct UndoReport {
   pub run_id: String,
   pub restored: Vec<PathBuf>,
   pub failed: Vec<(PathBuf, String)>,
+  /// Restores whose original path was taken by something else, as
+  /// (wanted, actually restored to). The file is back and nothing was
+  /// destroyed, but it does not have its old name.
+  pub renamed: Vec<(PathBuf, PathBuf)>,
 }
 
 /// Reverse a journaled run: moves go back where they came from and
@@ -259,19 +263,26 @@ pub fn undo_run(
 
   let mut restored = Vec::new();
   let mut failed = Vec::new();
+  let mut renamed = Vec::new();
 
   // Reverse moves last-first so nested collisions unwind cleanly.
   for mv in run_journal.moves.iter().rev() {
-    match move_file(&mv.to, &mv.from) {
-      Ok(()) => restored.push(mv.from.clone()),
-      Err(e) => failed.push((mv.from.clone(), e.to_string())),
-    }
+    restore(
+      &mv.to,
+      &mv.from,
+      &mut restored,
+      &mut failed,
+      &mut renamed,
+    );
   }
   for del in &run_journal.deletions {
-    match move_file(&del.trashed_to, &del.original) {
-      Ok(()) => restored.push(del.original.clone()),
-      Err(e) => failed.push((del.original.clone(), e.to_string())),
-    }
+    restore(
+      &del.trashed_to,
+      &del.original,
+      &mut restored,
+      &mut failed,
+      &mut renamed,
+    );
   }
 
   if failed.is_empty() {
@@ -282,7 +293,36 @@ pub fn undo_run(
     run_id,
     restored,
     failed,
+    renamed,
   })
+}
+
+/// Put one file back, never on top of another.
+///
+/// `execute_plan` auto-renames rather than overwrite; undo has to do
+/// the same, because `move_file` starts with `rename`, which replaces
+/// the destination without a word. The path a run emptied can be
+/// occupied again by the time it is undone — a re-download with the
+/// same name, or a later run that filed something there — and undo is
+/// the operation people reach for precisely because they expect it not
+/// to lose anything.
+fn restore(
+  from: &Path,
+  wanted: &Path,
+  restored: &mut Vec<PathBuf>,
+  failed: &mut Vec<(PathBuf, String)>,
+  renamed: &mut Vec<(PathBuf, PathBuf)>,
+) {
+  let dest = unique_dest(wanted);
+  match move_file(from, &dest) {
+    Ok(()) => {
+      if dest != wanted {
+        renamed.push((wanted.to_path_buf(), dest.clone()));
+      }
+      restored.push(dest);
+    }
+    Err(e) => failed.push((wanted.to_path_buf(), e.to_string())),
+  }
 }
 
 /// Legacy undo for logs written by pre-journal versions (`--undo-log`).
@@ -496,6 +536,76 @@ mod tests {
     assert!(!dest.path().join("restore.jpg").exists());
     // Undone run no longer shows up as undoable.
     assert!(journal::list_runs(&paths.journal_dir).is_empty());
+  }
+
+  /// The path a run emptied can be occupied again before the undo —
+  /// a re-download with the same name is enough. Undo must not put
+  /// the old file back on top of it.
+  #[test]
+  fn undo_does_not_overwrite_a_reclaimed_origin() {
+    let src = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    let paths = paths(&src);
+    let origin = src.path().join("restore.jpg");
+
+    let plan = ApprovedPlan {
+      moves: vec![make_test_move(
+        src.path(),
+        dest.path(),
+        "restore.jpg",
+      )],
+      deletions: vec![],
+      skipped_files: vec![],
+    };
+    execute_plan(&plan, &paths, dest.path());
+    assert!(!origin.exists());
+
+    // Something else takes the name while the run is organized away.
+    fs::write(&origin, "the new one").unwrap();
+
+    let undo = undo_run(&paths, None).unwrap();
+
+    assert!(undo.failed.is_empty());
+    assert_eq!(
+      fs::read_to_string(&origin).unwrap(),
+      "the new one",
+      "undo overwrote the file that had taken the path back"
+    );
+    let beside = src.path().join("restore (1).jpg");
+    assert!(beside.exists(), "the undone file went nowhere");
+    assert_eq!(undo.restored, vec![beside.clone()]);
+    assert_eq!(undo.renamed, vec![(origin, beside)]);
+  }
+
+  /// Same hazard on the deletions half: a staged duplicate goes back
+  /// to a path that is no longer free.
+  #[test]
+  fn restoring_a_deletion_does_not_overwrite_the_original_path() {
+    let dir = TempDir::new().unwrap();
+    let paths = paths(&dir);
+    let dupe = dir.path().join("dupe.jpg");
+    fs::write(&dupe, "duplicate").unwrap();
+
+    let plan = ApprovedPlan {
+      moves: vec![],
+      deletions: vec![dupe.clone()],
+      skipped_files: vec![],
+    };
+    let report = execute_plan(&plan, &paths, dir.path());
+    assert!(!dupe.exists());
+
+    fs::write(&dupe, "something else entirely").unwrap();
+
+    let undo = undo_run(&paths, Some(&report.run_id)).unwrap();
+
+    assert!(undo.failed.is_empty());
+    assert_eq!(
+      fs::read_to_string(&dupe).unwrap(),
+      "something else entirely"
+    );
+    let beside = dir.path().join("dupe (1).jpg");
+    assert_eq!(fs::read_to_string(&beside).unwrap(), "duplicate");
+    assert_eq!(undo.renamed, vec![(dupe, beside)]);
   }
 
   #[test]

@@ -478,6 +478,20 @@ fn run_undo(cli: &CliArgs) -> Result<()> {
   for path in &report.restored {
     println!("  ← {}", path.display());
   }
+  if !report.renamed.is_empty() {
+    println!(
+      "\n{} file(s) could not take their original name back — \
+       something else is there now:",
+      report.renamed.len()
+    );
+    for (wanted, actual) in &report.renamed {
+      println!(
+        "  {} is occupied; restored as {}",
+        wanted.display(),
+        actual.display()
+      );
+    }
+  }
   for (path, err) in &report.failed {
     eprintln!("  ✗ {} ({err})", path.display());
   }
