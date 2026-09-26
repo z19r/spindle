@@ -128,6 +128,23 @@ pub struct CliArgs {
   /// Disable introspecting archive contents (zip, tar, gz).
   #[arg(long)]
   pub no_introspect_archives: bool,
+
+  /// Colour theme for the review screen: auto (follow the desktop
+  /// theme), spindle, gloss, deep-night, light-luxury.
+  #[arg(long, value_name = "NAME", value_parser = parse_theme)]
+  pub theme: Option<String>,
+}
+
+/// Accept only a built-in theme name, so a typo fails at the flag
+/// rather than silently falling back three screens later.
+fn parse_theme(s: &str) -> Result<String, String> {
+  if crate::tui::theme::builtin(s).is_some() {
+    return Ok(s.to_string());
+  }
+  Err(format!(
+    "unknown theme; try one of: {}",
+    crate::tui::theme::THEME_NAMES.join(", ")
+  ))
 }
 
 /// Resolve the ledger path for this run: `None` when disabled, otherwise the
@@ -190,6 +207,10 @@ pub struct GeneralConfig {
   pub target_dirs: Vec<PathBuf>,
   #[serde(default = "default_output_dir")]
   pub output_dir: PathBuf,
+  /// Review-screen colour theme; `None` means `auto`. `--theme`
+  /// overrides it.
+  #[serde(default)]
+  pub theme: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -275,6 +296,7 @@ impl Default for GeneralConfig {
     Self {
       target_dirs: default_target_dirs(),
       output_dir: default_output_dir(),
+      theme: None,
     }
   }
 }
@@ -448,6 +470,7 @@ mod tests {
       ledger: None,
       no_organized_context: false,
       no_introspect_archives: false,
+      theme: None,
     }
   }
 

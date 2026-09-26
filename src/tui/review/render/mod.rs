@@ -15,6 +15,19 @@ pub(crate) use groups::*;
 pub(crate) use modals::*;
 
 pub fn render(frame: &mut Frame, state: &mut ReviewState) {
+  // Themes that bring their own surface paint it once, underneath
+  // everything: the widgets below set foregrounds and inherit this.
+  // `auto` and the Omarchy palettes leave it `Color::Reset`, so the
+  // terminal's own background keeps showing through.
+  use ratatui::style::Color;
+  let surface = theme::background();
+  if surface != Color::Reset {
+    frame.render_widget(
+      Block::default().style(Style::default().bg(surface)),
+      frame.area(),
+    );
+  }
+
   let outer = Layout::vertical([
     Constraint::Length(3),
     Constraint::Min(6),
