@@ -63,6 +63,24 @@ export ANTHROPIC_API_KEY=sk-ant-...
 To route through a proxy, set `ANTHROPIC_BASE_URL`, pass `--api-base-url`,
 or set `base_url` under `[ai]` in the config file.
 
+### Colours
+
+The review screen ships five themes, chosen with `--theme` or `theme` under
+`[general]` in the config file:
+
+| Name | |
+|---|---|
+| `auto` | the default: follow the desktop theme if there is one, else `spindle` |
+| `spindle` | violet accents over whatever background your terminal already has |
+| `gloss` | hot pink on a deep void |
+| `deep-night` | midnight navy with a periwinkle accent |
+| `light-luxury` | ivory paper and brass, for terminals that are actually light |
+
+`auto` and `spindle` paint no background of their own — matching your terminal
+means staying out of its way — while the other three bring their own surface.
+Every built-in is checked against WCAG contrast ratios by a test, so no theme
+can ship a label you cannot read.
+
 ### Top-level folders
 
 Grouping runs in two stages: every file is first routed to one of your

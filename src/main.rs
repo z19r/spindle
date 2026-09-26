@@ -28,6 +28,16 @@ use spindle::tui::{
   self, ReviewAction, ReviewMode, ReviewState, TerminalSession,
 };
 
+/// Install the review screen's palette. `--theme` wins over the config
+/// file; a name the config file got wrong warns and falls back to
+/// `auto` rather than ending the run over a colour.
+fn init_theme(cli: &CliArgs, config: &Config) {
+  let name = cli.theme.as_deref().or(config.general.theme.as_deref());
+  if let Err(e) = spindle::tui::theme::init_named(name) {
+    tracing::warn!("{e}");
+  }
+}
+
 /// Negotiate the best image protocol the terminal offers, falling back
 /// to halfblocks rather than to no preview at all.
 ///
@@ -161,7 +171,7 @@ async fn main() -> Result<()> {
   // progress lines for them too.
   let session =
     if std::io::stdout().is_terminal() && !cli.yes && !cli.json {
-      tui::theme::init_from_terminal();
+      init_theme(&cli, &config);
       Some(TerminalSession::enter()?)
     } else {
       None
@@ -636,7 +646,7 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
   )
   .with_file_metadata(&fingerprinted);
   review_state.set_dupe_types(dupe_types);
-  tui::theme::init_from_terminal();
+  init_theme(cli, config);
   let mut session = TerminalSession::enter()?;
   let review = tui::run_review(review_state, &mut session.terminal);
   drop(session);
