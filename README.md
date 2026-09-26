@@ -143,6 +143,62 @@ just lint           # clippy + fmt check
 just release-check  # full quality gate
 ```
 
+### Eval
+
+Grouping quality is measured, not argued about. Four fixtures under
+`tests/fixtures/` are trees of realistic files belonging to one
+invented person, each with an `expected.toml` answer key naming the
+folder every file should land in:
+
+| Fixture | What it is for |
+| --- | --- |
+| `organize` | The baseline. A few dozen files across the usual areas. |
+| `organize-large` | Around 140 files, ambiguous items, office and ebook formats, exact and near duplicates. |
+| `organize-second-run` | A dozen folders already exist from a previous run; most incoming files belong in them. Measures label reuse. |
+| `organize-granularity` | Clusters big enough that splitting them is visibly wrong. Measures folder shape. |
+
+```bash
+just eval         # follows your ANTHROPIC_* environment, proxy included
+just eval-direct  # same, pinned at api.anthropic.com
+```
+
+Both call the real API and cost money, so the tests are `#[ignore]`d
+and gated on `SPINDLE_EVAL=1`; a plain `just test` never touches the
+network. Per-file descriptions are cached under `target/eval-cache`,
+so re-runs only pay for the grouping call.
+
+Each run prints a report:
+
+| Line | |
+| --- | --- |
+| `placed` | Share of the answer key's files the plan placed at all. |
+| `pairwise f1` | Whether files that belong together ended up together, and apart otherwise. Precision and recall are printed beside it. |
+| `top-level accuracy` | Whether each file reached an acceptable top-level area. The key may name more than one. |
+| `hygiene` | Groups that are outright malformed: named for a file type, past the depth cap, holding one file. |
+| `granularity` | The shape of the result — how many files landed somewhere too thin to be worth opening. |
+| `label reuse` | Of files whose folder already existed, how many were filed under exactly that label. Second-run fixtures only. |
+| `alternatives offered` | Whether the review pane's ALSO FITS list contains a folder the key would have accepted. Reported only. |
+| `composite` | One number, weighing the first five. Reported-only lines are left out of it on purpose. |
+
+A fixture is graded against **its own ceiling** — what its answer key
+scores when every file lands exactly where the key says — minus a
+named slack, rather than against an absolute number. Four fixtures
+have four different ceilings, and a fixture that gains a file moves
+its own.
+
+That makes editing a fixture a change to the grading, so two guards
+sit in `tests/eval_grouping.rs` and run without an API key:
+
+- `MIN_CEILING` records each fixture's ceiling. Splitting one expected
+  folder into two thin ones drops the ceiling and every floor derived
+  from it; the recorded value has to be changed by hand, deliberately.
+- The answer keys are run through the validator. A folder it would
+  merge away or rename is a folder no run can produce, so asking for
+  one is a bug in the fixture, and the guard says which label and what
+  the validator does to it.
+
+Both fail on `just test`. If you add a file to a fixture, run it.
+
 ## License
 
 MIT
