@@ -47,7 +47,9 @@ fn main() {
 
   let files: usize =
     groups.iter().map(|g| g.member_indices.len()).sum();
-  let (out, n) = validate_groups(groups.clone());
+  // A cached grouping carries no record of what was already on disk,
+  // so this measures a first run.
+  let (out, n) = validate_groups(groups.clone(), &[]);
   report("before", &groups);
   report("after ", &out);
   println!("{files} files, {n:?}");

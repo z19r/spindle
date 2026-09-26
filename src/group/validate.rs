@@ -40,6 +40,10 @@ pub const MAX_DEPTH: usize = 3;
 
 /// Files a deepest-level group needs to justify being its own folder.
 ///
+/// Applies to folders this run is proposing. A folder that already
+/// exists is exempt however few files land in it; see
+/// [`validate_groups`].
+///
 /// The model splits eagerly. A 1226-file run came out as 170 groups, 74
 /// of them holding three files or fewer and 123 of them labelled at the
 /// full [`MAX_DEPTH`]; `Finance/Receipts/Dining & Events` holding two
@@ -114,10 +118,21 @@ const MONTHS: &[&str] = &[
   "december",
 ];
 
+/// Clean up model-proposed labels, sparing any that names a folder the
+/// user already has.
+///
+/// `existing_labels` are the group labels a previous run left under the
+/// output directory (`Ledger::existing_groups_under`). Pass an empty
+/// slice for a first run.
 pub fn validate_groups(
   groups: Vec<ProposedGroup>,
+  existing_labels: &[String],
 ) -> (Vec<ProposedGroup>, Normalisation) {
   let mut n = Normalisation::default();
+  // Keyed the same way `merge_by_key` compares labels, so a case or
+  // punctuation variant of an existing folder still counts as it.
+  let existing: HashSet<String> =
+    existing_labels.iter().map(|l| key(l)).collect();
   let mut system = Vec::new();
   let mut work = Vec::new();
   for g in groups {
@@ -162,6 +177,7 @@ pub fn validate_groups(
   for g in &mut out {
     if g.member_indices.len() == 1
       && !is_system_label(&g.label)
+      && !existing.contains(&key(&g.label))
       && depth(&g.label) >= 2
     {
       g.label = parent(&g.label);
@@ -178,7 +194,7 @@ pub fn validate_groups(
   // them. Both run before the size floor, so a topic that is only thin
   // because it was split keeps its specific label.
   out = merge_by_key(out, &mut n.merged);
-  out = fold_thin_leaves(out, &mut n);
+  out = fold_thin_leaves(out, &existing, &mut n);
 
   out.extend(system);
   (out, n)
@@ -320,8 +336,17 @@ fn topic_of(label: &str) -> &str {
 /// would fold into is a bare taxonomy area: `Work/Markbin` with three
 /// files is a client, and `Work` is not. Three segments are where the
 /// model invents distinctions the file count cannot support.
+///
+/// A label in `existing` is left alone too, at any depth and any size.
+/// The floor asks whether a distinction earns a folder, and a folder
+/// the user already has has already earned one — its real size is
+/// whatever is in it, not the two files this run happens to add. Fold
+/// it and the two new dog photos miss `Personal/Pets/Biscuit` and
+/// start `Personal/Pets` beside it, which is the reuse the ledger
+/// exists to get right.
 fn fold_thin_leaves(
   groups: Vec<ProposedGroup>,
+  existing: &HashSet<String>,
   n: &mut Normalisation,
 ) -> Vec<ProposedGroup> {
   let mut out = groups;
@@ -330,6 +355,7 @@ fn fold_thin_leaves(
     for g in &mut out {
       if g.member_indices.len() >= MIN_GROUP_SIZE
         || is_system_label(&g.label)
+        || existing.contains(&key(&g.label))
         || depth(&g.label) < 3
       {
         continue;
@@ -715,6 +741,145 @@ mod tests {
   use super::*;
   use crate::model::{MemberDestination, MemberNote};
 
+  /// Validate against a tree that already holds these folders.
+  fn validate_against(
+    groups: Vec<ProposedGroup>,
+    existing: &[&str],
+  ) -> (Vec<ProposedGroup>, Normalisation) {
+    let existing: Vec<String> =
+      existing.iter().map(|s| (*s).to_string()).collect();
+    validate_groups(groups, &existing)
+  }
+
+  /// Labels in a fixed order, so a test that only cares which folders
+  /// survived does not depend on the order they came out in.
+  fn sorted_labels(groups: &[ProposedGroup]) -> Vec<&str> {
+    let mut l: Vec<&str> =
+      groups.iter().map(|g| g.label.as_str()).collect();
+    l.sort_unstable();
+    l
+  }
+
+  /// The size floor asks whether a distinction earns a folder. A folder
+  /// the user already has has already earned one, so two new photos
+  /// join it instead of starting a sibling beside it.
+  #[test]
+  fn two_files_are_enough_for_a_folder_that_already_exists() {
+    let (out, n) = validate_against(
+      vec![g("Personal/Pets/Biscuit", &[0, 1])],
+      &["Personal/Pets/Biscuit"],
+    );
+    assert_eq!(sorted_labels(&out), ["Personal/Pets/Biscuit"]);
+    assert_eq!(n.collapsed, 0);
+  }
+
+  /// Without the folder on disk the floor applies as before, so the
+  /// exemption is doing the work rather than the depth rule.
+  #[test]
+  fn the_same_two_files_fold_when_the_folder_is_new() {
+    let (out, n) =
+      validate_fresh(vec![g("Personal/Pets/Biscuit", &[0, 1])]);
+    assert_eq!(sorted_labels(&out), ["Personal/Pets"]);
+    assert_eq!(n.collapsed, 1);
+  }
+
+  /// The worst form of the bug: two existing folders fold to the same
+  /// parent and are then merged with each other, so this year's taxes
+  /// land in last year's folder.
+  #[test]
+  fn sibling_folders_that_both_exist_are_not_merged_into_each_other()
+  {
+    let existing = ["Finance/Taxes/2023", "Finance/Taxes/2024"];
+    let (out, _) = validate_against(
+      vec![
+        g("Finance/Taxes/2023", &[0, 1]),
+        g("Finance/Taxes/2024", &[2, 3, 4]),
+      ],
+      &existing,
+    );
+    assert_eq!(
+      sorted_labels(&out),
+      ["Finance/Taxes/2023", "Finance/Taxes/2024"]
+    );
+
+    // Same input, nothing on disk: they collapse together, which is
+    // what the fixture measured before this exemption existed.
+    let (fresh, _) = validate_fresh(vec![
+      g("Finance/Taxes/2023", &[0, 1]),
+      g("Finance/Taxes/2024", &[2, 3, 4]),
+    ]);
+    assert_eq!(sorted_labels(&fresh), ["Finance/Taxes"]);
+  }
+
+  /// One file is still enough, and this is the case the singleton pass
+  /// would otherwise take: a lone new bill going to the bills folder.
+  #[test]
+  fn a_single_file_still_reaches_a_folder_that_already_exists() {
+    let (out, n) = validate_against(
+      vec![g("Finance/Bills/Utilities", &[0])],
+      &["Finance/Bills/Utilities"],
+    );
+    assert_eq!(sorted_labels(&out), ["Finance/Bills/Utilities"]);
+    assert_eq!(n.collapsed, 0);
+  }
+
+  /// The exemption is keyed the way labels are compared everywhere
+  /// else, so the model spelling an existing folder differently still
+  /// counts as naming it.
+  #[test]
+  fn an_existing_folder_is_recognised_through_case_and_punctuation() {
+    let (out, _) = validate_against(
+      vec![g("personal / pets / biscuit", &[0, 1])],
+      &["Personal/Pets/Biscuit"],
+    );
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].member_indices.len(), 2);
+    assert_eq!(depth(&out[0].label), 3);
+  }
+
+  /// Being on disk spares a folder the floor; it does not make it a
+  /// folder for anything else. A thin group the user has never seen is
+  /// folded as usual even while its neighbour is spared.
+  #[test]
+  fn the_exemption_reaches_only_the_folders_named() {
+    let (out, n) = validate_against(
+      vec![
+        g("Personal/Pets/Biscuit", &[0, 1]),
+        g("Personal/Pets/Mochi", &[2, 3]),
+      ],
+      &["Personal/Pets/Biscuit"],
+    );
+    assert_eq!(
+      sorted_labels(&out),
+      ["Personal/Pets", "Personal/Pets/Biscuit"]
+    );
+    assert_eq!(n.collapsed, 1);
+  }
+
+  /// An existing folder that is genuinely full is untouched either way;
+  /// the exemption must not disturb the ordinary path.
+  #[test]
+  fn a_full_existing_folder_comes_through_unchanged() {
+    let full =
+      || vec![g("Work/Acme Corp/Website Redesign", &[0, 1, 2, 3])];
+    let (spared, _) =
+      validate_against(full(), &["Work/Acme Corp/Website Redesign"]);
+    let (fresh, _) = validate_fresh(full());
+    assert_eq!(sorted_labels(&spared), sorted_labels(&fresh));
+    assert_eq!(
+      sorted_labels(&spared),
+      ["Work/Acme Corp/Website Redesign"]
+    );
+  }
+
+  /// Validate as a first run: nothing organised yet, so no label is
+  /// spared by the existing-folder exemption.
+  fn validate_fresh(
+    groups: Vec<ProposedGroup>,
+  ) -> (Vec<ProposedGroup>, Normalisation) {
+    validate_groups(groups, &[])
+  }
+
   fn g(label: &str, members: &[usize]) -> ProposedGroup {
     ProposedGroup {
       label: label.to_string(),
@@ -734,7 +899,7 @@ mod tests {
   /// nothing could see it.
   #[test]
   fn the_same_topic_in_two_areas_moves_to_the_larger() {
-    let (out, n) = validate_groups(vec![
+    let (out, n) = validate_fresh(vec![
       g("Legal/Identification Cards", &[0, 1]),
       g("Work/Identification Cards", &[2, 3, 4]),
     ]);
@@ -749,7 +914,7 @@ mod tests {
   /// back in a general folder — the one failure here that matters.
   #[test]
   fn private_never_reconciles_into_another_area() {
-    let (out, n) = validate_groups(vec![
+    let (out, n) = validate_fresh(vec![
       g("Personal/Selfies", &[0, 1, 2, 3, 4, 5]),
       g("Private/Selfies", &[6, 7]),
     ]);
@@ -759,7 +924,7 @@ mod tests {
     );
     assert_eq!(n.merged, 0);
     // Nor in the other direction, whichever is larger.
-    let (out, _) = validate_groups(vec![
+    let (out, _) = validate_fresh(vec![
       g("Private/Selfies", &[0, 1, 2, 3, 4, 5]),
       g("Personal/Selfies", &[6, 7]),
     ]);
@@ -774,7 +939,7 @@ mod tests {
   /// four folders end up under one roof instead of two.
   #[test]
   fn a_subtree_routed_to_two_areas_gathers_under_one_area() {
-    let (out, n) = validate_groups(vec![
+    let (out, n) = validate_fresh(vec![
       g(
         "Software/Linux System Administration/Bootloader",
         &[0, 1, 2, 3],
@@ -811,8 +976,8 @@ mod tests {
     ];
     let mut two = one.clone();
     two.reverse();
-    let (a, _) = validate_groups(one);
-    let (b, _) = validate_groups(two);
+    let (a, _) = validate_fresh(one);
+    let (b, _) = validate_fresh(two);
     assert_eq!(labels(&a), vec!["Legal/Identification Cards"]);
     assert_eq!(labels(&b), vec!["Health/Identification Cards"]);
     // Whichever label wins, every file is in exactly one group.
@@ -824,7 +989,7 @@ mod tests {
   /// collapse into each other on an empty topic segment.
   #[test]
   fn bare_areas_never_reconcile() {
-    let (out, _) = validate_groups(vec![
+    let (out, _) = validate_fresh(vec![
       g("Work", &[0, 1, 2, 3]),
       g("Personal", &[4, 5, 6, 7]),
     ]);
@@ -838,7 +1003,7 @@ mod tests {
   /// loosened, this test is what notices.
   #[test]
   fn a_type_word_topic_never_reconciles() {
-    let (out, n) = validate_groups(vec![
+    let (out, n) = validate_fresh(vec![
       g("Finance/Documents", &[0, 1, 2, 3, 4, 5]),
       g("Legal/Documents", &[6, 7, 8, 9]),
     ]);
@@ -851,7 +1016,7 @@ mod tests {
   /// instead of being folded up to its parent.
   #[test]
   fn reconciling_first_saves_a_split_topic_from_the_size_floor() {
-    let (out, _) = validate_groups(vec![
+    let (out, _) = validate_fresh(vec![
       g("Reference/Apple Devices/Repairs", &[0, 1]),
       g("Software/Apple Devices/Repairs", &[2, 3]),
     ]);
@@ -862,7 +1027,7 @@ mod tests {
   /// Different topics that merely sit at the same depth stay apart.
   #[test]
   fn different_topics_in_different_areas_are_left_alone() {
-    let (out, n) = validate_groups(vec![
+    let (out, n) = validate_fresh(vec![
       g("Work/Invoices", &[0, 1, 2, 3]),
       g("Personal/Receipts", &[4, 5, 6, 7]),
     ]);
@@ -880,7 +1045,7 @@ mod tests {
       g("Work/Acme Corp", &[0, 1]),
       g("Finance/Taxes/2023", &[2, 3, 4, 5]),
     ];
-    let (out, n) = validate_groups(input.clone());
+    let (out, n) = validate_fresh(input.clone());
     assert_eq!(labels(&out), labels(&input));
     assert_eq!(out[0].member_indices, vec![0, 1]);
     assert_eq!(n, Normalisation::default());
@@ -888,7 +1053,7 @@ mod tests {
 
   #[test]
   fn type_word_segments_are_dropped() {
-    let (out, n) = validate_groups(vec![
+    let (out, n) = validate_fresh(vec![
       g("Work/Acme Corp/PDFs", &[0, 1]),
       g("Photos/Hawaii Trip", &[2, 3]),
     ]);
@@ -902,13 +1067,13 @@ mod tests {
   #[test]
   fn leading_type_word_is_dropped_too() {
     let (out, _) =
-      validate_groups(vec![g("Documents/Smith v Jones", &[0, 1])]);
+      validate_fresh(vec![g("Documents/Smith v Jones", &[0, 1])]);
     assert_eq!(labels(&out), vec!["Smith v Jones"]);
   }
 
   #[test]
   fn a_label_made_only_of_type_words_becomes_unsorted() {
-    let (out, _) = validate_groups(vec![g("Misc/Files", &[0, 1])]);
+    let (out, _) = validate_fresh(vec![g("Misc/Files", &[0, 1])]);
     assert_eq!(labels(&out), vec!["Unsorted"]);
   }
 
@@ -924,7 +1089,7 @@ mod tests {
       index: 2,
       note: "n".into(),
     }];
-    let (out, n) = validate_groups(vec![a, b, g("Legal", &[3, 4])]);
+    let (out, n) = validate_fresh(vec![a, b, g("Legal", &[3, 4])]);
     assert_eq!(labels(&out), vec!["Work/Acme Corp", "Legal"]);
     assert_eq!(out[0].member_indices, vec![0, 1, 2]);
     assert_eq!(out[0].member_destinations.len(), 1);
@@ -934,7 +1099,7 @@ mod tests {
 
   #[test]
   fn lone_file_leaf_folders_collapse_into_the_parent() {
-    let (out, n) = validate_groups(vec![
+    let (out, n) = validate_fresh(vec![
       g("Photos/Pets/Biscuit", &[0, 1, 2, 3]),
       g("Photos/Pets/Stray Cat", &[4]),
     ]);
@@ -948,7 +1113,7 @@ mod tests {
 
   #[test]
   fn collapsed_singleton_merges_into_an_existing_parent_group() {
-    let (out, n) = validate_groups(vec![
+    let (out, n) = validate_fresh(vec![
       g("Finance/Bills", &[0, 1]),
       g("Finance/Bills/Comcast", &[2]),
     ]);
@@ -960,14 +1125,14 @@ mod tests {
 
   #[test]
   fn top_level_singletons_are_left_alone() {
-    let (out, n) = validate_groups(vec![g("Recipes", &[0])]);
+    let (out, n) = validate_fresh(vec![g("Recipes", &[0])]);
     assert_eq!(labels(&out), vec!["Recipes"]);
     assert_eq!(n.collapsed, 0);
   }
 
   #[test]
   fn depth_is_capped_at_three_segments() {
-    let (out, n) = validate_groups(vec![g(
+    let (out, n) = validate_fresh(vec![g(
       "Housing/418 Maple St/Utility Bills/2024-08",
       &[0, 1, 2, 3],
     )]);
@@ -981,13 +1146,13 @@ mod tests {
   #[test]
   fn whitespace_and_empty_segments_are_tidied() {
     let (out, _) =
-      validate_groups(vec![g("  Work //  Acme Corp  ", &[0, 1])]);
+      validate_fresh(vec![g("  Work //  Acme Corp  ", &[0, 1])]);
     assert_eq!(labels(&out), vec!["Work/Acme Corp"]);
   }
 
   #[test]
   fn system_groups_are_never_touched() {
-    let (out, n) = validate_groups(vec![
+    let (out, n) = validate_fresh(vec![
       g("Needs Review", &[0]),
       g("Unsorted", &[1]),
       g("Unsorted", &[2]),
@@ -1031,7 +1196,7 @@ mod tests {
       g("Finance/Bills/Utilities 2024-07", &[2, 3]),
       g("Finance/Bills/Utilities 2024-08", &[4]),
     ];
-    let (out, n) = validate_groups(input);
+    let (out, n) = validate_fresh(input);
     assert_eq!(labels(&out), vec!["Finance/Bills/Utilities"]);
     assert_eq!(out[0].member_indices, vec![0, 1, 2, 3, 4]);
     assert_eq!(n.merged, 2);
@@ -1045,7 +1210,7 @@ mod tests {
       g("Design/Logo/v1", &[8, 9, 10, 11]),
       g("Design/Logo/v2", &[12, 13, 14, 15]),
     ];
-    let (out, n) = validate_groups(input.clone());
+    let (out, n) = validate_fresh(input.clone());
     assert_eq!(labels(&out), labels(&input));
     assert_eq!(n.merged, 0);
   }
@@ -1058,7 +1223,7 @@ mod tests {
       g("Design/Logo v1", &[4, 5]),
       g("Design/Logo v2", &[6]),
     ];
-    let (out, _) = validate_groups(input);
+    let (out, _) = validate_fresh(input);
     assert_eq!(
       labels(&out),
       vec!["Work/Acme Q1 Report", "Design/Logo"]
@@ -1073,7 +1238,7 @@ mod tests {
       g("Finance/Bills/Utilities", &[0, 1]),
       g("Finance/Bills/Utilities 2024-08", &[2, 3]),
     ];
-    let (out, n) = validate_groups(input);
+    let (out, n) = validate_fresh(input);
     assert_eq!(labels(&out), vec!["Finance/Bills/Utilities"]);
     assert_eq!(out[0].member_indices, vec![0, 1, 2, 3]);
     assert_eq!(n.merged, 1);
@@ -1082,7 +1247,7 @@ mod tests {
   #[test]
   fn a_lone_tokened_label_is_not_renamed() {
     let input = vec![g("Design/Logo v2", &[0, 1])];
-    let (out, n) = validate_groups(input);
+    let (out, n) = validate_fresh(input);
     assert_eq!(labels(&out), vec!["Design/Logo v2"]);
     assert_eq!(n.merged, 0);
   }
@@ -1095,7 +1260,7 @@ mod tests {
       g("Finance/Bills/Utilities 2024-06", &big),
       g("Finance/Bills/Utilities 2024-07", &more),
     ];
-    let (out, n) = validate_groups(input.clone());
+    let (out, n) = validate_fresh(input.clone());
     assert_eq!(labels(&out), labels(&input));
     assert_eq!(n.merged, 0);
   }
@@ -1107,7 +1272,7 @@ mod tests {
       g("Health/Fitness/Marathon Training 2024", &[1, 2]),
       g("Health/Medical Records", &[3, 4]),
     ];
-    let (out, n) = validate_groups(input);
+    let (out, n) = validate_fresh(input);
     assert_eq!(
       labels(&out),
       vec!["Health/Fitness", "Health/Medical Records"]
@@ -1124,7 +1289,7 @@ mod tests {
       g("Reference/Programming/Python", &[1, 2, 3, 4]),
       g("Reference/Programming/Rust", &[5, 6, 7, 8]),
     ];
-    let (out, n) = validate_groups(input.clone());
+    let (out, n) = validate_fresh(input.clone());
     assert_eq!(labels(&out), labels(&input));
     assert_eq!(n.merged, 0);
   }
@@ -1133,7 +1298,7 @@ mod tests {
   /// enough files to be worth opening.
   #[test]
   fn thin_leaf_folders_fold_into_their_parent() {
-    let (out, n) = validate_groups(vec![
+    let (out, n) = validate_fresh(vec![
       g("Finance/Receipts/Dining & Events", &[0, 1]),
       g("Finance/Receipts/Retail & Store Visits", &[2, 3]),
     ]);
@@ -1147,7 +1312,7 @@ mod tests {
   /// sitting beside it.
   #[test]
   fn a_thin_leaf_joins_an_existing_parent_group() {
-    let (out, n) = validate_groups(vec![
+    let (out, n) = validate_fresh(vec![
       g("Finance/Receipts", &[0, 1, 2, 3, 4]),
       g("Finance/Receipts/Dining & Events", &[5, 6]),
     ]);
@@ -1164,7 +1329,7 @@ mod tests {
       g("Work/Markbin", &[0, 1, 2]),
       g("Work/Crmolly CRM", &[3, 4, 5]),
     ];
-    let (out, n) = validate_groups(input.clone());
+    let (out, n) = validate_fresh(input.clone());
     assert_eq!(labels(&out), labels(&input));
     assert_eq!(n.collapsed, 0);
   }
@@ -1173,7 +1338,7 @@ mod tests {
   /// sibling folds out from under it.
   #[test]
   fn a_leaf_at_the_floor_survives_its_thin_siblings() {
-    let (out, n) = validate_groups(vec![
+    let (out, n) = validate_fresh(vec![
       g("Media/TV Shows/Streaming Screenshots", &[0, 1, 2, 3]),
       g("Media/TV Shows/Period Drama", &[4, 5]),
     ]);
@@ -1191,7 +1356,7 @@ mod tests {
       g("Health/Fitness", &[0, 9]),
       g("Health/Fitness/Marathon Training 2024", &[1, 2, 3, 4]),
     ];
-    let (out, n) = validate_groups(input.clone());
+    let (out, n) = validate_fresh(input.clone());
     assert_eq!(labels(&out), labels(&input));
     assert_eq!(n.merged, 0);
   }
@@ -1203,7 +1368,7 @@ mod tests {
       g("Health/Fitness", &[0]),
       g("Health/Fitness/Marathon Training 2024", &many),
     ];
-    let (out, n) = validate_groups(input);
+    let (out, n) = validate_fresh(input);
     // Not folded; the lone parent then collapses a level as usual.
     assert_eq!(
       labels(&out),
@@ -1216,7 +1381,7 @@ mod tests {
   #[test]
   fn empty_groups_are_dropped() {
     let (out, _) =
-      validate_groups(vec![g("Work", &[]), g("Legal", &[0, 1])]);
+      validate_fresh(vec![g("Work", &[]), g("Legal", &[0, 1])]);
     assert_eq!(labels(&out), vec!["Legal"]);
   }
 }

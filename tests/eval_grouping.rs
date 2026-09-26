@@ -44,6 +44,15 @@ const REUSE_FLOOR: f64 = 0.75;
 /// regression.
 const SHAPE_FLOOR: f64 = 0.70;
 
+/// Every fixture with an answer key, so a new one is checked by the
+/// consistency tests the moment it is added.
+const FIXTURES: [&str; 4] = [
+  "organize",
+  "organize-large",
+  "organize-second-run",
+  "organize-granularity",
+];
+
 fn fixtures_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))
     .join("tests")
@@ -382,12 +391,7 @@ async fn granularity_fixture_is_not_shredded_into_thin_folders() {
 /// asserted to.
 #[test]
 fn every_fixture_ground_truth_is_internally_consistent() {
-  for name in [
-    "organize",
-    "organize-large",
-    "organize-second-run",
-    "organize-granularity",
-  ] {
+  for name in FIXTURES {
     let root = fixtures_root().join(name);
     let expected = eval::load_expected(&root.join("expected.toml"))
       .unwrap_or_else(|e| panic!("{name}/expected.toml: {e}"));
@@ -445,4 +449,125 @@ fn the_granularity_fixture_can_actually_be_scored_perfectly() {
     "its own answer key scores {c:.4}; a thin expected group would \
      mean the fixture, not the model, is being measured"
   );
+}
+
+/// Folder labels a previous run left behind, as [`seed_previous_run`]
+/// records them: one per directory under the fixture's `Organized/`.
+/// Empty for a fixture that has no such tree.
+fn existing_labels(name: &str) -> Vec<String> {
+  let organized = fixtures_root().join(name).join("Organized");
+  let mut labels: Vec<String> = walkdir::WalkDir::new(&organized)
+    .into_iter()
+    .filter_map(Result::ok)
+    .filter(|e| e.file_type().is_file())
+    .filter_map(|e| {
+      let rel = e.path().strip_prefix(&organized).ok()?;
+      Some(rel.parent()?.to_string_lossy().replace('\\', "/"))
+    })
+    .collect();
+  labels.sort();
+  labels.dedup();
+  labels
+}
+
+/// No answer key may ask for two folders the validator will merge into
+/// one.
+///
+/// A fixture is a claim about what the pipeline should produce, and the
+/// validator is part of the pipeline. When it merges two expected
+/// groups, the fixture is asking for something no run can deliver, and
+/// the pairwise F1 — 45% of the composite — docks every run for it.
+/// That is not a hard floor failing loudly; it is the ceiling dropping
+/// quietly, which is the failure mode this test exists to prevent.
+///
+/// It caught a real one. Before the size floor learned about existing
+/// folders, `organize-second-run` lost `Finance/Taxes/2023` into
+/// `Finance/Taxes/2024` and `Personal/Pets/Biscuit` into
+/// `Personal/Pets/Mochi`, capping a perfect run at F1 0.833.
+///
+/// Labels are allowed to change: a thin *new* leaf folding up to its
+/// parent keeps the same files together, and the scorer reads groups,
+/// not names. Only files being merged across groups is a fault.
+#[test]
+fn no_fixture_asks_for_folders_the_validator_would_merge() {
+  use spindle::group::validate::validate_groups;
+  use spindle::model::ProposedGroup;
+
+  for name in FIXTURES {
+    let root = fixtures_root().join(name);
+    let expected = eval::load_expected(&root.join("expected.toml"))
+      .unwrap_or_else(|e| panic!("{name}/expected.toml: {e}"));
+
+    let mut by_label: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, f) in expected.files.iter().enumerate() {
+      by_label.entry(f.group.clone()).or_default().push(i);
+    }
+    let wanted = by_label.len();
+    let groups: Vec<ProposedGroup> = by_label
+      .iter()
+      .map(|(label, members)| ProposedGroup {
+        label: label.clone(),
+        rationale: String::new(),
+        member_indices: members.clone(),
+        member_destinations: vec![],
+        member_notes: vec![],
+      })
+      .collect();
+
+    let (out, _) = validate_groups(groups, &existing_labels(name));
+
+    // Which expected groups each surviving group drew its files from.
+    let origin: BTreeMap<usize, &str> = by_label
+      .iter()
+      .flat_map(|(label, members)| {
+        members.iter().map(move |&i| (i, label.as_str()))
+      })
+      .collect();
+    for g in &out {
+      let mut sources: Vec<&str> = g
+        .member_indices
+        .iter()
+        .map(|i| origin[i])
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+      sources.sort_unstable();
+      assert!(
+        sources.len() <= 1,
+        "{name}: the validator merges {sources:?} into one group \
+         ({:?}), so no run can score them apart",
+        g.label
+      );
+    }
+    assert_eq!(
+      out.len(),
+      wanted,
+      "{name}: {wanted} expected groups came out as {}",
+      out.len()
+    );
+
+    // A floor no perfect run could clear is not a floor. `REUSE_FLOOR`
+    // was 0.75 against an achievable 0.481 for as long as the size
+    // floor ignored existing folders, so `second_run_reuses_existing_
+    // folders` could not have passed however well the model did — and
+    // being API-gated, nothing said so.
+    let files = &expected.files;
+    let placements: Vec<Placement> = out
+      .iter()
+      .flat_map(|g| {
+        g.member_indices.iter().map(move |&i| Placement {
+          path: files[i].path.clone(),
+          label: g.label.clone(),
+        })
+      })
+      .collect();
+    if let Some(reuse) =
+      eval::score(&expected, &placements).reuse_rate()
+    {
+      assert!(
+        reuse >= REUSE_FLOOR,
+        "{name}: a run that placed every file correctly would reuse          {reuse:.3} of its existing folders, under the {REUSE_FLOOR:.3}          floor the eval asserts"
+      );
+    }
+  }
 }
