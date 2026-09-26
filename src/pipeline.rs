@@ -78,6 +78,14 @@ pub enum PipelineEvent {
     collapsed: usize,
     rewritten: usize,
   },
+  /// Grouping ran but lost calls: `reason` is set when the account
+  /// itself stopped serving them, in which case the remaining areas
+  /// were never asked.
+  GroupingIncomplete {
+    reason: Option<String>,
+    failed_calls: usize,
+    unplaced: usize,
+  },
   GroupingComplete {
     group_count: usize,
     /// Files placed in the `Unsorted` group rather than a real one.
@@ -117,6 +125,32 @@ pub struct PipelineConfig {
   pub corrections_path: Option<PathBuf>,
 }
 
+/// How well the grouping phase actually went. A run that lost calls
+/// still produces a plan — the files it could not place land in
+/// `Unsorted` — but the result is not the one the same input would
+/// normally give, so it is worth saying out loud and worth keeping out
+/// of the cache.
+#[derive(Debug, Clone, Default)]
+pub struct GroupingStatus {
+  /// Set once the account itself stopped serving calls (spend limit,
+  /// credit, authorisation). No further grouping call is attempted
+  /// after this: splitting the batch cannot help, and every remaining
+  /// area would silently lose its files.
+  pub blocked: Option<String>,
+  /// Grouping calls that failed without placing their files.
+  pub failed_calls: usize,
+  /// Files those calls left for `Unsorted`.
+  pub unplaced: usize,
+}
+
+impl GroupingStatus {
+  /// Whether this grouping is the one the input deserves, and so safe
+  /// to cache and reuse.
+  pub fn is_clean(&self) -> bool {
+    self.blocked.is_none() && self.failed_calls == 0
+  }
+}
+
 #[derive(Debug)]
 pub struct PipelineResult {
   pub plan: ReorgPlan,
@@ -127,6 +161,8 @@ pub struct PipelineResult {
   /// What the model (or the filename fallback) said about each analyzed
   /// file, by fingerprinted index. Empty with `--no-ai`.
   pub descriptions: HashMap<usize, ContentDescription>,
+  /// Whether grouping completed, and what it lost if not.
+  pub grouping: GroupingStatus,
 }
 
 pub async fn run<P: AiProvider>(
@@ -176,6 +212,7 @@ pub async fn run<P: AiProvider>(
       all_dupes: vec![],
       organized_duplicates,
       descriptions: HashMap::new(),
+      grouping: GroupingStatus::default(),
     });
   }
 
@@ -257,7 +294,7 @@ pub async fn run<P: AiProvider>(
     })
     .await;
 
-  let (proposed_groups, descriptions) = if config.no_ai {
+  let (proposed_groups, descriptions, grouping) = if config.no_ai {
     (
       vec![ProposedGroup {
         label: "All Files".to_string(),
@@ -267,6 +304,7 @@ pub async fn run<P: AiProvider>(
         member_notes: vec![],
       }],
       HashMap::new(),
+      GroupingStatus::default(),
     )
   } else {
     let existing_labels: Vec<String> = ledger
@@ -330,6 +368,7 @@ pub async fn run<P: AiProvider>(
     all_dupes,
     organized_duplicates,
     descriptions,
+    grouping,
   })
 }
 
@@ -399,8 +438,11 @@ async fn run_ai_pipeline<P: AiProvider>(
   organized_context: &[(String, Vec<ContentDescription>)],
   config: &PipelineConfig,
   tx: &mpsc::Sender<PipelineEvent>,
-) -> Result<(Vec<ProposedGroup>, HashMap<usize, ContentDescription>)>
-{
+) -> Result<(
+  Vec<ProposedGroup>,
+  HashMap<usize, ContentDescription>,
+  GroupingStatus,
+)> {
   let size_cap = config.max_file_size_mb * BYTES_PER_MB;
   let mut files_to_analyze: Vec<(usize, &FingerprintedFile)> =
     Vec::new();
@@ -617,6 +659,7 @@ async fn run_ai_pipeline<P: AiProvider>(
     return Ok((
       add_unsorted(groups, &summaries, skipped, failed_notes),
       descriptions,
+      GroupingStatus::default(),
     ));
   }
 
@@ -628,6 +671,7 @@ async fn run_ai_pipeline<P: AiProvider>(
     index_to_hash: &index_to_hash,
     renames: &renames,
   };
+  let mut status = GroupingStatus::default();
   let groups = match propose_groups_two_stage(
     provider,
     &summaries,
@@ -635,18 +679,32 @@ async fn run_ai_pipeline<P: AiProvider>(
     organized_context,
     &two_stage,
     tx,
+    &mut status,
   )
   .await
   {
     Ok(groups) => {
       let groups = quarantine_low_confidence(groups, &summaries);
-      let _ = write_cached_grouping(
-        &config.cache_dir,
-        &cache_key,
-        &groups,
-        &index_to_hash,
-      )
-      .await;
+      // Only cache a grouping the input actually earned. Caching one
+      // produced while areas were failing pins the damage: the next
+      // run reuses it without a call, so the files those areas lost
+      // stay in Unsorted until the cache is cleared by hand.
+      if status.is_clean() {
+        let _ = write_cached_grouping(
+          &config.cache_dir,
+          &cache_key,
+          &groups,
+          &index_to_hash,
+        )
+        .await;
+      } else {
+        tracing::warn!(
+          failed_calls = status.failed_calls,
+          unplaced = status.unplaced,
+          blocked = status.blocked.as_deref().unwrap_or("-"),
+          "Grouping was incomplete; not caching it"
+        );
+      }
       groups
     }
     Err(err) => {
@@ -667,10 +725,20 @@ async fn run_ai_pipeline<P: AiProvider>(
       }]
     }
   };
+  if !status.is_clean() {
+    let _ = tx
+      .send(PipelineEvent::GroupingIncomplete {
+        reason: status.blocked.clone(),
+        failed_calls: status.failed_calls,
+        unplaced: status.unplaced,
+      })
+      .await;
+  }
   let groups = validate_and_report(groups, tx).await;
   Ok((
     add_unsorted(groups, &summaries, skipped, failed_notes),
     descriptions,
+    status,
   ))
 }
 
@@ -879,6 +947,11 @@ fn is_private_area(area: &Area) -> bool {
 /// group named for the area (separation matters more than sub-folders
 /// there); any other area leaves its files unplaced, where they
 /// surface in Unsorted with a note.
+///
+/// An account-level block is the exception: nothing about the batch is
+/// wrong, so splitting it just repeats a call that cannot succeed.
+/// `status.blocked` is set and every later batch returns immediately
+/// without a call.
 async fn propose_chunk_resilient<P: AiProvider>(
   provider: &P,
   files: &[FileSummary],
@@ -886,8 +959,14 @@ async fn propose_chunk_resilient<P: AiProvider>(
   organized_context: &[(String, Vec<ContentDescription>)],
   area: Option<&Area>,
   renames: &[(String, String)],
+  status: &mut GroupingStatus,
 ) -> Vec<ProposedGroup> {
-  match propose_once(
+  if status.blocked.is_some() {
+    status.unplaced += files.len();
+    return Vec::new();
+  }
+
+  let err = match propose_once(
     provider,
     files,
     labels,
@@ -897,67 +976,82 @@ async fn propose_chunk_resilient<P: AiProvider>(
   )
   .await
   {
-    Ok(groups) => groups,
-    Err(err)
-      if files.len() >= MIN_SPLIT && is_model_quality_error(&err) =>
-    {
+    Ok(groups) => return groups,
+    Err(err) => err,
+  };
+
+  if let Some(blocked) = crate::ai::account_blocked(&err) {
+    tracing::error!(
+      area = area.map(|a| a.name.as_str()).unwrap_or("-"),
+      files = files.len(),
+      "Grouping stopped: {blocked}"
+    );
+    status.blocked = Some(blocked.message.clone());
+    status.failed_calls += 1;
+    status.unplaced += files.len();
+    return Vec::new();
+  }
+
+  if files.len() >= MIN_SPLIT && is_model_quality_error(&err) {
+    tracing::warn!(
+      area = area.map(|a| a.name.as_str()).unwrap_or("-"),
+      files = files.len(),
+      error = %format!("{err:#}"),
+      "Grouping call failed; splitting in half"
+    );
+    let (a, b) = files.split_at(files.len() / 2);
+    let mut out = Vec::new();
+    let mut labels: Vec<String> = labels.to_vec();
+    for half in [a, b] {
+      let groups = Box::pin(propose_chunk_resilient(
+        provider,
+        half,
+        &labels,
+        organized_context,
+        area,
+        renames,
+        status,
+      ))
+      .await;
+      for g in &groups {
+        if !labels.contains(&g.label) {
+          labels.push(g.label.clone());
+        }
+      }
+      out.extend(groups);
+    }
+    return out;
+  }
+
+  status.failed_calls += 1;
+  match area {
+    Some(area) if is_private_area(area) => {
+      tracing::warn!(
+        area = %area.name,
+        files = files.len(),
+        error = %format!("{err:#}"),
+        "Private grouping failed; filing the batch under the area itself"
+      );
+      vec![ProposedGroup {
+        label: area.name.clone(),
+        rationale: "grouped by the private-area fallback after the \
+                    model could not group these files"
+          .to_string(),
+        member_indices: files.iter().map(|f| f.index).collect(),
+        member_destinations: vec![],
+        member_notes: vec![],
+      }]
+    }
+    _ => {
       tracing::warn!(
         area = area.map(|a| a.name.as_str()).unwrap_or("-"),
         files = files.len(),
         error = %format!("{err:#}"),
-        "Grouping call failed; splitting in half"
+        "Grouping call failed; leaving its files unplaced"
       );
-      let (a, b) = files.split_at(files.len() / 2);
-      let mut out = Vec::new();
-      let mut labels: Vec<String> = labels.to_vec();
-      for half in [a, b] {
-        let groups = Box::pin(propose_chunk_resilient(
-          provider,
-          half,
-          &labels,
-          organized_context,
-          area,
-          renames,
-        ))
-        .await;
-        for g in &groups {
-          if !labels.contains(&g.label) {
-            labels.push(g.label.clone());
-          }
-        }
-        out.extend(groups);
-      }
-      out
+      status.unplaced += files.len();
+      Vec::new()
     }
-    Err(err) => match area {
-      Some(area) if is_private_area(area) => {
-        tracing::warn!(
-          area = %area.name,
-          files = files.len(),
-          error = %format!("{err:#}"),
-          "Private grouping failed; filing the batch under the area itself"
-        );
-        vec![ProposedGroup {
-          label: area.name.clone(),
-          rationale:
-            "grouped by the private-area fallback after the \
-                      model could not group these files"
-              .to_string(),
-          member_indices: files.iter().map(|f| f.index).collect(),
-          member_destinations: vec![],
-          member_notes: vec![],
-        }]
-      }
-      _ => {
-        tracing::warn!(
-          area = area.map(|a| a.name.as_str()).unwrap_or("-"),
-          files = files.len(),
-          error = %format!("{err:#}"),
-          "Grouping call failed; leaving its files unplaced"
-        );
-        Vec::new()
-      }
-    },
   }
 }
 
@@ -972,6 +1066,7 @@ async fn propose_groups_batched<P: AiProvider>(
   organized_context: &[(String, Vec<ContentDescription>)],
   area: Option<&Area>,
   renames: &[(String, String)],
+  status: &mut GroupingStatus,
 ) -> Vec<ProposedGroup> {
   if summaries.len() <= MAX_GROUPING_BATCH {
     return propose_chunk_resilient(
@@ -981,6 +1076,7 @@ async fn propose_groups_batched<P: AiProvider>(
       organized_context,
       area,
       renames,
+      status,
     )
     .await;
   }
@@ -1004,6 +1100,7 @@ async fn propose_groups_batched<P: AiProvider>(
       organized_context,
       area,
       renames,
+      status,
     )
     .await;
     for group in groups {
@@ -1056,6 +1153,7 @@ async fn propose_groups_two_stage<P: AiProvider>(
   organized_context: &[(String, Vec<ContentDescription>)],
   stage: &TwoStage<'_>,
   tx: &mpsc::Sender<PipelineEvent>,
+  status: &mut GroupingStatus,
 ) -> Result<Vec<ProposedGroup>> {
   if stage.areas.is_empty() || summaries.is_empty() {
     return Ok(
@@ -1066,6 +1164,7 @@ async fn propose_groups_two_stage<P: AiProvider>(
         organized_context,
         None,
         stage.renames,
+        status,
       )
       .await,
     );
@@ -1089,14 +1188,20 @@ async fn propose_groups_two_stage<P: AiProvider>(
       routed
     }
     None => {
-      let routed = route_all(provider, summaries, stage.areas).await;
-      let _ = write_cached_routing(
-        stage.cache_dir,
-        &route_key,
-        &routed,
-        stage.index_to_hash,
-      )
-      .await;
+      let routed =
+        route_all(provider, summaries, stage.areas, status).await;
+      // A routing built while calls were failing is the wrong answer
+      // for this input; caching it would make the next run repeat it
+      // for free instead of trying again.
+      if status.is_clean() {
+        let _ = write_cached_routing(
+          stage.cache_dir,
+          &route_key,
+          &routed,
+          stage.index_to_hash,
+        )
+        .await;
+      }
       routed
     }
   };
@@ -1150,6 +1255,7 @@ async fn propose_groups_two_stage<P: AiProvider>(
       organized_context,
       Some(area),
       stage.renames,
+      status,
     )
     .await;
     for mut group in groups {
@@ -1168,6 +1274,7 @@ async fn propose_groups_two_stage<P: AiProvider>(
       organized_context,
       None,
       stage.renames,
+      status,
     )
     .await;
     all.extend(groups);
@@ -1233,46 +1340,64 @@ fn fallback_area<'a>(
 /// Route one chunk; a bad reply is retried on halves, and below
 /// [`MIN_SPLIT`] files (or on a non-model error) each file is routed
 /// by its category instead. Never fails.
+///
+/// An account-level block stops routing outright, for the same reason
+/// it stops grouping: the remaining chunks would only repeat a call
+/// that cannot succeed.
 async fn route_chunk_resilient<P: AiProvider>(
   provider: &P,
   chunk: &[FileSummary],
   areas: &[Area],
+  status: &mut GroupingStatus,
 ) -> Vec<RoutedFile> {
-  match provider.route_files(chunk, areas).await {
-    Ok(routed) => routed,
-    Err(err)
-      if chunk.len() >= MIN_SPLIT && is_model_quality_error(&err) =>
-    {
-      tracing::warn!(
-        files = chunk.len(),
-        error = %format!("{err:#}"),
-        "Routing call failed; splitting in half"
-      );
-      let (a, b) = chunk.split_at(chunk.len() / 2);
-      let mut out =
-        Box::pin(route_chunk_resilient(provider, a, areas)).await;
-      out.extend(
-        Box::pin(route_chunk_resilient(provider, b, areas)).await,
-      );
-      out
-    }
-    Err(err) => {
-      tracing::warn!(
-        files = chunk.len(),
-        error = %format!("{err:#}"),
-        "Routing call failed; routing these files by category"
-      );
-      chunk
-        .iter()
-        .filter_map(|s| {
-          fallback_area(s, areas).map(|a| RoutedFile {
-            index: s.index,
-            area: a.name.clone(),
-          })
-        })
-        .collect()
-    }
+  if status.blocked.is_some() {
+    return Vec::new();
   }
+  let err = match provider.route_files(chunk, areas).await {
+    Ok(routed) => return routed,
+    Err(err) => err,
+  };
+  if let Some(blocked) = crate::ai::account_blocked(&err) {
+    tracing::error!(
+      files = chunk.len(),
+      "Routing stopped: {blocked}"
+    );
+    status.blocked = Some(blocked.message.clone());
+    status.failed_calls += 1;
+    return Vec::new();
+  }
+  if chunk.len() >= MIN_SPLIT && is_model_quality_error(&err) {
+    tracing::warn!(
+      files = chunk.len(),
+      error = %format!("{err:#}"),
+      "Routing call failed; splitting in half"
+    );
+    let (a, b) = chunk.split_at(chunk.len() / 2);
+    let mut out =
+      Box::pin(route_chunk_resilient(provider, a, areas, status))
+        .await;
+    out.extend(
+      Box::pin(route_chunk_resilient(provider, b, areas, status))
+        .await,
+    );
+    return out;
+  }
+
+  tracing::warn!(
+    files = chunk.len(),
+    error = %format!("{err:#}"),
+    "Routing call failed; routing these files by category"
+  );
+  status.failed_calls += 1;
+  chunk
+    .iter()
+    .filter_map(|s| {
+      fallback_area(s, areas).map(|a| RoutedFile {
+        index: s.index,
+        area: a.name.clone(),
+      })
+    })
+    .collect()
 }
 
 /// Stage one for every file: explicit content is pre-routed to the
@@ -1282,6 +1407,7 @@ async fn route_all<P: AiProvider>(
   provider: &P,
   summaries: &[FileSummary],
   areas: &[Area],
+  status: &mut GroupingStatus,
 ) -> Vec<RoutedFile> {
   let mut routed = Vec::with_capacity(summaries.len());
   let mut ask: Vec<FileSummary> = Vec::new();
@@ -1302,8 +1428,9 @@ async fn route_all<P: AiProvider>(
     );
   }
   for chunk in ask.chunks(ROUTE_BATCH) {
-    routed
-      .extend(route_chunk_resilient(provider, chunk, areas).await);
+    routed.extend(
+      route_chunk_resilient(provider, chunk, areas, status).await,
+    );
   }
   routed
 }
@@ -1525,6 +1652,7 @@ mod tests {
       &[],
       None,
       &[],
+      &mut GroupingStatus::default(),
     )
     .await;
 
@@ -2620,6 +2748,190 @@ mod tests {
         member_notes: vec![],
       }])
     }
+  }
+
+  /// Files that name a cached grouping in `cache_dir`.
+  fn cached_grouping_files(
+    cache_dir: &std::path::Path,
+  ) -> Vec<String> {
+    fs::read_dir(cache_dir)
+      .unwrap()
+      .filter_map(|e| {
+        let name =
+          e.unwrap().file_name().to_string_lossy().to_string();
+        name.starts_with("groups.").then_some(name)
+      })
+      .collect()
+  }
+
+  /// Routes by name, then fails every grouping call with `error`,
+  /// counting the calls it was asked to make.
+  struct FailingGroupProvider {
+    group_calls: std::sync::atomic::AtomicUsize,
+    blocked: bool,
+  }
+
+  impl FailingGroupProvider {
+    fn new(blocked: bool) -> Self {
+      Self {
+        group_calls: Default::default(),
+        blocked,
+      }
+    }
+    fn group_calls(&self) -> usize {
+      self.group_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+  }
+
+  impl AiProvider for FailingGroupProvider {
+    async fn describe_image(
+      &self,
+      _image_data: &[u8],
+      _mime_type: &str,
+      context: &DescribeContext,
+    ) -> anyhow::Result<ContentDescription> {
+      Ok(ContentDescription {
+        summary: format!("Description of {}", context.filename),
+        tags: vec![],
+        suggested_category: "photo".to_string(),
+        confidence: 0.9,
+        source: DescriptionSource::Ai,
+      })
+    }
+
+    async fn route_files(
+      &self,
+      files: &[FileSummary],
+      _areas: &[Area],
+    ) -> anyhow::Result<Vec<RoutedFile>> {
+      Ok(
+        files
+          .iter()
+          .map(|f| RoutedFile {
+            index: f.index,
+            area: if f.filename.starts_with("keep") {
+              "Work".to_string()
+            } else {
+              "Personal".to_string()
+            },
+          })
+          .collect(),
+      )
+    }
+
+    async fn propose_groups(
+      &self,
+      _files: &[FileSummary],
+    ) -> anyhow::Result<Vec<ProposedGroup>> {
+      self
+        .group_calls
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+      if self.blocked {
+        Err(
+          crate::ai::AccountBlocked {
+            message:
+              "You have reached your specified API usage limits."
+                .to_string(),
+          }
+          .into(),
+        )
+      } else {
+        anyhow::bail!("grouping exploded")
+      }
+    }
+  }
+
+  /// A grouping built while areas were failing is not the answer this
+  /// input deserves, so it must not be cached: the next run would
+  /// reuse it without a call and keep those files in Unsorted.
+  #[tokio::test]
+  async fn a_failed_area_leaves_no_cached_grouping() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = FailingGroupProvider::new(false);
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    assert_every_file_placed_once(&result);
+    assert_eq!(labels_of(&result), vec![UNSORTED_LABEL]);
+    assert!(
+      !result.grouping.is_clean(),
+      "a failed area should be reported"
+    );
+    assert_eq!(result.grouping.unplaced, 3);
+    assert!(
+      cached_grouping_files(cache.path()).is_empty(),
+      "left a cached grouping behind: {:?}",
+      cached_grouping_files(cache.path())
+    );
+
+    let mut events = vec![];
+    while let Ok(ev) = rx.try_recv() {
+      events.push(ev);
+    }
+    assert!(events.iter().any(|e| matches!(
+      e,
+      PipelineEvent::GroupingIncomplete { reason: None, .. }
+    )));
+  }
+
+  /// An account-level block is not a batch the model choked on:
+  /// splitting or asking the next area only repeats a call that cannot
+  /// succeed. The first failure must stop grouping and say why.
+  #[tokio::test]
+  async fn an_account_block_stops_grouping_after_one_call() {
+    let source = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write_three_pngs(source.path());
+    let provider = FailingGroupProvider::new(true);
+    let mut config = ledger_test_config(
+      source.path(),
+      output.path(),
+      cache.path(),
+      None,
+    );
+    config.no_ai = false;
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let result = run(&provider, &config, tx).await.unwrap();
+
+    // Two areas received files; only the first was ever asked.
+    assert_eq!(
+      provider.group_calls(),
+      1,
+      "kept calling after the account was blocked"
+    );
+    assert_every_file_placed_once(&result);
+    assert_eq!(labels_of(&result), vec![UNSORTED_LABEL]);
+    assert_eq!(
+      result.grouping.blocked.as_deref(),
+      Some("You have reached your specified API usage limits.")
+    );
+    assert_eq!(result.grouping.unplaced, 3);
+    assert!(cached_grouping_files(cache.path()).is_empty());
+
+    let mut events = vec![];
+    while let Ok(ev) = rx.try_recv() {
+      events.push(ev);
+    }
+    assert!(events.iter().any(|e| matches!(
+      e,
+      PipelineEvent::GroupingIncomplete {
+        reason: Some(_),
+        ..
+      }
+    )));
   }
 
   fn labels_of(result: &PipelineResult) -> Vec<String> {

@@ -207,8 +207,9 @@ async fn main() -> Result<()> {
   let capped_note = capped_files_note(
     plan.groups.iter().flat_map(|g| g.member_notes.iter()),
   );
+  let grouping_note = grouping_note(&result.grouping);
   let summary = format!(
-    "{} groups · {} moves · {} duplicates ({} reclaimable){spent}{audio_note}{capped_note}",
+    "{} groups · {} moves · {} duplicates ({} reclaimable){spent}{audio_note}{capped_note}{grouping_note}",
     plan.stats.groups_created,
     plan.moves.len(),
     plan.stats.duplicates_found,
@@ -498,6 +499,32 @@ fn run_purge(older_than_days: Option<u64>) -> Result<()> {
 /// Files the analysis cap kept away from the model sit in Unsorted with
 /// a "beyond --max-files" note. Say so in the summary, since the fix
 /// (a bigger cap) is a flag the user has to pass.
+/// A banner note when grouping did not finish, so the review screen
+/// says why Unsorted is unexpectedly full instead of leaving the user
+/// to guess. The account-level message is the API's own wording, which
+/// usually names the date access returns.
+fn grouping_note(
+  status: &spindle::pipeline::GroupingStatus,
+) -> String {
+  if status.is_clean() {
+    return String::new();
+  }
+  let what = match &status.blocked {
+    Some(reason) => reason.trim_end_matches('.').to_string(),
+    None => {
+      format!("{} grouping call(s) failed", status.failed_calls)
+    }
+  };
+  if status.unplaced == 0 {
+    format!(" · \u{26a0} {what}")
+  } else {
+    format!(
+      " · \u{26a0} {what} \u{2014} {} files left unplaced",
+      status.unplaced
+    )
+  }
+}
+
 fn capped_files_note<'a>(
   notes: impl Iterator<Item = &'a spindle::model::MemberNote>,
 ) -> String {

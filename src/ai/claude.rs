@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 
-use super::{DegenerateReply, GroupingHints, Usage};
+use super::{AccountBlocked, DegenerateReply, GroupingHints, Usage};
 use crate::model::{
   Area, ContentDescription, FileSummary, ProposedGroup, RoutedFile,
 };
@@ -465,6 +465,9 @@ impl ClaudeProvider {
 
       if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        if let Some(blocked) = account_block(status, &body) {
+          return Err(anyhow::Error::new(blocked));
+        }
         anyhow::bail!("Claude API error ({}): {}", status, body);
       }
 
@@ -1075,6 +1078,54 @@ fn is_retryable_status(status: reqwest::StatusCode) -> bool {
   matches!(status.as_u16(), 429 | 500 | 502 | 503 | 529)
 }
 
+/// Phrases the API uses when the account, not the request, is the
+/// problem: a spend limit reached, credit exhausted, billing not set
+/// up. These arrive as a plain 400 `invalid_request_error`, which looks
+/// like any other bad request unless we read the message.
+const BLOCKED_PHRASES: &[&str] = &[
+  "usage limit",
+  "usage limits",
+  "credit balance",
+  "billing",
+  "spending limit",
+  "quota",
+];
+
+/// An account-level block, if that is what this response is. 401/403
+/// always qualify (bad or unauthorised key); a 400 only when its
+/// message names one of [`BLOCKED_PHRASES`], so ordinary malformed
+/// requests keep their existing retry-and-split handling.
+fn account_block(
+  status: reqwest::StatusCode,
+  body: &str,
+) -> Option<AccountBlocked> {
+  let message = api_error_message(body);
+  let qualifies = match status.as_u16() {
+    401 | 403 => true,
+    400 => {
+      let lower = message.as_deref().unwrap_or(body).to_lowercase();
+      BLOCKED_PHRASES.iter().any(|p| lower.contains(p))
+    }
+    _ => false,
+  };
+  if !qualifies {
+    return None;
+  }
+  Some(AccountBlocked {
+    message: message.unwrap_or_else(|| {
+      format!("Claude API error ({status}): {}", preview(body, 200))
+    }),
+  })
+}
+
+/// The `error.message` an API error body carries, if it is shaped like
+/// one.
+fn api_error_message(body: &str) -> Option<String> {
+  let value: serde_json::Value = serde_json::from_str(body).ok()?;
+  let message = value.get("error")?.get("message")?.as_str()?.trim();
+  (!message.is_empty()).then(|| message.to_string())
+}
+
 fn api_endpoint_fqdn(base_url: &str) -> String {
   Url::parse(base_url)
     .ok()
@@ -1355,6 +1406,73 @@ impl AiProvider for ClaudeProvider {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// The spend-limit reply the API actually sends: a plain 400 whose
+  /// only clue is the message. It has to be told apart from an
+  /// ordinary bad request, which is retried and split.
+  #[test]
+  fn a_spend_limit_400_is_an_account_block() {
+    let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits. You will regain access on 2026-10-01 at 00:00 UTC."}}"#;
+    let blocked =
+      account_block(reqwest::StatusCode::BAD_REQUEST, body).unwrap();
+    assert!(
+      blocked.message.starts_with("You have reached"),
+      "should carry the API's own wording: {}",
+      blocked.message
+    );
+    assert!(
+      blocked.message.contains("2026-10-01"),
+      "should keep the regain-access date"
+    );
+  }
+
+  #[test]
+  fn low_credit_and_unauthorised_replies_are_account_blocks() {
+    let credit = r#"{"error":{"message":"Your credit balance is too low to access the Claude API."}}"#;
+    assert!(account_block(reqwest::StatusCode::BAD_REQUEST, credit)
+      .is_some());
+    for status in [
+      reqwest::StatusCode::UNAUTHORIZED,
+      reqwest::StatusCode::FORBIDDEN,
+    ] {
+      let blocked =
+        account_block(status, r#"{"error":{"message":"bad key"}}"#)
+          .unwrap();
+      assert_eq!(blocked.message, "bad key");
+    }
+  }
+
+  /// Everything else keeps its existing retry-and-split handling.
+  #[test]
+  fn ordinary_errors_are_not_account_blocks() {
+    let malformed = r#"{"error":{"message":"messages: at least one message is required"}}"#;
+    assert!(account_block(
+      reqwest::StatusCode::BAD_REQUEST,
+      malformed
+    )
+    .is_none());
+    assert!(account_block(
+      reqwest::StatusCode::TOO_MANY_REQUESTS,
+      r#"{"error":{"message":"rate limit"}}"#
+    )
+    .is_none());
+    assert!(account_block(
+      reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+      "overloaded"
+    )
+    .is_none());
+  }
+
+  /// A block with a body we cannot parse still has to be reported as
+  /// one, with something readable in it.
+  #[test]
+  fn an_unparseable_block_body_still_reports_the_status() {
+    let blocked =
+      account_block(reqwest::StatusCode::FORBIDDEN, "<html>nope")
+        .unwrap();
+    assert!(blocked.message.contains("403"));
+    assert!(blocked.message.contains("nope"));
+  }
 
   #[test]
   fn preview_never_cuts_inside_a_multibyte_char() {

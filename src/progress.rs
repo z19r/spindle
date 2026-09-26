@@ -284,6 +284,23 @@ impl PipelineProgress {
         println!("  \u{26a0} Semantic grouping failed: {}", error,);
         println!("    Falling back to single group");
       }
+      PipelineEvent::GroupingIncomplete {
+        reason,
+        failed_calls,
+        unplaced,
+      } => {
+        match reason {
+          Some(reason) => println!("  \u{26a0} {reason}"),
+          None => println!(
+            "  \u{26a0} {failed_calls} grouping \
+             call(s) failed"
+          ),
+        }
+        println!(
+          "    {unplaced} file(s) left unplaced; \
+           this grouping was not cached"
+        );
+      }
       PipelineEvent::GroupingComplete { group_count, .. } => {
         tracing::info!(group_count, "Semantic grouping complete");
       }

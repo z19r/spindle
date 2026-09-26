@@ -24,6 +24,31 @@ impl std::fmt::Display for DegenerateReply {
 
 impl std::error::Error for DegenerateReply {}
 
+/// The account itself cannot serve the request: it is over its
+/// configured spend limit, out of credit, or the key is not authorised.
+/// Retrying and splitting the batch cannot help, so callers stop
+/// making calls instead of quietly dropping the files they were for.
+#[derive(Debug, Clone)]
+pub struct AccountBlocked {
+  /// What the API said, for the user. Already a full sentence.
+  pub message: String,
+}
+
+impl std::fmt::Display for AccountBlocked {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "{}", self.message)
+  }
+}
+
+impl std::error::Error for AccountBlocked {}
+
+/// Whether `err` (or anything it wraps) is an account-level block.
+pub fn account_blocked(
+  err: &anyhow::Error,
+) -> Option<&AccountBlocked> {
+  err.downcast_ref::<AccountBlocked>()
+}
+
 pub struct DescribeContext {
   pub filename: String,
   pub file_type_label: String,
