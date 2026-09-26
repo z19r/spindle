@@ -402,7 +402,7 @@ impl ClaudeProvider {
   ) -> Result<String> {
     let endpoint = format!("{}/v1/messages", self.base_url);
     let fqdn = api_endpoint_fqdn(&self.base_url);
-    log_claude_api_call(&self.api_key, &endpoint, &fqdn);
+    log_claude_api_call(&endpoint, &fqdn);
 
     let mut last_err: Option<anyhow::Error> = None;
 
@@ -1146,7 +1146,9 @@ fn api_endpoint_fqdn(base_url: &str) -> String {
     .unwrap_or_else(|| base_url.to_string())
 }
 
-fn log_claude_api_call(_api_key: &str, endpoint: &str, fqdn: &str) {
+/// Deliberately takes no key: this is the only logging call on the
+/// request path, and the key should not be in reach of it.
+fn log_claude_api_call(endpoint: &str, fqdn: &str) {
   tracing::debug!(
     endpoint = %endpoint,
     fqdn = %fqdn,
