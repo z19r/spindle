@@ -9,7 +9,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::model::{FingerprintedFile, ReorgPlan};
+use crate::group::alternatives;
+use crate::model::{
+  ContentDescription, FingerprintedFile, ReorgPlan,
+};
 
 /// Folder-name segments that describe a file *type* rather than a
 /// subject. Shared with the validator so the eval judges the same rule
@@ -347,18 +350,153 @@ pub fn placements_from_plan(
   for group in &plan.groups {
     for &idx in &group.members {
       let Some(file) = files.get(idx) else { continue };
-      let rel = file
-        .scanned
-        .path
-        .strip_prefix(root)
-        .unwrap_or(&file.scanned.path);
       out.push(Placement {
-        path: rel.to_string_lossy().replace('\\', "/"),
+        path: relative_path(&file.scanned.path, root),
         label: group.label.clone(),
       });
     }
   }
   out
+}
+
+/// A path as `expected.toml` writes it: relative to the fixture root
+/// and `/`-separated.
+fn relative_path(path: &Path, root: &Path) -> String {
+  path
+    .strip_prefix(root)
+    .unwrap_or(path)
+    .to_string_lossy()
+    .replace('\\', "/")
+}
+
+/// Descriptions keyed by the same relative path [`Placement`] uses,
+/// so the alternatives metric can look a file's tags up by path. The
+/// pipeline keys them by fingerprinted index, which nothing outside
+/// one run can interpret.
+pub fn descriptions_by_path(
+  files: &[FingerprintedFile],
+  descriptions: &HashMap<usize, ContentDescription>,
+  root: &Path,
+) -> HashMap<String, ContentDescription> {
+  descriptions
+    .iter()
+    .filter_map(|(&idx, d)| {
+      let file = files.get(idx)?;
+      Some((relative_path(&file.scanned.path, root), d.clone()))
+    })
+    .collect()
+}
+
+/// How often the review pane's ALSO FITS list offers the other home
+/// the answer key allows.
+///
+/// Reported, never scored. The list is a convenience — a reviewer who
+/// is offered nothing retypes a label and moves on — so a bad number
+/// here is an argument for #127, not a failing run. Folding it into
+/// the composite would also move every fixture's ceiling and every
+/// floor derived from one, for a number nobody has a baseline for.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AltCoverage {
+  /// Described files whose answer key names an `alt_areas` home the
+  /// run did not use. The denominator.
+  pub files: usize,
+  /// Of those, the ones offered a group in an acceptable other area.
+  pub offered: usize,
+  /// Of those, the ones offered no alternatives whatsoever. A subset
+  /// of the misses, and a different complaint: the ranking found
+  /// nothing rather than finding the wrong thing.
+  pub empty: usize,
+}
+
+impl AltCoverage {
+  /// `None` when no fixture file poses the question.
+  pub fn rate(&self) -> Option<f64> {
+    (self.files > 0).then(|| self.offered as f64 / self.files as f64)
+  }
+}
+
+/// Ask, for every file whose answer key names more than one
+/// acceptable area, whether [`alternatives::rank`] offers a folder in
+/// one of the areas the run did not already use.
+///
+/// The question needs no new ground truth: `alt_areas` is already
+/// there, recording where else a reasonable organizer might have put
+/// the file, which is exactly what ALSO FITS is for.
+pub fn alternatives_coverage(
+  expected: &ExpectedSet,
+  placements: &[Placement],
+  descriptions: &HashMap<String, ContentDescription>,
+) -> AltCoverage {
+  /// What the review pane shows.
+  const MAX: usize = 3;
+
+  let mut members: HashMap<&str, Vec<&str>> = HashMap::new();
+  for p in placements {
+    if is_system_label(&p.label) {
+      continue;
+    }
+    members.entry(&p.label).or_default().push(&p.path);
+  }
+  let mut labels: Vec<&str> = members.keys().copied().collect();
+  labels.sort_unstable();
+
+  let placed: HashMap<&str, &str> =
+    placements.iter().map(|p| (&*p.path, &*p.label)).collect();
+
+  let mut out = AltCoverage::default();
+  for file in &expected.files {
+    if file.alt_areas.is_empty() {
+      continue;
+    }
+    let Some(desc) = descriptions.get(&file.path) else {
+      continue;
+    };
+    let own = placed.get(file.path.as_str()).copied();
+
+    // Every area the key allows except the one the run used: the
+    // alternative to a file already filed under `alt_areas[0]` is its
+    // primary area, not the folder it is sitting in.
+    let used = own.map(area_of).unwrap_or_default();
+    let wanted: HashSet<String> = std::iter::once(&file.area)
+      .chain(file.alt_areas.iter())
+      .map(|a| normalize_segment(a))
+      .filter(|a| *a != used)
+      .collect();
+    if wanted.is_empty() {
+      continue;
+    }
+    out.files += 1;
+
+    let candidates: Vec<alternatives::Candidate> = labels
+      .iter()
+      .filter(|l| Some(**l) != own)
+      .map(|l| alternatives::Candidate {
+        label: l,
+        members: members[l]
+          .iter()
+          .filter_map(|p| descriptions.get(*p))
+          .collect(),
+      })
+      .collect();
+
+    let ranked = alternatives::rank(desc, &candidates, MAX);
+    if ranked.is_empty() {
+      out.empty += 1;
+      continue;
+    }
+    if ranked
+      .iter()
+      .any(|r| wanted.contains(&area_of(candidates[r.index].label)))
+    {
+      out.offered += 1;
+    }
+  }
+  out
+}
+
+/// A label's top-level area, normalized. Empty for an empty label.
+fn area_of(label: &str) -> String {
+  segments(label).into_iter().next().unwrap_or_default()
 }
 
 /// Lowercase alphanumerics only, so "Acme Corp" == "acme_corp".
@@ -880,6 +1018,192 @@ mod tests {
     let report = scored(&expected, &[pl("a.txt", "Work/Acme")]);
     assert_eq!(report.reuse_rate(), None);
     assert!(!report.to_string().contains("label reuse"));
+  }
+
+  // --- alternatives coverage -------------------------------------
+
+  fn described(tags: &[&str], category: &str) -> ContentDescription {
+    ContentDescription {
+      summary: String::new(),
+      tags: tags.iter().map(|t| t.to_string()).collect(),
+      suggested_category: category.to_string(),
+      confidence: 0.9,
+      source: crate::model::DescriptionSource::Ai,
+    }
+  }
+
+  fn descs(
+    entries: &[(&str, &[&str])],
+  ) -> HashMap<String, ContentDescription> {
+    entries
+      .iter()
+      .map(|(path, tags)| (path.to_string(), described(tags, "misc")))
+      .collect()
+  }
+
+  fn with_alts(
+    path: &str,
+    group: &str,
+    alts: &[&str],
+  ) -> ExpectedFile {
+    ExpectedFile {
+      alt_areas: alts.iter().map(|a| a.to_string()).collect(),
+      ..exp(path, group)
+    }
+  }
+
+  /// A receipt filed under Finance, whose key also allows Work, is
+  /// offered the Work folder full of receipts.
+  #[test]
+  fn the_allowed_other_area_is_offered() {
+    let expected = ExpectedSet {
+      files: vec![with_alts("a.pdf", "Finance/Receipts", &["Work"])],
+    };
+    let placements = vec![
+      pl("a.pdf", "Finance/Receipts"),
+      pl("b.pdf", "Work/Acme Corp/Expenses"),
+    ];
+    let d = descs(&[
+      ("a.pdf", &["receipt", "acme"]),
+      ("b.pdf", &["receipt", "acme"]),
+    ]);
+    let got = alternatives_coverage(&expected, &placements, &d);
+    assert_eq!(got.files, 1);
+    assert_eq!(got.offered, 1);
+    assert_eq!(got.rate(), Some(1.0));
+  }
+
+  /// Offering something is not offering the right thing.
+  #[test]
+  fn an_unrelated_area_does_not_count_as_offered() {
+    let expected = ExpectedSet {
+      files: vec![with_alts("a.pdf", "Finance/Receipts", &["Work"])],
+    };
+    let placements = vec![
+      pl("a.pdf", "Finance/Receipts"),
+      pl("b.pdf", "Personal/Pets/Biscuit"),
+    ];
+    let d = descs(&[
+      ("a.pdf", &["receipt"]),
+      ("b.pdf", &["receipt", "dog"]),
+    ]);
+    let got = alternatives_coverage(&expected, &placements, &d);
+    assert_eq!((got.files, got.offered, got.empty), (1, 0, 0));
+  }
+
+  /// Nothing shares a tag, so the pane shows an empty list. That is a
+  /// miss, and a distinguishable one.
+  #[test]
+  fn an_empty_list_is_counted_separately() {
+    let expected = ExpectedSet {
+      files: vec![with_alts("a.pdf", "Finance/Receipts", &["Work"])],
+    };
+    let placements = vec![
+      pl("a.pdf", "Finance/Receipts"),
+      pl("b.pdf", "Work/Acme Corp/Expenses"),
+    ];
+    let d =
+      descs(&[("a.pdf", &["receipt"]), ("b.pdf", &["onboarding"])]);
+    let got = alternatives_coverage(&expected, &placements, &d);
+    assert_eq!((got.files, got.offered, got.empty), (1, 0, 1));
+  }
+
+  /// A file already filed under one of its `alt_areas` still poses
+  /// the question — the alternative it wants is its primary area.
+  #[test]
+  fn the_area_the_run_used_is_not_the_alternative() {
+    let expected = ExpectedSet {
+      files: vec![with_alts("a.pdf", "Finance/Receipts", &["Work"])],
+    };
+    let placements = vec![
+      pl("a.pdf", "Work/Acme Corp/Expenses"),
+      pl("b.pdf", "Work/Acme Corp/Invoices"),
+      pl("c.pdf", "Finance/Receipts"),
+    ];
+    let d = descs(&[
+      ("a.pdf", &["receipt"]),
+      ("b.pdf", &["receipt"]),
+      ("c.pdf", &["receipt"]),
+    ]);
+    let got = alternatives_coverage(&expected, &placements, &d);
+    // Another Work folder is on offer, but Work is where it already
+    // is; only the Finance folder counts.
+    assert_eq!((got.files, got.offered), (1, 1));
+  }
+
+  /// Files the key gives only one area for are not asked about, and a
+  /// fixture with none of them reports nothing at all.
+  #[test]
+  fn a_file_with_no_alt_areas_is_not_counted() {
+    let expected = ExpectedSet {
+      files: vec![exp("a.pdf", "Finance/Receipts")],
+    };
+    let placements = vec![
+      pl("a.pdf", "Finance/Receipts"),
+      pl("b.pdf", "Work/Acme Corp/Expenses"),
+    ];
+    let d =
+      descs(&[("a.pdf", &["receipt"]), ("b.pdf", &["receipt"])]);
+    let got = alternatives_coverage(&expected, &placements, &d);
+    assert_eq!(got.files, 0);
+    assert_eq!(got.rate(), None);
+  }
+
+  /// Unsorted is not somewhere a reviewer is invited to move a file.
+  #[test]
+  fn the_system_groups_are_never_offered() {
+    let expected = ExpectedSet {
+      files: vec![with_alts("a.pdf", "Finance/Receipts", &["Work"])],
+    };
+    let placements =
+      vec![pl("a.pdf", "Finance/Receipts"), pl("b.pdf", "Unsorted")];
+    let d =
+      descs(&[("a.pdf", &["receipt"]), ("b.pdf", &["receipt"])]);
+    let got = alternatives_coverage(&expected, &placements, &d);
+    assert_eq!((got.files, got.offered, got.empty), (1, 0, 1));
+  }
+
+  /// A file the run never described has no tags to rank with, so it
+  /// is not evidence about the ranking either way.
+  #[test]
+  fn an_undescribed_file_is_skipped() {
+    let expected = ExpectedSet {
+      files: vec![with_alts("a.pdf", "Finance/Receipts", &["Work"])],
+    };
+    let placements = vec![pl("b.pdf", "Work/Acme Corp/Expenses")];
+    let d = descs(&[("b.pdf", &["receipt"])]);
+    let got = alternatives_coverage(&expected, &placements, &d);
+    assert_eq!(got.files, 0);
+  }
+
+  /// Only the three the pane shows count; a fourth-placed match is a
+  /// match the reviewer never sees.
+  #[test]
+  fn only_the_offered_three_count() {
+    let expected = ExpectedSet {
+      files: vec![with_alts("a.pdf", "Finance/Receipts", &["Work"])],
+    };
+    let mut placements = vec![pl("a.pdf", "Finance/Receipts")];
+    let mut d =
+      vec![("a.pdf".to_string(), described(&["x", "y"], "misc"))];
+    // Three perfect-overlap decoys sort above a partial Work match.
+    for (i, label) in ["Personal/A", "Personal/B", "Personal/C"]
+      .iter()
+      .enumerate()
+    {
+      let p = format!("d{i}.pdf");
+      placements.push(pl(&p, label));
+      d.push((p, described(&["x", "y"], "misc")));
+    }
+    placements.push(pl("w.pdf", "Work/Acme Corp/Expenses"));
+    d.push((
+      "w.pdf".to_string(),
+      described(&["x", "z", "q"], "misc"),
+    ));
+    let d: HashMap<String, ContentDescription> =
+      d.into_iter().collect();
+    let got = alternatives_coverage(&expected, &placements, &d);
+    assert_eq!((got.files, got.offered), (1, 0));
   }
 
   fn exp(path: &str, group: &str) -> ExpectedFile {

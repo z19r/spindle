@@ -1,3 +1,4 @@
+pub mod alternatives;
 pub mod validate;
 
 use crate::model::{FileGroup, ProposedGroup};
