@@ -240,6 +240,13 @@ impl std::fmt::Debug for AiConfig {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("AiConfig")
       .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+      // Redacted rather than omitted, so a reader can tell a base URL
+      // was configured. It is hidden for the reason `--help` hides it:
+      // a proxy URL is somewhere people put a token.
+      .field(
+        "base_url",
+        &self.base_url.as_ref().map(|_| "[REDACTED]"),
+      )
       .field("model", &self.model)
       .field("describe_model", &self.describe_model)
       .field("max_concurrent_requests", &self.max_concurrent_requests)
@@ -472,6 +479,38 @@ mod tests {
       no_introspect_archives: false,
       theme: None,
     }
+  }
+
+  /// `main` logs the whole config at `-vv`, so this `Debug` is the
+  /// only thing between the API key and the log. It is hand-written
+  /// where every neighbouring struct derives `Debug`, which makes
+  /// "derive it like the others" a tempting and silent regression.
+  #[test]
+  fn debug_never_prints_the_api_key_or_base_url() {
+    let ai = AiConfig {
+      api_key: Some("sk-ant-sentinel-must-not-appear".to_string()),
+      base_url: Some("https://proxy.example/sentinel".to_string()),
+      ..AiConfig::default()
+    };
+
+    let shown = format!("{ai:?}");
+
+    assert!(
+      !shown.contains("sentinel"),
+      "AiConfig Debug leaked a secret: {shown}"
+    );
+    // Both are named, so the log still says they were set.
+    assert!(
+      shown.contains("api_key: Some(\"[REDACTED]\")"),
+      "{shown}"
+    );
+    assert!(
+      shown.contains("base_url: Some(\"[REDACTED]\")"),
+      "{shown}"
+    );
+    // A field that is genuinely unset reads as unset, not redacted.
+    let empty = format!("{:?}", AiConfig::default());
+    assert!(empty.contains("api_key: None"), "{empty}");
   }
 
   #[test]
