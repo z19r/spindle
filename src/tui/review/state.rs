@@ -1,6 +1,7 @@
 //! Construction, queries, and preview/diff plumbing for `ReviewState`.
 
 use super::*;
+use crate::group::alternatives;
 
 /// A still from a little way into a video, for the preview pane.
 ///
@@ -1013,76 +1014,54 @@ impl ReviewState {
   /// Up to three other groups this file could join, best first. A
   /// group qualifies when its members share at least one tag with the
   /// file; ties break toward a matching category.
+  ///
+  /// The ranking itself is [`crate::group::alternatives::rank`]; what
+  /// belongs here is only what a group means to the review pane —
+  /// which one the file is already in, which are the pipeline's own,
+  /// and the sample filenames the pane shows underneath.
   pub fn alternatives(&self, path: &Path) -> Vec<Alternative> {
     const MAX: usize = 3;
     let Some(desc) = self.descriptions.get(path) else {
       return Vec::new();
     };
-    let file_tags: HashSet<String> =
-      desc.tags.iter().map(|t| t.to_lowercase()).collect();
-    if file_tags.is_empty() {
-      return Vec::new();
-    }
     let own_group = self
       .group_moves
       .iter()
       .position(|moves| moves.iter().any(|m| m.from == path));
 
-    let mut scored: Vec<(f64, Alternative)> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    let mut candidates: Vec<alternatives::Candidate> = Vec::new();
     for (idx, group) in self.groups.iter().enumerate() {
       if Some(idx) == own_group || is_system_group(group) {
         continue;
       }
-      let members = &self.group_moves[idx];
-      if members.is_empty() {
-        continue;
-      }
-      let mut group_tags: HashSet<String> = HashSet::new();
-      let mut categories: HashMap<&str, usize> = HashMap::new();
-      for m in members {
-        if let Some(d) = self.descriptions.get(&m.from) {
-          group_tags.extend(d.tags.iter().map(|t| t.to_lowercase()));
-          *categories
-            .entry(d.suggested_category.as_str())
-            .or_default() += 1;
-        }
-      }
-      let mut shared: Vec<String> =
-        file_tags.intersection(&group_tags).cloned().collect();
-      if shared.is_empty() {
-        continue;
-      }
-      shared.sort();
-      let union = file_tags.union(&group_tags).count() as f64;
-      let mut score = shared.len() as f64 / union;
-      let dominant =
-        categories.iter().max_by_key(|(_, n)| **n).map(|(c, _)| *c);
-      if dominant == Some(desc.suggested_category.as_str()) {
-        score += 0.25;
-      }
-      let samples = members
-        .iter()
-        .take(2)
-        .filter_map(|m| m.from.file_name())
-        .map(|n| n.to_string_lossy().to_string())
-        .collect();
-      scored.push((
-        score,
+      indices.push(idx);
+      candidates.push(alternatives::Candidate {
+        label: group.label.as_str(),
+        members: self.group_moves[idx]
+          .iter()
+          .filter_map(|m| self.descriptions.get(&m.from))
+          .collect(),
+      });
+    }
+
+    alternatives::rank(desc, &candidates, MAX)
+      .into_iter()
+      .map(|ranked| {
+        let idx = indices[ranked.index];
         Alternative {
           group_idx: idx,
-          label: group.label.clone(),
-          shared_tags: shared,
-          samples,
-        },
-      ));
-    }
-    scored.sort_by(|a, b| {
-      b.0
-        .partial_cmp(&a.0)
-        .unwrap_or(std::cmp::Ordering::Equal)
-        .then_with(|| a.1.label.cmp(&b.1.label))
-    });
-    scored.into_iter().take(MAX).map(|(_, a)| a).collect()
+          label: self.groups[idx].label.clone(),
+          shared_tags: ranked.shared_tags,
+          samples: self.group_moves[idx]
+            .iter()
+            .take(2)
+            .filter_map(|m| m.from.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .collect(),
+        }
+      })
+      .collect()
   }
 
   /// Move the file under the cursor to its `n`th (1-based) alternative.

@@ -320,6 +320,25 @@ async fn eval_fixture_with(
   println!("\n=== fixture: {name} ===");
   print_groups(&placements, &expected);
   println!("\n=== eval report ({name}) ===\n{report}");
+
+  // Reported, not asserted: #161 asks how good the tag-derived ALSO
+  // FITS list is before #127 spends a model call on replacing it.
+  // There is no baseline yet, so there is nothing to hold it to.
+  let alts = eval::alternatives_coverage(
+    &expected,
+    &placements,
+    &eval::descriptions_by_path(
+      &result.fingerprinted,
+      &result.descriptions,
+      &root,
+    ),
+  );
+  if let Some(rate) = alts.rate() {
+    println!(
+      "alternatives offered   {}/{} ({rate:.3}); {} got an empty list",
+      alts.offered, alts.files, alts.empty
+    );
+  }
   Some(report)
 }
 
