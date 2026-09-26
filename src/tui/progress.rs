@@ -82,6 +82,21 @@ impl PipelineTuiState {
       PipelineEvent::GroupingFailed { error } => {
         self.grouping_error = Some(error.clone());
       }
+      PipelineEvent::GroupingIncomplete {
+        reason,
+        failed_calls,
+        unplaced,
+      } => {
+        self.grouping_error = Some(match reason {
+          Some(reason) => {
+            format!("{reason} ({unplaced} files unplaced)")
+          }
+          None => format!(
+            "{failed_calls} grouping call(s) failed \
+             ({unplaced} files unplaced)"
+          ),
+        });
+      }
       PipelineEvent::LabelsNormalised { .. }
       | PipelineEvent::RoutingComplete { .. } => {}
       PipelineEvent::PlanReady => {
