@@ -911,7 +911,10 @@ async fn extract_zip_text(
     let mut archive = zip::ZipArchive::new(file).ok()?;
     let names: Vec<String> = (0..archive.len())
       .filter_map(|i| {
-        archive.by_index(i).ok().map(|e| e.name().to_string())
+        archive
+          .by_index(i)
+          .ok()
+          .and_then(|e| e.name().ok().map(|n| n.into_owned()))
       })
       .filter(|n| {
         needles.iter().any(|k| n.starts_with(k) || n.ends_with(k))
