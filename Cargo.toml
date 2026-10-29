@@ -47,7 +47,7 @@ image = "0.25"
 # EXIF metadata
 kamadak-exif = "0.6"
 reverse_geocoder = "4"
-lopdf = "0.45"
+lopdf = "0.46"
 
 # Directory walking
 walkdir = "2"
