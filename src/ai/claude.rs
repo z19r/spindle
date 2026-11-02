@@ -770,6 +770,53 @@ impl ClaudeProvider {
   }
 }
 
+/// Most a single batch may carry. The Message Batches API rejects a
+/// request body over 256 MB, or one with more than 100,000 items; this
+/// leaves room for the JSON around each request.
+const MAX_BATCH_BYTES: usize = 200 * 1024 * 1024;
+const MAX_BATCH_ITEMS: usize = 100_000;
+
+/// Roughly what a describe request adds to a batch body: an image's
+/// bytes as base64 (four characters for every three bytes), or the
+/// text excerpt, plus a fixed allowance for prompts and JSON.
+fn request_bytes(request: &DescribeRequest) -> usize {
+  const OVERHEAD: usize = 16 * 1024;
+  let payload = match &request.payload {
+    super::DescribePayload::Image { data, .. } => {
+      data.len().div_ceil(3) * 4
+    }
+    super::DescribePayload::Text { excerpt } => excerpt.len(),
+  };
+  payload + OVERHEAD
+}
+
+/// Split `requests` into consecutive runs that each fit one batch.
+/// Every run holds at least one request, so one oversized item still
+/// gets submitted (and fails on its own) rather than looping forever.
+fn batch_chunks(
+  requests: &[DescribeRequest],
+  max_bytes: usize,
+) -> Vec<std::ops::Range<usize>> {
+  let mut chunks = Vec::new();
+  let mut start = 0;
+  let mut bytes = 0;
+  for (i, request) in requests.iter().enumerate() {
+    let size = request_bytes(request);
+    let full =
+      bytes + size > max_bytes || i - start >= MAX_BATCH_ITEMS;
+    if i > start && full {
+      chunks.push(start..i);
+      start = i;
+      bytes = 0;
+    }
+    bytes += size;
+  }
+  if start < requests.len() {
+    chunks.push(start..requests.len());
+  }
+  chunks
+}
+
 /// The user-turn text of a request, for debug logging. Image blocks
 /// are skipped so a photo never lands in the log.
 fn request_prompt_text(request: &ApiRequest) -> String {
@@ -1278,18 +1325,24 @@ impl AiProvider for ClaudeProvider {
     &self,
     requests: Vec<DescribeRequest>,
   ) -> Vec<Result<ContentDescription>> {
-    match self.run_message_batch(&requests).await {
-      Ok(results) => results,
-      Err(err) => {
-        // Batch-level failure (submission/poll/fetch): every item
-        // fails with the shared cause.
-        let msg = format!("{err:#}");
-        requests
-          .iter()
-          .map(|_| Err(anyhow::anyhow!("{msg}")))
-          .collect()
+    let mut results = Vec::with_capacity(requests.len());
+    // One batch per chunk, in order: the API rejects a batch over its
+    // size limit whole, and a folder of photos easily passes it.
+    for range in batch_chunks(&requests, MAX_BATCH_BYTES) {
+      let chunk = &requests[range];
+      match self.run_message_batch(chunk).await {
+        Ok(chunk_results) => results.extend(chunk_results),
+        Err(err) => {
+          // Batch-level failure (submission/poll/fetch): every item
+          // of this chunk fails with the shared cause.
+          let msg = format!("{err:#}");
+          results.extend(
+            chunk.iter().map(|_| Err(anyhow::anyhow!("{msg}"))),
+          );
+        }
       }
     }
+    results
   }
 
   async fn propose_groups(
@@ -2292,6 +2345,56 @@ mod tests {
       },
     })
     .to_string()
+  }
+
+  fn image_request(bytes: usize) -> DescribeRequest {
+    DescribeRequest {
+      payload: crate::ai::DescribePayload::Image {
+        data: vec![0; bytes],
+        mime_type: "image/jpeg".to_string(),
+      },
+      context: DescribeContext {
+        filename: "a.jpg".to_string(),
+        file_type_label: "image/jpeg".to_string(),
+        file_size: bytes as u64,
+        metadata_hint: None,
+      },
+    }
+  }
+
+  /// 2,000 photos of ~400 KB are about 1 GB as base64: far over what
+  /// one batch may carry. They must go out as several batches, in
+  /// order, none over the limit.
+  #[test]
+  fn large_batches_are_split_under_the_size_limit() {
+    let requests: Vec<_> =
+      (0..2000).map(|_| image_request(400 * 1024)).collect();
+
+    let chunks = batch_chunks(&requests, MAX_BATCH_BYTES);
+
+    assert!(chunks.len() > 1, "{chunks:?}");
+    assert_eq!(chunks.first().unwrap().start, 0);
+    assert_eq!(chunks.last().unwrap().end, 2000);
+    for pair in chunks.windows(2) {
+      assert_eq!(pair[0].end, pair[1].start);
+    }
+    for range in chunks {
+      let bytes: usize =
+        requests[range].iter().map(request_bytes).sum();
+      assert!(bytes <= MAX_BATCH_BYTES, "{bytes}");
+    }
+  }
+
+  #[test]
+  fn an_oversized_request_still_gets_its_own_batch() {
+    let requests =
+      vec![image_request(10), image_request(300 * 1024 * 1024)];
+
+    assert_eq!(
+      batch_chunks(&requests, MAX_BATCH_BYTES),
+      vec![0..1, 1..2]
+    );
+    assert!(batch_chunks(&[], MAX_BATCH_BYTES).is_empty());
   }
 
   #[tokio::test]
