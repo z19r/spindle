@@ -596,6 +596,19 @@ fn capped_files_note<'a>(
 }
 
 fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
+  if cli.json {
+    anyhow::bail!(
+      "--json is not available with --dupes-only or --no-ai."
+    );
+  }
+  if !cli.yes && !std::io::stdout().is_terminal() {
+    anyhow::bail!(
+      "Reviewing duplicates needs a terminal. Run spindle in a \
+       terminal, or pass --yes to stage the byte-identical copies \
+       for deletion unattended."
+    );
+  }
+
   print!("  Scanning...  ");
   let scan_opts = ScanOptions {
     include_trash: cli.include_trash,
@@ -662,7 +675,7 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
   let (groups, moves, dupe_types) =
     dupes_to_groups(&dupes, &fingerprinted);
 
-  let picker = Some(query_picker());
+  let picker = (!cli.yes).then(query_picker);
   let mut review_state = ReviewState::new(
     groups,
     moves,
@@ -671,20 +684,25 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
     ReviewMode::Dupes,
   )
   .with_file_metadata(&fingerprinted);
+  // Only byte-identical copies start marked for deletion, so --yes
+  // never removes a file that merely looks like another.
   review_state.set_dupe_types(dupe_types);
-  init_theme(cli, config);
-  let mut session = TerminalSession::enter()?;
-  let review = tui::run_review(review_state, &mut session.terminal);
-  drop(session);
-  let (action, review_state) = review?;
 
-  match action {
-    ReviewAction::Quit => {
+  let review_state = if cli.yes {
+    println!("Executing without review (--yes).");
+    review_state
+  } else {
+    init_theme(cli, config);
+    let mut session = TerminalSession::enter()?;
+    let review = tui::run_review(review_state, &mut session.terminal);
+    drop(session);
+    let (action, review_state) = review?;
+    if action == ReviewAction::Quit {
       println!("Aborted by user.");
       return Ok(());
     }
-    ReviewAction::Execute => {}
-  }
+    review_state
+  };
 
   // Dedup-only runs don't organize into folders, so nothing is recorded.
   execute_review(cli, config, &review_state, None, None)
