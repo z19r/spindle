@@ -1099,10 +1099,17 @@ where
 
     if reply.text.len() >= checked_at + 1024 {
       checked_at = reply.text.len();
-      if looks_degenerate(&reply.text) {
+      let failure = if looks_degenerate(&reply.text) {
+        Some("repetition loop")
+      } else if runs_away_in_a_string(&reply.text) {
+        Some("runaway string")
+      } else {
+        None
+      };
+      if let Some(what) = failure {
         return Err(
           DegenerateReply(format!(
-            "repetition loop after {} bytes: {}",
+            "{what} after {} bytes: {}",
             reply.text.len(),
             preview(&reply.text, 200)
           ))
@@ -1145,6 +1152,20 @@ fn looks_degenerate(text: &str) -> bool {
       .count();
     repeats >= MIN_REPEATS && repeats * unit >= TAIL / 2
   })
+}
+
+/// True when the reply has gone over 2 KB without a quote character,
+/// so it is stuck inside one JSON string. Every string these replies
+/// hold is a label or a one-sentence rationale. A model that pads its
+/// rationale with filler that never repeats exactly, which
+/// [`looks_degenerate`] cannot see, is caught here within a few KB,
+/// not after 50 KB and several minutes. The schema cannot cap string
+/// length: the API does not support `maxLength`.
+fn runs_away_in_a_string(text: &str) -> bool {
+  const MAX_STRING: usize = 2048;
+  let since_quote =
+    text.rfind('"').map_or(text.len(), |i| text.len() - i - 1);
+  since_quote > MAX_STRING
 }
 
 /// How long the server asked us to wait: the `retry-after` header
@@ -1875,6 +1896,39 @@ mod tests {
       looks_degenerate(&parenthesised),
       "15-byte phrase loop must be caught"
     );
+  }
+
+  /// What real runs still produced after the loop check: one member,
+  /// then a rationale padded with prose that never repeats exactly,
+  /// for 50 KB. A healthy reply never sits 2 KB inside one string.
+  #[test]
+  fn a_rationale_that_never_ends_is_caught() {
+    let mut text = String::from(
+      "{\"groups\":[{\"label\":\"Personal/Family/Kids\",\"members\":\
+       [{\"index\":405}],\"rationale\":\"Candid photos of the kids.",
+    );
+    let mut caught = None;
+    for n in 0..400 {
+      text.push_str(&format!(" Photo {n} shows them at play."));
+      if runs_away_in_a_string(&text) {
+        caught = Some(text.len());
+        break;
+      }
+    }
+    assert!(!looks_degenerate(&text), "varied filler is not a loop");
+    let at = caught.expect("runaway rationale must be caught");
+    assert!(at < 3_000, "caught only after {at} bytes");
+
+    let mut healthy = String::from("{\"groups\":[");
+    for i in 0..200 {
+      healthy.push_str(&format!(
+        "{{\"label\":\"Work/Client {i}\",\"rationale\":\"Signed \
+         copies and drafts of the engagement letters for client {i}, \
+         with the invoices that followed them.\",\"members\":\
+         [{{\"index\":{i}}}]}},"
+      ));
+      assert!(!runs_away_in_a_string(&healthy));
+    }
   }
 
   /// The loop is cut off within a few hundred bytes of starting, not
