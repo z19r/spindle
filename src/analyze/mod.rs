@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
 
 use crate::ai::{AiProvider, DescribeContext};
 use crate::model::{
@@ -1354,28 +1353,19 @@ async fn analyze_unique(
 
   use futures::stream::{self, StreamExt};
 
-  let semaphore =
-    std::sync::Arc::new(Semaphore::new(options.max_concurrent));
-
+  // `buffered` runs at most `max_concurrent` of these at once.
   stream::iter(files)
-    .map(|file| {
-      let sem = semaphore.clone();
-      async move {
-        let _permit = sem
-          .acquire()
-          .await
-          .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
-        if let Some(limit) = options.max_cost {
-          let (spent, ..) =
-            crate::cost::spend_summary(&provider.usage());
-          if spent >= limit {
-            anyhow::bail!(
-              "not described: --max-cost ${limit:.2} reached"
-            );
-          }
+    .map(|file| async move {
+      if let Some(limit) = options.max_cost {
+        let (spent, ..) =
+          crate::cost::spend_summary(&provider.usage());
+        if spent >= limit {
+          anyhow::bail!(
+            "not described: --max-cost ${limit:.2} reached"
+          );
         }
-        analyze_file(provider, file, options).await
       }
+      analyze_file(provider, file, options).await
     })
     .buffered(options.max_concurrent)
     .collect()
