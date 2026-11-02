@@ -614,6 +614,51 @@ impl ClaudeProvider {
 
   /// Submit describe requests as a message batch, poll until it
   /// ends, and collect per-item results in submission order.
+  /// GET a batch endpoint, retrying dropped connections and
+  /// retryable statuses. A batch can run for hours; one 502 while
+  /// polling must not throw away the whole batch's work.
+  async fn get_with_retry(
+    &self,
+    url: &str,
+    what: &str,
+  ) -> Result<reqwest::Response> {
+    let mut attempt = 0;
+    loop {
+      let result = self
+        .client
+        .get(url)
+        .header("x-api-key", &self.api_key)
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await;
+      let retryable = match &result {
+        Ok(resp) => is_retryable_status(resp.status()),
+        Err(_) => true,
+      };
+      if retryable && attempt < self.max_retries {
+        attempt += 1;
+        tracing::warn!(
+          attempt,
+          what,
+          "Batch request failed, retrying"
+        );
+        tokio::time::sleep(self.poll_interval * (1 << attempt)).await;
+        continue;
+      }
+      let response = result
+        .with_context(|| format!("{what} could not be sent"))?;
+      if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+          "{what} failed ({status}): {}",
+          preview(&body, 200)
+        );
+      }
+      return Ok(response);
+    }
+  }
+
   async fn run_message_batch(
     &self,
     requests: &[DescribeRequest],
@@ -666,24 +711,8 @@ impl ClaudeProvider {
     while batch.processing_status != "ended" {
       tokio::time::sleep(self.poll_interval).await;
       let response = self
-        .client
-        .get(&status_endpoint)
-        .header("x-api-key", &self.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .send()
-        .await
-        .context("Failed to poll batch status")?;
-
-      if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!(
-          "Batch status poll failed ({}): {}",
-          status,
-          preview(&body, 200)
-        );
-      }
-
+        .get_with_retry(&status_endpoint, "Batch status poll")
+        .await?;
       batch = response
         .json()
         .await
@@ -697,23 +726,8 @@ impl ClaudeProvider {
 
     let results_endpoint = format!("{status_endpoint}/results");
     let response = self
-      .client
-      .get(&results_endpoint)
-      .header("x-api-key", &self.api_key)
-      .header("anthropic-version", "2023-06-01")
-      .send()
-      .await
-      .context("Failed to fetch batch results")?;
-
-    if !response.status().is_success() {
-      let status = response.status();
-      let body = response.text().await.unwrap_or_default();
-      anyhow::bail!(
-        "Batch results fetch failed ({}): {}",
-        status,
-        preview(&body, 200)
-      );
-    }
+      .get_with_retry(&results_endpoint, "Batch results fetch")
+      .await?;
 
     let body = response
       .text()
@@ -768,6 +782,53 @@ impl ClaudeProvider {
         .collect(),
     )
   }
+}
+
+/// Most a single batch may carry. The Message Batches API rejects a
+/// request body over 256 MB, or one with more than 100,000 items; this
+/// leaves room for the JSON around each request.
+const MAX_BATCH_BYTES: usize = 200 * 1024 * 1024;
+const MAX_BATCH_ITEMS: usize = 100_000;
+
+/// Roughly what a describe request adds to a batch body: an image's
+/// bytes as base64 (four characters for every three bytes), or the
+/// text excerpt, plus a fixed allowance for prompts and JSON.
+fn request_bytes(request: &DescribeRequest) -> usize {
+  const OVERHEAD: usize = 16 * 1024;
+  let payload = match &request.payload {
+    super::DescribePayload::Image { data, .. } => {
+      data.len().div_ceil(3) * 4
+    }
+    super::DescribePayload::Text { excerpt } => excerpt.len(),
+  };
+  payload + OVERHEAD
+}
+
+/// Split `requests` into consecutive runs that each fit one batch.
+/// Every run holds at least one request, so one oversized item still
+/// gets submitted (and fails on its own) rather than looping forever.
+fn batch_chunks(
+  requests: &[DescribeRequest],
+  max_bytes: usize,
+) -> Vec<std::ops::Range<usize>> {
+  let mut chunks = Vec::new();
+  let mut start = 0;
+  let mut bytes = 0;
+  for (i, request) in requests.iter().enumerate() {
+    let size = request_bytes(request);
+    let full =
+      bytes + size > max_bytes || i - start >= MAX_BATCH_ITEMS;
+    if i > start && full {
+      chunks.push(start..i);
+      start = i;
+      bytes = 0;
+    }
+    bytes += size;
+  }
+  if start < requests.len() {
+    chunks.push(start..requests.len());
+  }
+  chunks
 }
 
 /// The user-turn text of a request, for debug logging. Image blocks
@@ -1278,18 +1339,24 @@ impl AiProvider for ClaudeProvider {
     &self,
     requests: Vec<DescribeRequest>,
   ) -> Vec<Result<ContentDescription>> {
-    match self.run_message_batch(&requests).await {
-      Ok(results) => results,
-      Err(err) => {
-        // Batch-level failure (submission/poll/fetch): every item
-        // fails with the shared cause.
-        let msg = format!("{err:#}");
-        requests
-          .iter()
-          .map(|_| Err(anyhow::anyhow!("{msg}")))
-          .collect()
+    let mut results = Vec::with_capacity(requests.len());
+    // One batch per chunk, in order: the API rejects a batch over its
+    // size limit whole, and a folder of photos easily passes it.
+    for range in batch_chunks(&requests, MAX_BATCH_BYTES) {
+      let chunk = &requests[range];
+      match self.run_message_batch(chunk).await {
+        Ok(chunk_results) => results.extend(chunk_results),
+        Err(err) => {
+          // Batch-level failure (submission/poll/fetch): every item
+          // of this chunk fails with the shared cause.
+          let msg = format!("{err:#}");
+          results.extend(
+            chunk.iter().map(|_| Err(anyhow::anyhow!("{msg}"))),
+          );
+        }
       }
     }
+    results
   }
 
   async fn propose_groups(
@@ -2294,6 +2361,56 @@ mod tests {
     .to_string()
   }
 
+  fn image_request(bytes: usize) -> DescribeRequest {
+    DescribeRequest {
+      payload: crate::ai::DescribePayload::Image {
+        data: vec![0; bytes],
+        mime_type: "image/jpeg".to_string(),
+      },
+      context: DescribeContext {
+        filename: "a.jpg".to_string(),
+        file_type_label: "image/jpeg".to_string(),
+        file_size: bytes as u64,
+        metadata_hint: None,
+      },
+    }
+  }
+
+  /// 2,000 photos of ~400 KB are about 1 GB as base64: far over what
+  /// one batch may carry. They must go out as several batches, in
+  /// order, none over the limit.
+  #[test]
+  fn large_batches_are_split_under_the_size_limit() {
+    let requests: Vec<_> =
+      (0..2000).map(|_| image_request(400 * 1024)).collect();
+
+    let chunks = batch_chunks(&requests, MAX_BATCH_BYTES);
+
+    assert!(chunks.len() > 1, "{chunks:?}");
+    assert_eq!(chunks.first().unwrap().start, 0);
+    assert_eq!(chunks.last().unwrap().end, 2000);
+    for pair in chunks.windows(2) {
+      assert_eq!(pair[0].end, pair[1].start);
+    }
+    for range in chunks {
+      let bytes: usize =
+        requests[range].iter().map(request_bytes).sum();
+      assert!(bytes <= MAX_BATCH_BYTES, "{bytes}");
+    }
+  }
+
+  #[test]
+  fn an_oversized_request_still_gets_its_own_batch() {
+    let requests =
+      vec![image_request(10), image_request(300 * 1024 * 1024)];
+
+    assert_eq!(
+      batch_chunks(&requests, MAX_BATCH_BYTES),
+      vec![0..1, 1..2]
+    );
+    assert!(batch_chunks(&[], MAX_BATCH_BYTES).is_empty());
+  }
+
   #[tokio::test]
   async fn describe_batch_submits_and_orders_results() {
     let server = MockServer::start().await;
@@ -2401,6 +2518,61 @@ mod tests {
       provider.describe_batch(batch_test_requests()).await;
 
     assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|r| r.is_ok()));
+  }
+
+  #[tokio::test]
+  async fn batch_polling_survives_a_bad_gateway() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+      .and(path("/v1/messages/batches"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(
+        serde_json::json!({
+          "id": "msgbatch_09",
+          "processing_status": "in_progress",
+        }),
+      ))
+      .mount(&server)
+      .await;
+    Mock::given(method("GET"))
+      .and(path("/v1/messages/batches/msgbatch_09"))
+      .respond_with(ResponseTemplate::new(502))
+      .up_to_n_times(1)
+      .mount(&server)
+      .await;
+    Mock::given(method("GET"))
+      .and(path("/v1/messages/batches/msgbatch_09"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(
+        serde_json::json!({
+          "id": "msgbatch_09",
+          "processing_status": "ended",
+        }),
+      ))
+      .mount(&server)
+      .await;
+    Mock::given(method("GET"))
+      .and(path("/v1/messages/batches/msgbatch_09/results"))
+      .respond_with(ResponseTemplate::new(200).set_body_string(
+        format!(
+          "{}\n{}\n",
+          batch_result_line("req-0", "a photo"),
+          batch_result_line("req-1", "a lease"),
+        ),
+      ))
+      .mount(&server)
+      .await;
+
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-opus-4-8".to_string(),
+      2,
+    )
+    .with_base_url(server.uri())
+    .with_poll_interval(std::time::Duration::ZERO);
+
+    let results =
+      provider.describe_batch(batch_test_requests()).await;
+
     assert!(results.iter().all(|r| r.is_ok()));
   }
 

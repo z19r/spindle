@@ -23,15 +23,23 @@ pub fn compute_blake3(path: &Path) -> Result<[u8; 32]> {
   Ok(*hasher.finalize().as_bytes())
 }
 
+/// Hash every file. A file that cannot be read (deleted mid-scan, no
+/// permission) is logged and left out rather than failing the run.
 pub fn fingerprint_files(
   files: Vec<ScannedFile>,
-) -> Result<Vec<FingerprintedFile>> {
+) -> Vec<FingerprintedFile> {
   use rayon::prelude::*;
 
   files
     .into_par_iter()
-    .map(|scanned| {
-      let blake3_hash = compute_blake3(&scanned.path)?;
+    .filter_map(|scanned| {
+      let blake3_hash = match compute_blake3(&scanned.path) {
+        Ok(hash) => hash,
+        Err(err) => {
+          tracing::warn!(error = %format!("{err:#}"), "Skipping file");
+          return None;
+        }
+      };
       let perceptual_hash = if scanned.file_type.is_image() {
         compute_perceptual_hash(&scanned.path).ok()
       } else if scanned.file_type.is_video() {
@@ -41,7 +49,7 @@ pub fn fingerprint_files(
       } else {
         None
       };
-      Ok(FingerprintedFile {
+      Some(FingerprintedFile {
         scanned,
         blake3_hash,
         perceptual_hash,
@@ -78,17 +86,11 @@ pub fn find_near_duplicates(
   files: &[FingerprintedFile],
   threshold: u32,
 ) -> Vec<DuplicateSet> {
-  // Banding (pigeonhole): split each hash into threshold+1 bands.
-  // Two hashes within `threshold` bit-flips must share at least one
-  // identical band, so candidates come from shared band buckets
-  // instead of an O(n²) sweep. Same results, near-linear time.
-  let candidates = banded_candidates(files, threshold);
-
   let mut results = Vec::new();
-  let mut paired = std::collections::HashSet::new();
+  let mut paired = vec![false; files.len()];
 
   for i in 0..files.len() {
-    if paired.contains(&i) {
+    if paired[i] {
       continue;
     }
     let Some(ref hash_a) = files[i].perceptual_hash else {
@@ -98,18 +100,12 @@ pub fn find_near_duplicates(
     let mut group = Vec::new();
     let mut min_distance = u32::MAX;
 
-    let Some(neighbors) = candidates.get(&i) else {
-      continue;
-    };
-    let mut neighbors: Vec<usize> = neighbors
-      .iter()
-      .copied()
-      .filter(|&j| j > i && !paired.contains(&j))
-      .collect();
-    neighbors.sort_unstable();
-    neighbors.dedup();
-
-    for j in neighbors {
+    // shortcut: compares every pair, O(n²) on 8-byte hashes. Cheap
+    // for tens of thousands of images; index the hashes past that.
+    for j in i + 1..files.len() {
+      if paired[j] {
+        continue;
+      }
       let Some(ref hash_b) = files[j].perceptual_hash else {
         continue;
       };
@@ -121,12 +117,12 @@ pub fn find_near_duplicates(
       if distance <= threshold {
         group.push(j);
         min_distance = min_distance.min(distance);
-        paired.insert(j);
+        paired[j] = true;
       }
     }
 
     if !group.is_empty() {
-      paired.insert(i);
+      paired[i] = true;
       results.push(DuplicateSet {
         canonical: i,
         duplicates: group,
@@ -138,58 +134,6 @@ pub fn find_near_duplicates(
   }
 
   results
-}
-
-/// For each file index, the indices sharing at least one identical
-/// hash band. Hashes of different lengths land in different band
-/// keyspaces, so they never become candidates of each other.
-fn banded_candidates(
-  files: &[FingerprintedFile],
-  threshold: u32,
-) -> std::collections::HashMap<usize, Vec<usize>> {
-  use std::collections::HashMap;
-
-  let bands = threshold as usize + 1;
-  // bucket key: (hash_len, band_index, band_bits) → file indices
-  let mut buckets: HashMap<(usize, usize, Vec<bool>), Vec<usize>> =
-    HashMap::new();
-
-  for (idx, file) in files.iter().enumerate() {
-    let Some(ref hash) = file.perceptual_hash else {
-      continue;
-    };
-    let bits: Vec<bool> = hash
-      .iter()
-      .flat_map(|byte| (0..8).map(move |b| byte >> b & 1 == 1))
-      .collect();
-    let total = bits.len();
-    if total == 0 {
-      continue;
-    }
-    for band in 0..bands.min(total) {
-      let start = band * total / bands;
-      let end = ((band + 1) * total / bands).max(start + 1);
-      buckets
-        .entry((total, band, bits[start..end.min(total)].to_vec()))
-        .or_default()
-        .push(idx);
-    }
-  }
-
-  let mut candidates: HashMap<usize, Vec<usize>> = HashMap::new();
-  for indices in buckets.into_values() {
-    if indices.len() < 2 {
-      continue;
-    }
-    for &a in &indices {
-      for &b in &indices {
-        if a != b {
-          candidates.entry(a).or_default().push(b);
-        }
-      }
-    }
-  }
-  candidates
 }
 
 fn compute_perceptual_hash(path: &Path) -> Result<Vec<u8>> {
@@ -342,10 +286,25 @@ mod tests {
       make_scanned(dir.path(), "b.jpg", b"bbb"),
     ];
 
-    let results = fingerprint_files(files).unwrap();
+    let results = fingerprint_files(files);
 
     assert_eq!(results.len(), 2);
     assert_ne!(results[0].blake3_hash, results[1].blake3_hash);
+  }
+
+  #[test]
+  fn fingerprint_files_skips_unreadable_files() {
+    let dir = TempDir::new().unwrap();
+    let files = vec![
+      make_scanned(dir.path(), "a.jpg", b"aaa"),
+      make_scanned(dir.path(), "gone.jpg", b"bbb"),
+    ];
+    std::fs::remove_file(dir.path().join("gone.jpg")).unwrap();
+
+    let results = fingerprint_files(files);
+
+    assert_eq!(results.len(), 1);
+    assert!(results[0].scanned.path.ends_with("a.jpg"));
   }
 
   #[test]
@@ -357,7 +316,7 @@ mod tests {
       vec![make_scanned(dir.path(), "img.png", &png_data)];
     files[0].file_type = FileType::Image(ImageFormat::Png);
 
-    let results = fingerprint_files(files).unwrap();
+    let results = fingerprint_files(files);
 
     assert!(results[0].perceptual_hash.is_some());
   }
@@ -375,7 +334,7 @@ mod tests {
       file_type: FileType::Video(crate::model::VideoFormat::Mp4),
     }];
 
-    let results = fingerprint_files(files).unwrap();
+    let results = fingerprint_files(files);
 
     assert!(results[0].perceptual_hash.is_none());
   }
@@ -495,7 +454,19 @@ mod tests {
   }
 
   #[test]
-  fn banding_matches_bruteforce_on_8_byte_hashes() {
+  fn a_threshold_over_the_hash_size_matches_everything() {
+    let files = vec![
+      make_fingerprinted("a.jpg", [1u8; 32], Some(vec![0x00u8; 1])),
+      make_fingerprinted("b.jpg", [2u8; 32], Some(vec![0xFFu8; 1])),
+    ];
+
+    let dupes = find_near_duplicates(&files, 9);
+
+    assert_eq!(dupes.len(), 1);
+  }
+
+  #[test]
+  fn finds_the_close_pair_among_8_byte_hashes() {
     // Three files: two within distance 2, one far away.
     let mut near = vec![0u8; 8];
     near[0] = 0b0000_0011;

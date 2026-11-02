@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{ApprovedPlan, ExecutionReport, FileMove};
-use journal::{JournalDeletion, JournalMove, RunJournal};
+use journal::{JournalDeletion, JournalMove, JournalWriter};
 
 /// Where run journals and staged trash live.
 #[derive(Debug, Clone)]
@@ -51,79 +51,116 @@ pub fn execute_plan(
   output_dir: &Path,
 ) -> ExecutionReport {
   let run_id = journal::new_run_id();
-  let mut run_journal = RunJournal::new(&run_id);
+  let mut report = ExecutionReport {
+    run_id: run_id.clone(),
+    moves_completed: Vec::new(),
+    moves_failed: Vec::new(),
+    deletions_staged: Vec::new(),
+    bytes_staged: 0,
+    journal_path: None,
+    journal_error: None,
+  };
 
-  let mut moves_completed = Vec::new();
-  let mut moves_failed = Vec::new();
+  // Nothing moves until the run can be journaled: an unrecorded move
+  // could never be undone.
+  let mut writer = match JournalWriter::begin(
+    &paths.journal_dir,
+    &run_id,
+  ) {
+    Ok(writer) => writer,
+    Err(e) => {
+      tracing::error!(error = %e, "Cannot journal this run; not starting");
+      let reason = format!("not started: {e:#}");
+      report.moves_failed = plan
+        .moves
+        .iter()
+        .map(|mv| (mv.clone(), reason.clone()))
+        .collect();
+      report.journal_error = Some(format!("{e:#}"));
+      return report;
+    }
+  };
 
-  for file_move in &plan.moves {
+  for (i, file_move) in plan.moves.iter().enumerate() {
     if let Err(e) = validate_move_target(&file_move.to, output_dir) {
-      moves_failed.push((file_move.clone(), e.to_string()));
+      report.moves_failed.push((file_move.clone(), e.to_string()));
       continue;
     }
     // Never overwrite: auto-rename on collision and record the real
     // destination so the ledger and the journal both stay truthful.
     let actual_to = unique_dest(&file_move.to);
-    match move_file(&file_move.from, &actual_to) {
-      Ok(()) => {
-        run_journal.moves.push(JournalMove {
-          from: file_move.from.clone(),
-          to: actual_to.clone(),
-        });
-        moves_completed.push(FileMove {
-          from: file_move.from.clone(),
-          to: actual_to,
-          group_id: file_move.group_id,
-        });
-      }
-      Err(e) => {
-        moves_failed.push((file_move.clone(), e.to_string()));
-      }
+    if let Err(e) = move_file(&file_move.from, &actual_to) {
+      report.moves_failed.push((file_move.clone(), e.to_string()));
+      continue;
+    }
+    report.moves_completed.push(FileMove {
+      from: file_move.from.clone(),
+      to: actual_to.clone(),
+      group_id: file_move.group_id,
+    });
+    let step = JournalMove {
+      from: file_move.from.clone(),
+      to: actual_to,
+    };
+    if let Err(e) = writer.record_move(step) {
+      // The journal can no longer keep up; stop before moving files
+      // it would not know about.
+      let reason = "not started: the run journal stopped writing";
+      report.moves_failed.extend(
+        plan.moves[i + 1..]
+          .iter()
+          .map(|mv| (mv.clone(), reason.to_string())),
+      );
+      return finish_report(report, writer, Some(e));
     }
   }
 
-  let mut deletions_staged = Vec::new();
-  let mut bytes_staged = 0u64;
   for path in &plan.deletions {
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let dest = trash::trash_path_for(&paths.trash_dir, &run_id, path);
-    match move_file(path, &dest) {
-      Ok(()) => {
-        run_journal.deletions.push(JournalDeletion {
-          original: path.clone(),
-          trashed_to: dest,
-          size,
-        });
-        bytes_staged += size;
-        deletions_staged.push(path.clone());
-      }
-      Err(e) => {
-        tracing::warn!(path = %path.display(), error = %e, "Failed to stage deletion");
-      }
+    let trash_dir = trash::trash_dir_for(&paths.trash_dir, path);
+    let dest = trash::trash_path_for(&trash_dir, &run_id, path);
+    if let Err(e) = move_file(path, &dest) {
+      tracing::warn!(
+        path = %path.display(),
+        error = %e,
+        "Failed to stage deletion"
+      );
+      continue;
+    }
+    report.bytes_staged += size;
+    report.deletions_staged.push(path.clone());
+    let step = JournalDeletion {
+      original: path.clone(),
+      trashed_to: dest,
+      size,
+    };
+    if let Err(e) = writer.record_deletion(step) {
+      return finish_report(report, writer, Some(e));
     }
   }
 
-  let (journal_path, journal_error) = if run_journal.is_empty() {
-    (None, None)
-  } else {
-    match run_journal.save(&paths.journal_dir) {
-      Ok(path) => (Some(path), None),
-      Err(e) => {
-        tracing::error!(error = %e, "Failed to write run journal");
-        (None, Some(e.to_string()))
-      }
-    }
-  };
+  finish_report(report, writer, None)
+}
 
-  ExecutionReport {
-    run_id,
-    moves_completed,
-    moves_failed,
-    deletions_staged,
-    bytes_staged,
-    journal_path,
-    journal_error,
+/// Write the finished journal into the report, keeping the first
+/// journal error if one already happened.
+fn finish_report(
+  mut report: ExecutionReport,
+  writer: JournalWriter,
+  error: Option<anyhow::Error>,
+) -> ExecutionReport {
+  match writer.finish() {
+    Ok(path) => report.journal_path = path,
+    Err(e) => {
+      tracing::error!(error = %e, "Failed to write run journal");
+      report.journal_error = Some(format!("{e:#}"));
+    }
   }
+  if let Some(e) = error {
+    tracing::error!(error = %e, "Run journal stopped writing");
+    report.journal_error = Some(format!("{e:#}"));
+  }
+  report
 }
 
 fn validate_move_target(
@@ -227,6 +264,16 @@ fn copy_verify_remove(from: &Path, to: &Path) -> Result<()> {
     let _ = std::fs::remove_file(to);
     anyhow::bail!("copy verification failed (content mismatch)");
   }
+  // fs::copy keeps permissions but not the modified time, and dates
+  // are what people sort and search their files by.
+  if let Ok(mtime) =
+    std::fs::metadata(from).and_then(|m| m.modified())
+  {
+    let _ = std::fs::File::options()
+      .write(true)
+      .open(to)
+      .and_then(|f| f.set_modified(mtime));
+  }
   std::fs::remove_file(from).context("failed to remove source")?;
   Ok(())
 }
@@ -239,6 +286,10 @@ pub struct UndoReport {
   /// (wanted, actually restored to). The file is back and nothing was
   /// destroyed, but it does not have its old name.
   pub renamed: Vec<(PathBuf, PathBuf)>,
+  /// Organized destinations whose file was moved back. Their ledger
+  /// entries must go, or the next run would see the restored file at
+  /// its old path and skip it as already organized.
+  pub unfiled: Vec<PathBuf>,
 }
 
 /// Reverse a journaled run: moves go back where they came from and
@@ -256,34 +307,47 @@ pub fn undo_run(
       .next()
       .context("Nothing to undo: no journaled runs found")?,
   };
-  let run_journal = journal::load(&paths.journal_dir, &run_id)?;
+  let mut run_journal = journal::load(&paths.journal_dir, &run_id)?;
 
   let mut restored = Vec::new();
   let mut failed = Vec::new();
   let mut renamed = Vec::new();
+  let mut unfiled = Vec::new();
 
   // Reverse moves last-first so nested collisions unwind cleanly.
-  for mv in run_journal.moves.iter().rev() {
-    restore(
+  let moves = std::mem::take(&mut run_journal.moves);
+  for mv in moves.into_iter().rev() {
+    if restore(
       &mv.to,
       &mv.from,
       &mut restored,
       &mut failed,
       &mut renamed,
-    );
+    ) {
+      unfiled.push(mv.to);
+    } else {
+      run_journal.moves.insert(0, mv);
+    }
   }
-  for del in &run_journal.deletions {
-    restore(
+  let deletions = std::mem::take(&mut run_journal.deletions);
+  for del in deletions {
+    if !restore(
       &del.trashed_to,
       &del.original,
       &mut restored,
       &mut failed,
       &mut renamed,
-    );
+    ) {
+      run_journal.deletions.push(del);
+    }
   }
 
+  // Keep only what is still out of place, so a retry once the cause
+  // is fixed finishes the undo instead of redoing the restored files.
   if failed.is_empty() {
     journal::mark_undone(&paths.journal_dir, &run_id)?;
+  } else {
+    run_journal.save(&paths.journal_dir)?;
   }
 
   Ok(UndoReport {
@@ -291,6 +355,7 @@ pub fn undo_run(
     restored,
     failed,
     renamed,
+    unfiled,
   })
 }
 
@@ -309,7 +374,7 @@ fn restore(
   restored: &mut Vec<PathBuf>,
   failed: &mut Vec<(PathBuf, String)>,
   renamed: &mut Vec<(PathBuf, PathBuf)>,
-) {
+) -> bool {
   let dest = unique_dest(wanted);
   match move_file(from, &dest) {
     Ok(()) => {
@@ -317,13 +382,19 @@ fn restore(
         renamed.push((wanted.to_path_buf(), dest.clone()));
       }
       restored.push(dest);
+      true
     }
-    Err(e) => failed.push((wanted.to_path_buf(), e.to_string())),
+    Err(e) => {
+      failed.push((wanted.to_path_buf(), e.to_string()));
+      false
+    }
   }
 }
 
 /// Legacy undo for logs written by pre-journal versions (`--undo-log`).
-pub fn undo(undo_log_path: &Path) -> Result<Vec<PathBuf>> {
+/// Restores like [`undo_run`]: never over another file, and one
+/// failure does not stop the rest.
+pub fn undo(undo_log_path: &Path) -> Result<UndoReport> {
   let content =
     std::fs::read_to_string(undo_log_path).with_context(|| {
       format!("Failed to read undo log: {}", undo_log_path.display())
@@ -331,21 +402,25 @@ pub fn undo(undo_log_path: &Path) -> Result<Vec<PathBuf>> {
   let log: UndoLog = serde_json::from_str(&content)
     .context("Failed to parse undo log")?;
 
-  let mut restored = Vec::new();
-  for entry in &log.moves {
-    move_file(&entry.moved_to, &entry.original).with_context(
-      || {
-        format!(
-          "Failed to undo move: {} -> {}",
-          entry.moved_to.display(),
-          entry.original.display()
-        )
-      },
-    )?;
-    restored.push(entry.original.clone());
+  let mut report = UndoReport {
+    run_id: undo_log_path.display().to_string(),
+    restored: Vec::new(),
+    failed: Vec::new(),
+    renamed: Vec::new(),
+    unfiled: Vec::new(),
+  };
+  for entry in log.moves.iter().rev() {
+    if restore(
+      &entry.moved_to,
+      &entry.original,
+      &mut report.restored,
+      &mut report.failed,
+      &mut report.renamed,
+    ) {
+      report.unfiled.push(entry.moved_to.clone());
+    }
   }
-
-  Ok(restored)
+  Ok(report)
 }
 
 #[cfg(test)]
@@ -490,6 +565,33 @@ mod tests {
     assert_eq!(loaded.moves[0].to, dest.path().join("a.jpg"));
   }
 
+  /// A run that cannot be journaled could not be undone, so it must
+  /// not move anything.
+  #[test]
+  fn nothing_moves_when_the_journal_cannot_be_written() {
+    let src = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    let blocked = src.path().join("not-a-dir");
+    fs::write(&blocked, "a file where the journal dir should be")
+      .unwrap();
+    let paths = ExecutorPaths {
+      journal_dir: blocked,
+      trash_dir: src.path().join("trash"),
+    };
+    let plan = ApprovedPlan {
+      moves: vec![make_test_move(src.path(), dest.path(), "a.jpg")],
+      deletions: vec![],
+      skipped_files: vec![],
+    };
+
+    let report = execute_plan(&plan, &paths, dest.path());
+
+    assert!(report.moves_completed.is_empty());
+    assert_eq!(report.moves_failed.len(), 1);
+    assert!(report.journal_error.is_some());
+    assert!(src.path().join("a.jpg").exists());
+  }
+
   #[test]
   fn empty_plan_writes_no_journal() {
     let dir = TempDir::new().unwrap();
@@ -531,6 +633,7 @@ mod tests {
     assert!(undo.failed.is_empty());
     assert!(src.path().join("restore.jpg").exists());
     assert!(!dest.path().join("restore.jpg").exists());
+    assert_eq!(undo.unfiled, vec![dest.path().join("restore.jpg")]);
     // Undone run no longer shows up as undoable.
     assert!(journal::list_runs(&paths.journal_dir).is_empty());
   }
@@ -649,10 +752,61 @@ mod tests {
     };
     execute_plan(&plan, &paths, dir.path());
 
-    let report = trash::purge(&paths.trash_dir, None).unwrap();
+    let report = trash::purge(&paths, None).unwrap();
 
     assert_eq!(report.runs_purged, 1);
     assert_eq!(report.bytes_freed, 128);
+  }
+
+  #[test]
+  fn copying_across_drives_keeps_the_modified_time() {
+    let dir = TempDir::new().unwrap();
+    let from = dir.path().join("old.jpg");
+    let to = dir.path().join("copy.jpg");
+    fs::write(&from, "x").unwrap();
+    let then = std::time::SystemTime::UNIX_EPOCH
+      + std::time::Duration::from_secs(1_000_000_000);
+    fs::File::options()
+      .write(true)
+      .open(&from)
+      .unwrap()
+      .set_modified(then)
+      .unwrap();
+
+    copy_verify_remove(&from, &to).unwrap();
+
+    assert!(!from.exists());
+    assert_eq!(fs::metadata(&to).unwrap().modified().unwrap(), then);
+  }
+
+  #[test]
+  fn a_failed_undo_can_be_retried() {
+    let src = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    let paths = paths(&src);
+    let plan = ApprovedPlan {
+      moves: vec![
+        make_test_move(src.path(), dest.path(), "a.jpg"),
+        make_test_move(src.path(), dest.path(), "b.jpg"),
+      ],
+      deletions: vec![],
+      skipped_files: vec![],
+    };
+    execute_plan(&plan, &paths, dest.path());
+    // b.jpg goes missing from the organized folder for a while.
+    let held = src.path().join("held.jpg");
+    fs::rename(dest.path().join("b.jpg"), &held).unwrap();
+
+    let first = undo_run(&paths, None).unwrap();
+    assert_eq!(first.restored, vec![src.path().join("a.jpg")]);
+    assert_eq!(first.failed.len(), 1);
+
+    fs::rename(&held, dest.path().join("b.jpg")).unwrap();
+    let second = undo_run(&paths, None).unwrap();
+
+    assert_eq!(second.restored, vec![src.path().join("b.jpg")]);
+    assert!(second.failed.is_empty());
+    assert!(journal::list_runs(&paths.journal_dir).is_empty());
   }
 
   #[test]
@@ -668,7 +822,7 @@ mod tests {
       skipped_files: vec![],
     };
     let report = execute_plan(&plan, &paths, dir.path());
-    trash::purge(&paths.trash_dir, None).unwrap();
+    trash::purge(&paths, None).unwrap();
 
     let undo = undo_run(&paths, Some(&report.run_id)).unwrap();
 
@@ -742,11 +896,48 @@ mod tests {
     fs::write(&log_path, serde_json::to_string(&log).unwrap())
       .unwrap();
 
-    let restored = undo(&log_path).unwrap();
+    let report = undo(&log_path).unwrap();
 
-    assert_eq!(restored.len(), 1);
+    assert_eq!(report.restored.len(), 1);
+    assert_eq!(report.unfiled, vec![moved.clone()]);
     assert!(src.path().join("a.jpg").exists());
     assert!(!moved.exists());
+  }
+
+  #[test]
+  fn legacy_undo_keeps_going_and_never_overwrites() {
+    let src = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    let moved = dest.path().join("a.jpg");
+    fs::write(&moved, "old").unwrap();
+    // Something new took the original name since the run.
+    fs::write(src.path().join("a.jpg"), "new").unwrap();
+
+    let log = UndoLog {
+      moves: vec![
+        UndoEntry {
+          original: src.path().join("gone.jpg"),
+          moved_to: dest.path().join("gone.jpg"),
+        },
+        UndoEntry {
+          original: src.path().join("a.jpg"),
+          moved_to: moved.clone(),
+        },
+      ],
+      timestamp: "t".to_string(),
+    };
+    let log_path = dest.path().join("undo.json");
+    fs::write(&log_path, serde_json::to_string(&log).unwrap())
+      .unwrap();
+
+    let report = undo(&log_path).unwrap();
+
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.renamed.len(), 1);
+    let new = fs::read_to_string(src.path().join("a.jpg")).unwrap();
+    assert_eq!(new, "new");
+    let restored = fs::read_to_string(&report.renamed[0].1).unwrap();
+    assert_eq!(restored, "old");
   }
 
   #[test]

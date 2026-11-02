@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
 
 use crate::ai::{AiProvider, DescribeContext};
 use crate::model::{
@@ -25,6 +24,8 @@ pub struct AnalyzeOptions {
   /// Extract video keyframes with ffmpeg. Callers set this from
   /// `video::ffmpeg_available()`; tests turn it off.
   pub use_ffmpeg: bool,
+  /// Stop describing once the provider reports this much spend (USD).
+  pub max_cost: Option<f64>,
 }
 
 impl Default for AnalyzeOptions {
@@ -37,6 +38,7 @@ impl Default for AnalyzeOptions {
       max_archive_files: 20,
       max_archive_file_size_mb: 50,
       use_ffmpeg: false,
+      max_cost: None,
     }
   }
 }
@@ -532,6 +534,7 @@ async fn extract_and_analyze_archive(
     max_archive_files: 0,
     max_archive_file_size_mb: 0,
     use_ffmpeg: options.use_ffmpeg,
+    max_cost: options.max_cost,
   };
 
   let mut results = Vec::new();
@@ -639,10 +642,7 @@ fn extract_zip(
   }
 
   let scanned = scan_directory(dest).unwrap_or_default();
-  Ok(
-    crate::fingerprint::fingerprint_files(scanned)
-      .unwrap_or_default(),
-  )
+  Ok(crate::fingerprint::fingerprint_files(scanned))
 }
 
 /// `.tar.gz` and `.tgz` hold a tarball; any other `.gz` is one file.
@@ -749,10 +749,7 @@ fn extract_tar(
   }
 
   let scanned = scan_directory(dest).unwrap_or_default();
-  Ok(
-    crate::fingerprint::fingerprint_files(scanned)
-      .unwrap_or_default(),
-  )
+  Ok(crate::fingerprint::fingerprint_files(scanned))
 }
 
 /// A lone `.gz` file: decompress to the name without the suffix so the
@@ -793,10 +790,7 @@ fn extract_gz_single(
   })?;
 
   let scanned = scan_directory(dest).unwrap_or_default();
-  Ok(
-    crate::fingerprint::fingerprint_files(scanned)
-      .unwrap_or_default(),
-  )
+  Ok(crate::fingerprint::fingerprint_files(scanned))
 }
 
 /// Max bytes of extracted text sent to the API per document
@@ -1304,7 +1298,51 @@ fn unanalyzed_video(
   }
 }
 
+/// Describe `files`, one result per file in order. Exact copies are
+/// described once and share the result, as they share a cache entry:
+/// running them concurrently would miss the cache and pay twice.
 pub async fn analyze_batch(
+  provider: &impl AiProvider,
+  files: &[FingerprintedFile],
+  options: &AnalyzeOptions,
+) -> Vec<Result<ContentDescription>> {
+  let mut first_of = std::collections::HashMap::new();
+  // The files to describe: the first file of each hash.
+  let mut unique = Vec::new();
+  let slots: Vec<usize> = files
+    .iter()
+    .map(|f| {
+      *first_of.entry(f.blake3_hash).or_insert_with(|| {
+        unique.push(f.clone());
+        unique.len() - 1
+      })
+    })
+    .collect();
+  let results = analyze_unique(provider, &unique, options).await;
+  if unique.len() == files.len() {
+    return results;
+  }
+
+  // Copies get clones; each first file keeps the original result, so
+  // its error keeps its type.
+  let mut out: Vec<Option<Result<ContentDescription>>> = slots
+    .iter()
+    .map(|&u| match &results[u] {
+      Ok(desc) => Some(Ok(desc.clone())),
+      Err(err) => Some(Err(anyhow::anyhow!("{err:#}"))),
+    })
+    .collect();
+  let mut seen = vec![false; unique.len()];
+  let firsts: Vec<usize> = (0..files.len())
+    .filter(|&i| !std::mem::replace(&mut seen[slots[i]], true))
+    .collect();
+  for (i, result) in firsts.into_iter().zip(results) {
+    out[i] = Some(result);
+  }
+  out.into_iter().flatten().collect()
+}
+
+async fn analyze_unique(
   provider: &impl AiProvider,
   files: &[FingerprintedFile],
   options: &AnalyzeOptions,
@@ -1315,19 +1353,19 @@ pub async fn analyze_batch(
 
   use futures::stream::{self, StreamExt};
 
-  let semaphore =
-    std::sync::Arc::new(Semaphore::new(options.max_concurrent));
-
+  // `buffered` runs at most `max_concurrent` of these at once.
   stream::iter(files)
-    .map(|file| {
-      let sem = semaphore.clone();
-      async move {
-        let _permit = sem
-          .acquire()
-          .await
-          .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
-        analyze_file(provider, file, options).await
+    .map(|file| async move {
+      if let Some(limit) = options.max_cost {
+        let (spent, ..) =
+          crate::cost::spend_summary(&provider.usage());
+        if spent >= limit {
+          anyhow::bail!(
+            "not described: --max-cost ${limit:.2} reached"
+          );
+        }
       }
+      analyze_file(provider, file, options).await
     })
     .buffered(options.max_concurrent)
     .collect()
@@ -1788,6 +1826,47 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn analysis_stops_at_the_cost_limit() {
+    struct SpentProvider;
+    impl AiProvider for SpentProvider {
+      async fn describe_image(
+        &self,
+        _: &[u8],
+        _: &str,
+        _: &DescribeContext,
+      ) -> Result<ContentDescription> {
+        panic!("over the limit; nothing should be described");
+      }
+      async fn propose_groups(
+        &self,
+        _: &[crate::model::FileSummary],
+      ) -> Result<Vec<crate::model::ProposedGroup>> {
+        panic!("unused");
+      }
+      fn usage(&self) -> Vec<(String, crate::ai::Usage)> {
+        let usage = crate::ai::Usage {
+          output_tokens: 1_000_000,
+          ..Default::default()
+        };
+        vec![("claude-opus-4-8".to_string(), usage)]
+      }
+    }
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let file = make_test_file(file_dir.path(), "a.jpg", b"raw");
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      max_cost: Some(1.0),
+      ..Default::default()
+    };
+
+    let results = analyze_batch(&SpentProvider, &[file], &opts).await;
+
+    let err = results[0].as_ref().unwrap_err().to_string();
+    assert!(err.contains("--max-cost"), "{err}");
+  }
+
+  #[tokio::test]
   async fn analyze_file_calls_provider_on_cache_miss() {
     let cache_dir = TempDir::new().unwrap();
     let file_dir = TempDir::new().unwrap();
@@ -1965,6 +2044,31 @@ mod tests {
     ) -> Result<Vec<crate::model::ProposedGroup>> {
       Ok(vec![])
     }
+  }
+
+  #[tokio::test]
+  async fn exact_copies_are_described_once() {
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let files = vec![
+      make_test_file(file_dir.path(), "a.jpg", b"same"),
+      make_test_file(file_dir.path(), "other.jpg", b"other"),
+      make_test_file(file_dir.path(), "a copy.jpg", b"same"),
+    ];
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      max_concurrent: 3,
+      ..Default::default()
+    };
+    let provider = RecordingProvider {
+      calls: Default::default(),
+    };
+
+    let results = analyze_batch(&provider, &files, &opts).await;
+
+    assert_eq!(provider.calls.lock().unwrap().len(), 2);
+    assert_eq!(results.len(), 3);
+    assert!(results.iter().all(|r| r.is_ok()));
   }
 
   #[tokio::test]

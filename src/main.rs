@@ -111,18 +111,14 @@ async fn main() -> Result<()> {
     return run_undo(&cli);
   }
 
-  if cli.dupes_only {
+  // Without the model there is nothing to group by, only duplicates
+  // to find; filing every file into one folder is not organizing.
+  if cli.dupes_only || cli.no_ai {
     return run_dupes_only(&cli, &config);
   }
 
-  // The API key is only needed when the AI pipeline will actually run.
-  let api_key = if cli.no_ai {
-    String::new()
-  } else {
-    config.api_key()?.to_string()
-  };
   let mut provider = ClaudeProvider::new(
-    api_key,
+    config.api_key()?.to_string(),
     config.ai.model.clone(),
     config.ai.max_retries,
   )
@@ -138,7 +134,7 @@ async fn main() -> Result<()> {
   let pipeline_config = PipelineConfig {
     target_dirs: config.general.target_dirs.clone(),
     output_dir: config.general.output_dir.clone(),
-    no_ai: cli.no_ai,
+    no_ai: false,
     max_files: config.ai.max_files_to_analyze,
     max_file_size_mb: config.ai.skip_files_larger_than_mb,
     max_cost: cli.max_cost,
@@ -452,22 +448,14 @@ fn print_organized_duplicates(result: &pipeline::PipelineResult) {
 fn run_undo(cli: &CliArgs) -> Result<()> {
   // Legacy escape hatch: an explicit --undo-log path uses the old
   // single-shot undo log format.
-  if let Some(undo_path) = &cli.undo_log {
-    println!("Undoing from legacy log: {}", undo_path.display());
-    let restored = spindle::executor::undo(undo_path)?;
-    println!(
-      "Restored {} files to their original locations.",
-      restored.len()
-    );
-    for path in &restored {
-      println!("  ← {}", path.display());
-    }
-    return Ok(());
-  }
-
-  let paths = ExecutorPaths::default_paths();
-  let report =
-    spindle::executor::undo_run(&paths, cli.undo_run.as_deref())?;
+  let report = match &cli.undo_log {
+    Some(undo_path) => spindle::executor::undo(undo_path)?,
+    None => spindle::executor::undo_run(
+      &ExecutorPaths::default_paths(),
+      cli.undo_run.as_deref(),
+    )?,
+  };
+  forget_unfiled(cli, &report.unfiled);
 
   println!(
     "Undid run {}: {} restored, {} failed.",
@@ -497,10 +485,34 @@ fn run_undo(cli: &CliArgs) -> Result<()> {
   }
   if !report.failed.is_empty() {
     anyhow::bail!(
-      "Some files could not be restored; the run journal was kept."
+      "Some files could not be restored. Fix the cause and undo \
+       again to put back the rest."
     );
   }
   Ok(())
+}
+
+/// Take files an undo moved back out of the ledger, so the next run
+/// treats them as new instead of skipping them as already organized.
+/// A ledger write failure is logged, never fatal: the files are back.
+fn forget_unfiled(cli: &CliArgs, unfiled: &[std::path::PathBuf]) {
+  let Some(path) = spindle::config::resolve_ledger_path(cli) else {
+    return;
+  };
+  if unfiled.is_empty() || !path.exists() {
+    return;
+  }
+  let mut ledger = Ledger::load(&path);
+  if ledger.forget(unfiled) == 0 {
+    return;
+  }
+  if let Err(err) = ledger.save(&path) {
+    tracing::warn!(
+      path = %path.display(),
+      error = %err,
+      "Failed to update the ledger after undo"
+    );
+  }
 }
 
 fn run_list_undo() -> Result<()> {
@@ -532,7 +544,7 @@ fn run_list_undo() -> Result<()> {
 
 fn run_purge(older_than_days: Option<u64>) -> Result<()> {
   let paths = ExecutorPaths::default_paths();
-  let report = trash::purge(&paths.trash_dir, older_than_days)?;
+  let report = trash::purge(&paths, older_than_days)?;
   println!(
     "Purged {} run(s) from trash, {} reclaimed.",
     report.runs_purged,
@@ -600,7 +612,7 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
   );
 
   print!("  Fingerprinting...  ");
-  let mut fingerprinted = fingerprint_files(scanned)?;
+  let mut fingerprinted = fingerprint_files(scanned);
 
   // Skip files a previous run already organized.
   if let Some(ledger_path) = spindle::config::resolve_ledger_path(cli)

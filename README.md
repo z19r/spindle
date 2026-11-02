@@ -49,6 +49,9 @@ spindle --type photo,video /path/to/folder
 spindle --max-cost 1.00 /path/to/folder
 ```
 
+A folder holding a file named `.spindle-ignore` is skipped, with
+everything inside it.
+
 ## Undoing a run
 
 Every executed run is journalled, and nothing is deleted outright:
@@ -69,8 +72,8 @@ spindle --undo-run <RUN_ID>
 
 Undo moves files back where they came from and restores deletions out
 of the staged trash. If some files cannot be restored — you moved one
-yourself since the run, say — spindle reports them and keeps the
-journal, so you can clear the obstruction and undo again.
+yourself since the run, say — spindle reports them and keeps them in
+the journal, so you can clear the obstruction and undo again.
 
 Undo never overwrites. If something else has taken an original path
 since the run — a re-download with the same name, say — the restored
@@ -102,8 +105,8 @@ spindle --purge --older-than 7
 | `--max-cost <USD>` | Stop before spending more than this on analysis. |
 | `--max-files <N>` | Cap how many files go to the model. |
 | `--batch` | Use the Batch API: half the price, minutes to hours. |
-| `--dupes-only` | Exact duplicates only — no AI, no grouping, no review screen. |
-| `--no-ai` | Skip analysis entirely; hash-based dedup only. |
+| `--dupes-only` | Duplicates only, no AI or grouping. Review the copies. |
+| `--no-ai` | Same as `--dupes-only`. |
 | `--include-trash` | Scan trash and recycle-bin folders too. |
 | `-c, --config <PATH>` | Config file to use instead of the default. |
 | `-v, --verbose` | Repeatable: `-v`, `-vv`, `-vvv`. |

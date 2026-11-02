@@ -5,7 +5,7 @@
 //! be compared against that history — flagged as exact duplicates of
 //! organized content, or sorted into an existing group folder.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -46,8 +46,14 @@ pub struct OrganizedDuplicate {
 pub struct Ledger {
   #[serde(default = "default_version")]
   pub version: u32,
+  /// Changed only through `record` and `forget`, which keep
+  /// `by_hash` in step.
   #[serde(default)]
-  pub entries: Vec<LedgerEntry>,
+  entries: Vec<LedgerEntry>,
+  /// Entry indices by content hash, so per-file lookups do not scan
+  /// every file ever organized.
+  #[serde(skip)]
+  by_hash: HashMap<String, Vec<usize>>,
 }
 
 fn default_version() -> u32 {
@@ -59,6 +65,7 @@ impl Default for Ledger {
     Self {
       version: LEDGER_VERSION,
       entries: Vec::new(),
+      by_hash: HashMap::new(),
     }
   }
 }
@@ -74,29 +81,35 @@ pub fn default_ledger_path() -> PathBuf {
 }
 
 impl Ledger {
-  /// Load the ledger from disk. A missing or corrupt file yields an empty
-  /// ledger rather than an error — a broken ledger must never block a run.
+  /// Load the ledger from disk. A missing or corrupt file yields an
+  /// empty ledger rather than an error — a broken ledger must never
+  /// block a run. A corrupt one is kept as `.corrupt`.
   pub fn load(path: &Path) -> Self {
     let Ok(content) = std::fs::read_to_string(path) else {
       return Self::default();
     };
     match serde_json::from_str::<Self>(&content) {
-      Ok(ledger) if ledger.version == LEDGER_VERSION => ledger,
+      Ok(mut ledger) if ledger.version == LEDGER_VERSION => {
+        ledger.reindex();
+        ledger
+      }
       Ok(ledger) => {
         tracing::warn!(
           path = %path.display(),
           found = ledger.version,
           expected = LEDGER_VERSION,
-          "Ledger version mismatch; starting fresh"
+          "Ledger version mismatch; setting it aside"
         );
+        crate::config::set_aside(path);
         Self::default()
       }
       Err(err) => {
         tracing::warn!(
           path = %path.display(),
           error = %err,
-          "Ignoring corrupt ledger; starting fresh"
+          "Corrupt ledger; setting it aside"
         );
+        crate::config::set_aside(path);
         Self::default()
       }
     }
@@ -111,24 +124,66 @@ impl Ledger {
     }
     let json = serde_json::to_string_pretty(self)
       .context("Failed to serialize ledger")?;
-    std::fs::write(path, json).with_context(|| {
-      format!("Failed to write ledger: {}", path.display())
-    })
+    crate::config::write_atomic(path, json.as_bytes()).with_context(
+      || format!("Failed to write ledger: {}", path.display()),
+    )
+  }
+
+  fn reindex(&mut self) {
+    self.by_hash.clear();
+    for (i, entry) in self.entries.iter().enumerate() {
+      self
+        .by_hash
+        .entry(entry.blake3_hex.clone())
+        .or_default()
+        .push(i);
+    }
+  }
+
+  fn with_hash<'a>(
+    &'a self,
+    blake3_hex: &str,
+  ) -> impl Iterator<Item = &'a LedgerEntry> + 'a {
+    self
+      .by_hash
+      .get(blake3_hex)
+      .into_iter()
+      .flatten()
+      .map(|&i| &self.entries[i])
   }
 
   /// Append an organized-file record.
   pub fn record(&mut self, entry: LedgerEntry) {
+    self
+      .by_hash
+      .entry(entry.blake3_hex.clone())
+      .or_default()
+      .push(self.entries.len());
     self.entries.push(entry);
+  }
+
+  /// Drop the records of files that were filed at any of `dests`, so
+  /// files an undo moved back count as new again. Returns how many
+  /// records went.
+  pub fn forget(&mut self, dests: &[PathBuf]) -> usize {
+    let dests: std::collections::HashSet<&PathBuf> =
+      dests.iter().collect();
+    let before = self.entries.len();
+    self.entries.retain(|e| !dests.contains(&e.dest_path));
+    let gone = before - self.entries.len();
+    if gone > 0 {
+      self.reindex();
+    }
+    gone
   }
 
   /// Has this exact file (matching content hash at this exact path) already
   /// been organized? Matches either the source or the destination path so a
   /// re-scan of either location recognizes the file.
   pub fn is_organized(&self, path: &Path, blake3_hex: &str) -> bool {
-    self.entries.iter().any(|e| {
-      e.blake3_hex == blake3_hex
-        && (e.dest_path == path || e.source_path == path)
-    })
+    self
+      .with_hash(blake3_hex)
+      .any(|e| e.dest_path == path || e.source_path == path)
   }
 
   /// If a *new* file (different path) is byte-identical to organized
@@ -137,7 +192,7 @@ impl Ledger {
     &self,
     blake3_hex: &str,
   ) -> Option<&LedgerEntry> {
-    self.entries.iter().find(|e| e.blake3_hex == blake3_hex)
+    self.with_hash(blake3_hex).next()
   }
 
   /// Content hashes of files in each existing group, keyed by label.
@@ -211,6 +266,37 @@ mod tests {
   }
 
   #[test]
+  fn lookups_still_work_after_save_load_and_forget() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("ledger.json");
+    let mut ledger = Ledger::default();
+    ledger.record(entry("/dl/a.jpg", "/out/p/a.jpg", "h1", "P"));
+    ledger.record(entry("/dl/b.jpg", "/out/p/b.jpg", "h2", "P"));
+    ledger.save(&path).unwrap();
+
+    let mut ledger = Ledger::load(&path);
+    assert!(ledger.is_organized(Path::new("/out/p/b.jpg"), "h2"));
+    ledger.forget(&[PathBuf::from("/out/p/a.jpg")]);
+
+    assert!(ledger.duplicate_of("h1").is_none());
+    let b = ledger.duplicate_of("h2").unwrap();
+    assert_eq!(b.dest_path, PathBuf::from("/out/p/b.jpg"));
+  }
+
+  #[test]
+  fn forget_drops_only_the_given_destinations() {
+    let mut ledger = Ledger::default();
+    ledger.record(entry("/dl/a.jpg", "/out/p/a.jpg", "h1", "P"));
+    ledger.record(entry("/dl/b.jpg", "/out/p/b.jpg", "h2", "P"));
+
+    let gone = ledger.forget(&[PathBuf::from("/out/p/a.jpg")]);
+
+    assert_eq!(gone, 1);
+    assert!(!ledger.is_organized(Path::new("/dl/a.jpg"), "h1"));
+    assert!(ledger.is_organized(Path::new("/dl/b.jpg"), "h2"));
+  }
+
+  #[test]
   fn load_returns_empty_when_file_missing() {
     let dir = TempDir::new().unwrap();
     let ledger = Ledger::load(&dir.path().join("nope.json"));
@@ -228,6 +314,13 @@ mod tests {
     let ledger = Ledger::load(&path);
 
     assert!(ledger.entries.is_empty());
+    // The unreadable file is kept, not overwritten by the next save.
+    let aside = dir.path().join("ledger.json.corrupt");
+    assert_eq!(
+      std::fs::read_to_string(aside).unwrap(),
+      "{ not valid json"
+    );
+    assert!(!path.exists());
   }
 
   #[test]

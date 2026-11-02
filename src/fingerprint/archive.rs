@@ -171,7 +171,7 @@ mod tests {
   }
 
   fn fingerprint_dir(dir: &Path) -> Vec<FingerprintedFile> {
-    fingerprint_files(scan_directory(dir).unwrap()).unwrap()
+    fingerprint_files(scan_directory(dir).unwrap())
   }
 
   #[test]

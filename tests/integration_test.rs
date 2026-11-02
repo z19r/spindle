@@ -14,7 +14,9 @@ use spindle::fingerprint::{
 use spindle::group::build_groups;
 use spindle::model::*;
 use spindle::plan::propose_plan;
-use spindle::scanner::{scan_directories, scan_directory};
+use spindle::scanner::{
+  scan_directories_filtered, scan_directory, ScanOptions,
+};
 
 fn create_test_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
   use image::{ImageBuffer, RgbaImage};
@@ -48,7 +50,7 @@ fn scan_then_fingerprint_pipeline() {
   let scanned = scan_directory(dir.path()).unwrap();
   assert_eq!(scanned.len(), 5);
 
-  let fingerprinted = fingerprint_files(scanned).unwrap();
+  let fingerprinted = fingerprint_files(scanned);
   assert_eq!(fingerprinted.len(), 5);
 
   for f in &fingerprinted {
@@ -71,11 +73,14 @@ fn scan_multiple_dirs_then_dedup() {
   fs::write(dir2.path().join("b.png"), &png).unwrap();
   fs::write(dir2.path().join("c.jpg"), b"different").unwrap();
 
-  let scanned =
-    scan_directories(&[dir1.path(), dir2.path()]).unwrap();
+  let scanned = scan_directories_filtered(
+    &[dir1.path(), dir2.path()],
+    &ScanOptions::default(),
+  )
+  .unwrap();
   assert_eq!(scanned.len(), 3);
 
-  let fingerprinted = fingerprint_files(scanned).unwrap();
+  let fingerprinted = fingerprint_files(scanned);
   let exact_dupes = find_exact_duplicates(&fingerprinted);
 
   assert_eq!(exact_dupes.len(), 1);
@@ -98,7 +103,7 @@ fn near_duplicate_detection_in_pipeline() {
   fs::write(dir.path().join("different.png"), &img3).unwrap();
 
   let scanned = scan_directory(dir.path()).unwrap();
-  let fingerprinted = fingerprint_files(scanned).unwrap();
+  let fingerprinted = fingerprint_files(scanned);
   let near_dupes = find_near_duplicates(&fingerprinted, 8);
 
   assert!(near_dupes.len() <= 1);
@@ -120,7 +125,7 @@ fn group_and_plan_from_proposals() {
   populate_test_dir(dir.path());
 
   let scanned = scan_directory(dir.path()).unwrap();
-  let fingerprinted = fingerprint_files(scanned).unwrap();
+  let fingerprinted = fingerprint_files(scanned);
   let dupes = find_exact_duplicates(&fingerprinted);
 
   let proposed = vec![
@@ -369,7 +374,7 @@ async fn full_pipeline_end_to_end() {
   let scanned = scan_directory(source_dir.path()).unwrap();
   assert_eq!(scanned.len(), 4);
 
-  let fingerprinted = fingerprint_files(scanned).unwrap();
+  let fingerprinted = fingerprint_files(scanned);
   assert_eq!(fingerprinted.len(), 4);
 
   let dupes = find_exact_duplicates(&fingerprinted);
@@ -441,7 +446,7 @@ fn empty_directory_produces_empty_plan() {
   let scanned = scan_directory(dir.path()).unwrap();
   assert!(scanned.is_empty());
 
-  let fingerprinted = fingerprint_files(scanned).unwrap();
+  let fingerprinted = fingerprint_files(scanned);
   assert!(fingerprinted.is_empty());
 
   let groups = build_groups(&[], dir.path());
@@ -461,7 +466,7 @@ fn deterministic_canonical_selection() {
   }
 
   let scanned = scan_directory(dir.path()).unwrap();
-  let fingerprinted = fingerprint_files(scanned).unwrap();
+  let fingerprinted = fingerprint_files(scanned);
   let dupes = find_exact_duplicates(&fingerprinted);
 
   assert_eq!(dupes.len(), 1);
