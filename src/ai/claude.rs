@@ -614,6 +614,51 @@ impl ClaudeProvider {
 
   /// Submit describe requests as a message batch, poll until it
   /// ends, and collect per-item results in submission order.
+  /// GET a batch endpoint, retrying dropped connections and
+  /// retryable statuses. A batch can run for hours; one 502 while
+  /// polling must not throw away the whole batch's work.
+  async fn get_with_retry(
+    &self,
+    url: &str,
+    what: &str,
+  ) -> Result<reqwest::Response> {
+    let mut attempt = 0;
+    loop {
+      let result = self
+        .client
+        .get(url)
+        .header("x-api-key", &self.api_key)
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await;
+      let retryable = match &result {
+        Ok(resp) => is_retryable_status(resp.status()),
+        Err(_) => true,
+      };
+      if retryable && attempt < self.max_retries {
+        attempt += 1;
+        tracing::warn!(
+          attempt,
+          what,
+          "Batch request failed, retrying"
+        );
+        tokio::time::sleep(self.poll_interval * (1 << attempt)).await;
+        continue;
+      }
+      let response = result
+        .with_context(|| format!("{what} could not be sent"))?;
+      if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+          "{what} failed ({status}): {}",
+          preview(&body, 200)
+        );
+      }
+      return Ok(response);
+    }
+  }
+
   async fn run_message_batch(
     &self,
     requests: &[DescribeRequest],
@@ -666,24 +711,8 @@ impl ClaudeProvider {
     while batch.processing_status != "ended" {
       tokio::time::sleep(self.poll_interval).await;
       let response = self
-        .client
-        .get(&status_endpoint)
-        .header("x-api-key", &self.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .send()
-        .await
-        .context("Failed to poll batch status")?;
-
-      if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!(
-          "Batch status poll failed ({}): {}",
-          status,
-          preview(&body, 200)
-        );
-      }
-
+        .get_with_retry(&status_endpoint, "Batch status poll")
+        .await?;
       batch = response
         .json()
         .await
@@ -697,23 +726,8 @@ impl ClaudeProvider {
 
     let results_endpoint = format!("{status_endpoint}/results");
     let response = self
-      .client
-      .get(&results_endpoint)
-      .header("x-api-key", &self.api_key)
-      .header("anthropic-version", "2023-06-01")
-      .send()
-      .await
-      .context("Failed to fetch batch results")?;
-
-    if !response.status().is_success() {
-      let status = response.status();
-      let body = response.text().await.unwrap_or_default();
-      anyhow::bail!(
-        "Batch results fetch failed ({}): {}",
-        status,
-        preview(&body, 200)
-      );
-    }
+      .get_with_retry(&results_endpoint, "Batch results fetch")
+      .await?;
 
     let body = response
       .text()
@@ -2504,6 +2518,61 @@ mod tests {
       provider.describe_batch(batch_test_requests()).await;
 
     assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|r| r.is_ok()));
+  }
+
+  #[tokio::test]
+  async fn batch_polling_survives_a_bad_gateway() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+      .and(path("/v1/messages/batches"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(
+        serde_json::json!({
+          "id": "msgbatch_09",
+          "processing_status": "in_progress",
+        }),
+      ))
+      .mount(&server)
+      .await;
+    Mock::given(method("GET"))
+      .and(path("/v1/messages/batches/msgbatch_09"))
+      .respond_with(ResponseTemplate::new(502))
+      .up_to_n_times(1)
+      .mount(&server)
+      .await;
+    Mock::given(method("GET"))
+      .and(path("/v1/messages/batches/msgbatch_09"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(
+        serde_json::json!({
+          "id": "msgbatch_09",
+          "processing_status": "ended",
+        }),
+      ))
+      .mount(&server)
+      .await;
+    Mock::given(method("GET"))
+      .and(path("/v1/messages/batches/msgbatch_09/results"))
+      .respond_with(ResponseTemplate::new(200).set_body_string(
+        format!(
+          "{}\n{}\n",
+          batch_result_line("req-0", "a photo"),
+          batch_result_line("req-1", "a lease"),
+        ),
+      ))
+      .mount(&server)
+      .await;
+
+    let provider = ClaudeProvider::new(
+      "test-key".to_string(),
+      "claude-opus-4-8".to_string(),
+      2,
+    )
+    .with_base_url(server.uri())
+    .with_poll_interval(std::time::Duration::ZERO);
+
+    let results =
+      provider.describe_batch(batch_test_requests()).await;
+
     assert!(results.iter().all(|r| r.is_ok()));
   }
 
