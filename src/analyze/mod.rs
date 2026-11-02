@@ -1299,7 +1299,51 @@ fn unanalyzed_video(
   }
 }
 
+/// Describe `files`, one result per file in order. Exact copies are
+/// described once and share the result, as they share a cache entry:
+/// running them concurrently would miss the cache and pay twice.
 pub async fn analyze_batch(
+  provider: &impl AiProvider,
+  files: &[FingerprintedFile],
+  options: &AnalyzeOptions,
+) -> Vec<Result<ContentDescription>> {
+  let mut first_of = std::collections::HashMap::new();
+  // The files to describe: the first file of each hash.
+  let mut unique = Vec::new();
+  let slots: Vec<usize> = files
+    .iter()
+    .map(|f| {
+      *first_of.entry(f.blake3_hash).or_insert_with(|| {
+        unique.push(f.clone());
+        unique.len() - 1
+      })
+    })
+    .collect();
+  let results = analyze_unique(provider, &unique, options).await;
+  if unique.len() == files.len() {
+    return results;
+  }
+
+  // Copies get clones; each first file keeps the original result, so
+  // its error keeps its type.
+  let mut out: Vec<Option<Result<ContentDescription>>> = slots
+    .iter()
+    .map(|&u| match &results[u] {
+      Ok(desc) => Some(Ok(desc.clone())),
+      Err(err) => Some(Err(anyhow::anyhow!("{err:#}"))),
+    })
+    .collect();
+  let mut seen = vec![false; unique.len()];
+  let firsts: Vec<usize> = (0..files.len())
+    .filter(|&i| !std::mem::replace(&mut seen[slots[i]], true))
+    .collect();
+  for (i, result) in firsts.into_iter().zip(results) {
+    out[i] = Some(result);
+  }
+  out.into_iter().flatten().collect()
+}
+
+async fn analyze_unique(
   provider: &impl AiProvider,
   files: &[FingerprintedFile],
   options: &AnalyzeOptions,
@@ -2010,6 +2054,31 @@ mod tests {
     ) -> Result<Vec<crate::model::ProposedGroup>> {
       Ok(vec![])
     }
+  }
+
+  #[tokio::test]
+  async fn exact_copies_are_described_once() {
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let files = vec![
+      make_test_file(file_dir.path(), "a.jpg", b"same"),
+      make_test_file(file_dir.path(), "other.jpg", b"other"),
+      make_test_file(file_dir.path(), "a copy.jpg", b"same"),
+    ];
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      max_concurrent: 3,
+      ..Default::default()
+    };
+    let provider = RecordingProvider {
+      calls: Default::default(),
+    };
+
+    let results = analyze_batch(&provider, &files, &opts).await;
+
+    assert_eq!(provider.calls.lock().unwrap().len(), 2);
+    assert_eq!(results.len(), 3);
+    assert!(results.iter().all(|r| r.is_ok()));
   }
 
   #[tokio::test]
