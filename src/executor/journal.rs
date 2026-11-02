@@ -80,9 +80,10 @@ impl RunJournal {
     let path = self.path_in(journal_dir);
     let json = serde_json::to_string_pretty(self)
       .context("Failed to serialize run journal")?;
-    std::fs::write(&path, json).with_context(|| {
-      format!("Failed to write journal: {}", path.display())
-    })?;
+    crate::config::write_atomic(&path, json.as_bytes())
+      .with_context(|| {
+        format!("Failed to write journal: {}", path.display())
+      })?;
     Ok(path)
   }
 }

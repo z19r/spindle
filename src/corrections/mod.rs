@@ -64,11 +64,20 @@ impl Corrections {
     match serde_json::from_str::<Self>(&text) {
       Ok(c) if c.version == CORRECTIONS_VERSION => c,
       Ok(_) => {
-        tracing::warn!(path = %path.display(), "Ignoring corrections with a different version");
+        tracing::warn!(
+          path = %path.display(),
+          "Corrections have a different version; setting them aside"
+        );
+        crate::config::set_aside(path);
         Self::default()
       }
       Err(e) => {
-        tracing::warn!(path = %path.display(), error = %e, "Ignoring unreadable corrections");
+        tracing::warn!(
+          path = %path.display(),
+          error = %e,
+          "Unreadable corrections; setting them aside"
+        );
+        crate::config::set_aside(path);
         Self::default()
       }
     }
@@ -82,9 +91,9 @@ impl Corrections {
     }
     let json = serde_json::to_string_pretty(self)
       .context("Failed to serialize corrections")?;
-    std::fs::write(path, json).with_context(|| {
-      format!("Failed to write corrections: {}", path.display())
-    })
+    crate::config::write_atomic(path, json.as_bytes()).with_context(
+      || format!("Failed to write corrections: {}", path.display()),
+    )
   }
 
   /// Remember that the user relabelled `from` as `to`. A later rename of
@@ -273,6 +282,7 @@ mod tests {
     let corrupt = dir.path().join("bad.json");
     std::fs::write(&corrupt, "{not json").unwrap();
     assert!(Corrections::load(&corrupt).placements.is_empty());
+    assert!(dir.path().join("bad.json.corrupt").exists());
 
     let old = dir.path().join("old.json");
     std::fs::write(

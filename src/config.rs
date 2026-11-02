@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -404,6 +404,36 @@ pub fn cache_dir() -> PathBuf {
   directories::BaseDirs::new()
     .map(|d| d.cache_dir().join("spindle"))
     .unwrap_or_else(|| PathBuf::from(".cache/spindle"))
+}
+
+/// Replace `path` with `bytes` so a crash leaves the old file or the
+/// new one, never half of each: write a sibling, flush it, rename.
+pub fn write_atomic(
+  path: &Path,
+  bytes: &[u8],
+) -> std::io::Result<()> {
+  use std::io::Write;
+  let mut tmp = path.as_os_str().to_owned();
+  tmp.push(".tmp");
+  let tmp = PathBuf::from(tmp);
+  let mut file = std::fs::File::create(&tmp)?;
+  file.write_all(bytes)?;
+  file.sync_all()?;
+  std::fs::rename(&tmp, path)
+}
+
+/// Move a state file that could not be read to `<path>.corrupt`, so
+/// the fresh one saved later does not destroy what was in it.
+pub fn set_aside(path: &Path) {
+  let mut aside = path.as_os_str().to_owned();
+  aside.push(".corrupt");
+  if let Err(err) = std::fs::rename(path, &aside) {
+    tracing::warn!(
+      path = %path.display(),
+      error = %err,
+      "Could not set the unreadable file aside"
+    );
+  }
 }
 
 fn config_path() -> PathBuf {

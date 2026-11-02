@@ -74,8 +74,9 @@ pub fn default_ledger_path() -> PathBuf {
 }
 
 impl Ledger {
-  /// Load the ledger from disk. A missing or corrupt file yields an empty
-  /// ledger rather than an error — a broken ledger must never block a run.
+  /// Load the ledger from disk. A missing or corrupt file yields an
+  /// empty ledger rather than an error — a broken ledger must never
+  /// block a run. A corrupt one is kept as `.corrupt`.
   pub fn load(path: &Path) -> Self {
     let Ok(content) = std::fs::read_to_string(path) else {
       return Self::default();
@@ -87,16 +88,18 @@ impl Ledger {
           path = %path.display(),
           found = ledger.version,
           expected = LEDGER_VERSION,
-          "Ledger version mismatch; starting fresh"
+          "Ledger version mismatch; setting it aside"
         );
+        crate::config::set_aside(path);
         Self::default()
       }
       Err(err) => {
         tracing::warn!(
           path = %path.display(),
           error = %err,
-          "Ignoring corrupt ledger; starting fresh"
+          "Corrupt ledger; setting it aside"
         );
+        crate::config::set_aside(path);
         Self::default()
       }
     }
@@ -111,9 +114,9 @@ impl Ledger {
     }
     let json = serde_json::to_string_pretty(self)
       .context("Failed to serialize ledger")?;
-    std::fs::write(path, json).with_context(|| {
-      format!("Failed to write ledger: {}", path.display())
-    })
+    crate::config::write_atomic(path, json.as_bytes()).with_context(
+      || format!("Failed to write ledger: {}", path.display()),
+    )
   }
 
   /// Append an organized-file record.
@@ -252,6 +255,13 @@ mod tests {
     let ledger = Ledger::load(&path);
 
     assert!(ledger.entries.is_empty());
+    // The unreadable file is kept, not overwritten by the next save.
+    let aside = dir.path().join("ledger.json.corrupt");
+    assert_eq!(
+      std::fs::read_to_string(aside).unwrap(),
+      "{ not valid json"
+    );
+    assert!(!path.exists());
   }
 
   #[test]
