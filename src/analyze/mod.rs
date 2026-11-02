@@ -30,7 +30,7 @@ pub struct AnalyzeOptions {
 impl Default for AnalyzeOptions {
   fn default() -> Self {
     Self {
-      cache_dir: default_cache_dir(),
+      cache_dir: crate::config::cache_dir(),
       max_concurrent: 5,
       use_batch_api: false,
       introspect_archives: true,
@@ -39,12 +39,6 @@ impl Default for AnalyzeOptions {
       use_ffmpeg: false,
     }
   }
-}
-
-fn default_cache_dir() -> PathBuf {
-  directories::BaseDirs::new()
-    .map(|d| d.cache_dir().join("spindle"))
-    .unwrap_or_else(|| PathBuf::from(".cache/spindle"))
 }
 
 /// Bump when the describe prompts change materially — old cached

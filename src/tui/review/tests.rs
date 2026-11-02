@@ -207,7 +207,7 @@ fn merge_picker_navigates_and_esc_cancels() {
   state.file_marked.push(HashSet::new());
 
   state.handle_key(KeyCode::Char('M'));
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert_eq!(state.mode, Mode::MergeInto { cursor: 1 });
   state.handle_key(KeyCode::Esc);
   assert_eq!(state.mode, Mode::Normal);
@@ -331,10 +331,10 @@ fn the_detail_pane_scrolls_when_focused() {
   assert_eq!(state.focus(), Pane::Detail);
   let (group, file) = (state.selected_index(), state.file_selected);
 
-  state.handle_key(KeyCode::Char('j'));
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
+  state.handle_key(KeyCode::Down);
   assert_eq!(state.detail_scroll, 2);
-  state.handle_key(KeyCode::Char('k'));
+  state.handle_key(KeyCode::Up);
   assert_eq!(state.detail_scroll, 1);
   state.handle_key(KeyCode::PageDown);
   assert_eq!(state.detail_scroll, 11);
@@ -379,23 +379,23 @@ fn leaving_the_detail_pane_resets_its_scroll() {
 fn group_nav_j_k() {
   let mut state = make_state();
   assert_eq!(state.selected_index(), 0);
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert_eq!(state.selected_index(), 1);
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert_eq!(state.selected_index(), 0);
 }
 
 #[test]
 fn file_nav_j_k_in_files_pane() {
   let mut state = make_state();
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   state.handle_key(KeyCode::Tab);
   assert_eq!(state.file_selected(), 0);
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert_eq!(state.file_selected(), 1);
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert_eq!(state.file_selected(), 2);
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert_eq!(state.file_selected(), 0);
 }
 
@@ -403,10 +403,10 @@ fn file_nav_j_k_in_files_pane() {
 fn group_change_resets_file_cursor() {
   let mut state = make_state();
   state.handle_key(KeyCode::Tab);
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert_eq!(state.file_selected(), 1);
   state.handle_key(KeyCode::BackTab);
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert_eq!(state.file_selected(), 0);
 }
 
@@ -422,7 +422,7 @@ fn space_toggles_group_from_groups_pane() {
 fn space_toggles_file_keep_from_files_pane() {
   let mut state = make_dupes_state();
   state.handle_key(KeyCode::Tab);
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert!(!state.is_file_kept(0, 1));
   state.handle_key(KeyCode::Char(' '));
   assert!(state.is_file_kept(0, 1));
@@ -442,7 +442,7 @@ fn current_group_moves_returns_correct_slice() {
 fn current_file_move_returns_selected() {
   let mut state = make_state();
   state.handle_key(KeyCode::Tab);
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   let mv = state.current_file_move().unwrap();
   assert_eq!(mv.from, PathBuf::from("/dl/beach2.jpg"));
 }
@@ -451,7 +451,7 @@ fn current_file_move_returns_selected() {
 fn file_nav_wraps_up() {
   let mut state = make_state();
   state.handle_key(KeyCode::Tab);
-  state.handle_key(KeyCode::Char('k'));
+  state.handle_key(KeyCode::Up);
   assert_eq!(state.file_selected(), 1);
 }
 
@@ -482,7 +482,7 @@ fn question_mark_opens_help_any_key_closes() {
   state.handle_key(KeyCode::Char('?'));
   assert_eq!(*state.mode(), Mode::Help);
 
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert_eq!(*state.mode(), Mode::Normal);
 }
 
@@ -542,7 +542,7 @@ fn remove_file_decrements_count() {
 fn remove_file_clamps_cursor() {
   let mut state = make_state();
   state.handle_key(KeyCode::Tab);
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert_eq!(state.file_selected(), 1);
   state.handle_key(KeyCode::Char('d'));
   assert_eq!(state.file_selected(), 0);
@@ -659,7 +659,7 @@ fn new_group_creates_with_correct_id() {
   assert_eq!(state.groups[2].label, "Vacation");
   assert_eq!(
     state.groups[2].suggested_path,
-    PathBuf::from("vacation")
+    PathBuf::from("/out/vacation")
   );
 }
 
@@ -824,7 +824,7 @@ fn move_to_group_picker_navigates() {
     assert_eq!(cursor, 0);
   }
 
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   if let Mode::MoveToGroup { cursor } = state.mode {
     assert_eq!(cursor, 0);
   }
@@ -901,9 +901,9 @@ fn preview_path_caches_avoids_reload() {
   state.focus = Pane::Files;
 
   let path_before = state.preview_path.clone();
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   let path_after_move = state.preview_path.clone();
-  state.handle_key(KeyCode::Char('k'));
+  state.handle_key(KeyCode::Up);
   let path_after_return = state.preview_path.clone();
 
   assert_ne!(path_before, path_after_move);
@@ -915,7 +915,7 @@ fn preview_path_updates_on_group_navigation() {
   let mut state = make_state();
 
   let first_path = state.preview_path.clone();
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   let second_path = state.preview_path.clone();
 
   assert_eq!(first_path, Some(PathBuf::from("/dl/beach1.jpg")));
@@ -960,7 +960,7 @@ fn toggle_file_keep_in_dupes_mode() {
   state.handle_key(KeyCode::Tab);
   assert!(state.is_file_kept(0, 0));
 
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert!(!state.is_file_kept(0, 1));
   state.handle_key(KeyCode::Char(' '));
   assert!(state.is_file_kept(0, 1));
@@ -976,7 +976,7 @@ fn marks_clear_on_group_navigation() {
   state.handle_key(KeyCode::Char('v'));
   assert!(state.is_file_marked(0, 0));
   state.handle_key(KeyCode::BackTab);
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   assert!(!state.is_file_marked(0, 0));
 }
 
@@ -985,7 +985,7 @@ fn remove_marked_files_removes_multiple() {
   let mut state = make_state();
   state.handle_key(KeyCode::Tab);
   state.handle_key(KeyCode::Char('v'));
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   state.handle_key(KeyCode::Char('v'));
   assert_eq!(state.current_group_moves().len(), 2);
   state.handle_key(KeyCode::Char('d'));
@@ -997,7 +997,7 @@ fn move_marked_files_to_group() {
   let mut state = make_state();
   state.handle_key(KeyCode::Tab);
   state.handle_key(KeyCode::Char('v'));
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   state.handle_key(KeyCode::Char('v'));
   assert_eq!(state.current_group_moves().len(), 2);
   state.handle_key(KeyCode::Char('m'));
@@ -1177,7 +1177,7 @@ fn diff_view_jk_cycles_files() {
   state.handle_key(KeyCode::Char('D'));
   assert_eq!(state.mode, Mode::DiffView { compare_idx: 0 });
 
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   let max = state.group_moves[0].len().saturating_sub(2);
   let expected = 1.min(max);
   assert_eq!(
@@ -1187,7 +1187,7 @@ fn diff_view_jk_cycles_files() {
     }
   );
 
-  state.handle_key(KeyCode::Char('k'));
+  state.handle_key(KeyCode::Up);
   assert_eq!(state.mode, Mode::DiffView { compare_idx: 0 });
 }
 
@@ -1195,7 +1195,7 @@ fn diff_view_jk_cycles_files() {
 fn diff_view_k_does_not_underflow() {
   let mut state = make_dupes_state();
   state.handle_key(KeyCode::Char('D'));
-  state.handle_key(KeyCode::Char('k'));
+  state.handle_key(KeyCode::Up);
   assert_eq!(state.mode, Mode::DiffView { compare_idx: 0 });
 }
 
@@ -1347,13 +1347,26 @@ fn shift_d_diffs_a_file_with_its_partner_in_another_group() {
   }]);
   // Cursor on cat1.jpg (group 1, file 0), whose partner is beach1.jpg
   // in group 0.
-  state.handle_key(KeyCode::Char('j'));
+  state.handle_key(KeyCode::Down);
   state.handle_key(KeyCode::Tab);
   state.handle_key(KeyCode::Char('D'));
   assert!(matches!(state.mode, Mode::DiffView { .. }));
   let ds = state.diff_state.as_ref().unwrap();
-  assert_eq!(ds.primary_path, Some(PathBuf::from("/dl/beach1.jpg")));
-  assert_eq!(ds.secondary_path, Some(PathBuf::from("/dl/cat1.jpg")));
+  assert_eq!(ds.primary.path, PathBuf::from("/dl/beach1.jpg"));
+  assert_eq!(
+    ds.secondary.as_ref().map(|s| s.path.clone()),
+    Some(PathBuf::from("/dl/cat1.jpg"))
+  );
+
+  // Up/Down must not swap in the rest of cat1's group: those files are no
+  // duplicates of beach1.
+  state.handle_key(KeyCode::Down);
+  let ds = state.diff_state.as_ref().unwrap();
+  assert_eq!(ds.primary.path, PathBuf::from("/dl/beach1.jpg"));
+  assert_eq!(
+    ds.secondary.as_ref().map(|s| s.path.clone()),
+    Some(PathBuf::from("/dl/cat1.jpg"))
+  );
 }
 
 #[test]
@@ -1390,7 +1403,7 @@ fn key_table_matches_pane_and_mode() {
   // scroll keys and nothing that would not work there.
   let detail = keys(ReviewMode::Organize, Some(Pane::Detail));
   assert!(
-    detail.contains(&"j/k")
+    detail.contains(&"\u{2191}\u{2193}")
       && detail.contains(&"pgup/pgdn")
       && detail.contains(&"home/end")
   );
@@ -1651,7 +1664,7 @@ fn groups_pane(dump: &str) -> String {
 fn group_list_follows_cursor_past_the_viewport() {
   let mut state = make_tall_state(40, 1);
   for _ in 0..30 {
-    state.handle_key(KeyCode::Char('j'));
+    state.handle_key(KeyCode::Down);
   }
   let pane = groups_pane(&draw(&mut state, 100, 24));
   assert!(pane.contains("Group30"), "cursor off screen:\n{pane}");
@@ -1665,11 +1678,11 @@ fn group_list_follows_cursor_past_the_viewport() {
 fn group_list_scrolls_back_up_to_the_cursor() {
   let mut state = make_tall_state(40, 1);
   for _ in 0..30 {
-    state.handle_key(KeyCode::Char('j'));
+    state.handle_key(KeyCode::Down);
   }
   draw(&mut state, 100, 24);
   for _ in 0..30 {
-    state.handle_key(KeyCode::Char('k'));
+    state.handle_key(KeyCode::Up);
   }
   let pane = groups_pane(&draw(&mut state, 100, 24));
   assert!(pane.contains("Group0 "), "did not scroll back:\n{pane}");
@@ -1680,7 +1693,7 @@ fn file_list_follows_cursor_past_the_viewport() {
   let mut state = make_tall_state(1, 40);
   state.handle_key(KeyCode::Tab);
   for _ in 0..30 {
-    state.handle_key(KeyCode::Char('j'));
+    state.handle_key(KeyCode::Down);
   }
   let dump = draw(&mut state, 120, 24);
   assert!(dump.contains("g0f30.jpg"), "cursor off screen:\n{dump}");
@@ -1694,7 +1707,7 @@ fn group_picker_follows_cursor_past_the_viewport() {
   state.handle_key(KeyCode::Char('v'));
   state.handle_key(KeyCode::Char('m'));
   for _ in 0..30 {
-    state.handle_key(KeyCode::Char('j'));
+    state.handle_key(KeyCode::Down);
   }
   let dump = draw(&mut state, 120, 24);
   assert!(dump.contains("Group31"), "cursor off screen:\n{dump}");
@@ -1732,8 +1745,8 @@ fn detail_scroll_resets_when_the_cursor_moves() {
     state.handle_key(KeyCode::Char(']'));
   }
   draw(&mut state, 120, 16);
-  state.handle_key(KeyCode::Char('j'));
-  state.handle_key(KeyCode::Char('k'));
+  state.handle_key(KeyCode::Down);
+  state.handle_key(KeyCode::Up);
   assert_eq!(
     draw(&mut state, 120, 16),
     top,
@@ -1952,4 +1965,406 @@ fn expire(state: &mut ReviewState) {
   if let PreviewState::Animated(a) = &mut state.preview {
     a.shown_at = Instant::now() - Duration::from_secs(60);
   }
+}
+
+// --- audit fixes and refactor coverage ---------------------------------
+
+/// A dupes-mode state with one set of three files: `beach1.jpg` (the
+/// first, kept), `beach2.jpg` and `cat1.jpg`.
+fn dupes_set_of_three(kind: DuplicateType) -> ReviewState {
+  let group = FileGroup {
+    id: 0,
+    label: "Duplicate Set 1".to_string(),
+    rationale: String::new(),
+    members: vec![0, 1, 2],
+    member_destinations: vec![],
+    suggested_path: PathBuf::from("/dl"),
+    member_notes: vec![],
+  };
+  let moves = ["/dl/beach1.jpg", "/dl/beach2.jpg", "/dl/cat1.jpg"]
+    .iter()
+    .map(|p| FileMove {
+      from: PathBuf::from(p),
+      to: PathBuf::from(p),
+      group_id: 0,
+    })
+    .collect();
+  let mut state = ReviewState::new(
+    vec![group],
+    moves,
+    PathBuf::from("/out"),
+    None,
+    ReviewMode::Dupes,
+  );
+  state.set_dupe_types(vec![kind]);
+  state
+}
+
+#[test]
+fn dupes_mode_marks_exact_copies_for_deletion() {
+  let state = dupes_set_of_three(DuplicateType::Exact);
+  assert_eq!(
+    state.files_to_delete(),
+    vec![
+      PathBuf::from("/dl/beach2.jpg"),
+      PathBuf::from("/dl/cat1.jpg")
+    ]
+  );
+}
+
+#[test]
+fn dupes_mode_marks_an_extracted_archive_for_deletion() {
+  let state = dupes_set_of_three(DuplicateType::ArchiveMatch);
+  assert_eq!(state.files_to_delete().len(), 2);
+}
+
+/// Burst photos, drafts of a document and two masters of one song
+/// are different files. Pressing execute must not trash any of them
+/// unless the user marked it.
+#[test]
+fn dupes_mode_keeps_similar_files_until_the_user_decides() {
+  for kind in [
+    DuplicateType::NearDuplicate { distance: 3 },
+    DuplicateType::SimilarText { distance: 2 },
+    DuplicateType::SimilarAudio { score: 97 },
+  ] {
+    let state = dupes_set_of_three(kind);
+    assert!(state.files_to_delete().is_empty(), "{kind:?}");
+  }
+}
+
+#[test]
+fn dupes_mode_still_lets_the_user_mark_a_similar_copy() {
+  let mut state =
+    dupes_set_of_three(DuplicateType::NearDuplicate { distance: 3 });
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Down);
+  state.handle_key(KeyCode::Char(' '));
+  assert_eq!(
+    state.files_to_delete(),
+    vec![PathBuf::from("/dl/beach2.jpg")]
+  );
+}
+
+#[test]
+fn dupes_diff_cycles_through_the_copies_and_stops_at_the_ends() {
+  let mut state = dupes_set_of_three(DuplicateType::Exact);
+  state.handle_key(KeyCode::Char('D'));
+  let secondary = |s: &ReviewState| {
+    s.diff_state
+      .as_ref()
+      .and_then(|d| d.secondary.as_ref())
+      .map(|side| side.path.clone())
+  };
+  assert_eq!(
+    secondary(&state),
+    Some(PathBuf::from("/dl/beach2.jpg"))
+  );
+
+  state.handle_key(KeyCode::Down);
+  assert_eq!(state.mode, Mode::DiffView { compare_idx: 1 });
+  assert_eq!(secondary(&state), Some(PathBuf::from("/dl/cat1.jpg")));
+
+  state.handle_key(KeyCode::Down);
+  assert_eq!(state.mode, Mode::DiffView { compare_idx: 1 });
+
+  state.handle_key(KeyCode::Up);
+  state.handle_key(KeyCode::Up);
+  assert_eq!(state.mode, Mode::DiffView { compare_idx: 0 });
+
+  state.handle_key(KeyCode::Esc);
+  assert_eq!(state.mode, Mode::Normal);
+  assert!(state.diff_state.is_none());
+}
+
+/// Typing a non-ASCII name used to put the byte index inside the
+/// character: the next keystroke panicked the review and lost it.
+#[test]
+fn group_names_take_non_ascii_text() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Char('n'));
+  type_text(&mut state, "Café");
+  state.handle_key(KeyCode::Char('s'));
+  state.handle_key(KeyCode::Left);
+  state.handle_key(KeyCode::Left);
+  state.handle_key(KeyCode::Backspace);
+  state.handle_key(KeyCode::Char('e'));
+  assert_eq!(
+    state.mode,
+    Mode::NewGroup {
+      input: "Caeés".to_string(),
+      cursor_pos: 3
+    }
+  );
+}
+
+#[test]
+fn rename_cursor_counts_characters() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Char('r'));
+  for _ in 0..5 {
+    state.handle_key(KeyCode::Backspace);
+  }
+  type_text(&mut state, "Été");
+  assert_eq!(
+    state.mode,
+    Mode::RenameGroup {
+      input: "Été".to_string(),
+      cursor_pos: 3
+    }
+  );
+  state.handle_key(KeyCode::Right);
+  state.handle_key(KeyCode::Left);
+  state.handle_key(KeyCode::Backspace);
+  assert_eq!(
+    state.mode,
+    Mode::RenameGroup {
+      input: "Éé".to_string(),
+      cursor_pos: 1
+    }
+  );
+}
+
+/// A review-created group goes into the same sanitized folder a
+/// pipeline group of that name would, and its files land there.
+#[test]
+fn new_group_folder_matches_the_pipeline_naming() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Char('n'));
+  type_text(&mut state, "Trips/Summer 2024");
+  state.handle_key(KeyCode::Enter);
+
+  let dir = PathBuf::from("/out/trips/summer_2024");
+  assert_eq!(state.groups[2].suggested_path, dir);
+  assert_eq!(state.group_moves[2][0].to, dir.join("beach1.jpg"));
+}
+
+/// The name prompt shows the folder the group will actually get.
+#[test]
+fn name_prompt_previews_the_real_destination() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Char('n'));
+  type_text(&mut state, "Trips/Summer 2024");
+  let screen = draw(&mut state, 160, 30);
+  assert!(screen.contains("/out/trips/summer_2024/"), "{screen}");
+}
+
+#[test]
+fn moving_several_files_keeps_their_order() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Down);
+  state.handle_key(KeyCode::Tab);
+  for _ in 0..3 {
+    state.handle_key(KeyCode::Char('v'));
+    state.handle_key(KeyCode::Down);
+  }
+  state.handle_key(KeyCode::Char('m'));
+  state.handle_key(KeyCode::Enter);
+
+  let names: Vec<_> = state.group_moves[0]
+    .iter()
+    .map(|m| m.from.file_name().unwrap().to_owned())
+    .collect();
+  assert_eq!(
+    names,
+    [
+      "beach1.jpg",
+      "beach2.jpg",
+      "cat1.jpg",
+      "cat2.jpg",
+      "cat3.jpg"
+    ]
+  );
+  assert_eq!(state.mode, Mode::ConfirmRemove);
+}
+
+#[test]
+fn moved_files_carry_their_keep_choice() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Char(' '));
+  state.handle_key(KeyCode::Char('m'));
+  state.handle_key(KeyCode::Enter);
+
+  let moved = state.group_moves[1].len() - 1;
+  assert_eq!(
+    state.group_moves[1][moved].from,
+    PathBuf::from("/dl/beach1.jpg")
+  );
+  assert!(!state.is_file_kept(1, moved));
+  assert_eq!(
+    state.files_to_delete(),
+    vec![PathBuf::from("/dl/beach1.jpg")]
+  );
+}
+
+#[test]
+fn merge_keeps_order_and_drops_the_source_group() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Char('M'));
+  state.handle_key(KeyCode::Enter);
+
+  assert_eq!(state.groups.len(), 1);
+  assert_eq!(state.groups[0].label, "Cats");
+  let tos: Vec<_> =
+    state.group_moves[0].iter().map(|m| m.to.clone()).collect();
+  assert_eq!(tos[3], PathBuf::from("/out/cats/beach1.jpg"));
+  assert_eq!(tos[4], PathBuf::from("/out/cats/beach2.jpg"));
+  assert!(state.group_moves[0].iter().all(|m| m.group_id == 1));
+}
+
+#[test]
+fn pickers_wrap_and_escape() {
+  let mut state = make_tall_state(4, 1);
+  state.handle_key(KeyCode::Char('M'));
+  assert_eq!(state.mode, Mode::MergeInto { cursor: 0 });
+  state.handle_key(KeyCode::Up);
+  assert_eq!(state.mode, Mode::MergeInto { cursor: 2 });
+  state.handle_key(KeyCode::Down);
+  assert_eq!(state.mode, Mode::MergeInto { cursor: 0 });
+  state.handle_key(KeyCode::Esc);
+  assert_eq!(state.mode, Mode::Normal);
+
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Char('m'));
+  state.handle_key(KeyCode::Down);
+  assert_eq!(state.mode, Mode::MoveToGroup { cursor: 1 });
+}
+
+/// The confirm dialog counts what will move now, not what the plan
+/// first proposed: removed and deleted files are not moved.
+#[test]
+fn execute_dialog_counts_files_as_they_stand() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Char('d'));
+  state.handle_key(KeyCode::Char(' '));
+
+  let counts: Vec<(String, usize)> = state
+    .approved_group_counts()
+    .into_iter()
+    .map(|(g, n)| (g.label.clone(), n))
+    .collect();
+  assert_eq!(
+    counts,
+    vec![("Beach".to_string(), 0), ("Cats".to_string(), 3)]
+  );
+  assert_eq!(state.approved_moves().len(), 3);
+
+  state.handle_key(KeyCode::Char('x'));
+  let screen = draw(&mut state, 120, 40);
+  assert!(screen.contains("Move 3 files"), "{screen}");
+  assert!(screen.contains("Beach  (0 files)"), "{screen}");
+}
+
+#[test]
+fn group_picker_shows_each_targets_own_count() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Down);
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Char('m'));
+  let screen = draw(&mut state, 120, 30);
+  assert!(screen.contains("Beach (2)"), "{screen}");
+}
+
+#[test]
+fn preview_of_a_text_file_shows_its_lines() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let path = dir.path().join("notes.txt");
+  std::fs::write(&path, "first line\nsecond line\n").unwrap();
+  let mut state = ReviewState::new(
+    make_groups(),
+    vec![FileMove {
+      from: path.clone(),
+      to: PathBuf::from("/out/beach/notes.txt"),
+      group_id: 0,
+    }],
+    PathBuf::from("/out"),
+    None,
+    ReviewMode::Organize,
+  );
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Enter);
+  assert_eq!(state.mode, Mode::Preview);
+  let ds = state.diff_state.as_ref().unwrap();
+  assert!(ds.secondary.is_none());
+  assert!(
+    matches!(&ds.content, DiffContent::Text(l) if l.len() == 2)
+  );
+
+  let screen = draw(&mut state, 120, 30);
+  assert!(screen.contains("second line"), "{screen}");
+  state.handle_key(KeyCode::Char('q'));
+  assert_eq!(state.mode, Mode::Normal);
+}
+
+#[test]
+fn text_diff_marks_added_and_removed_lines() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let a = dir.path().join("a.txt");
+  let b = dir.path().join("b.txt");
+  std::fs::write(&a, "same\nold\n").unwrap();
+  std::fs::write(&b, "same\nnew\n").unwrap();
+  let lines = super::state::text_lines(&a, Some(&b));
+  let tags: Vec<&str> = lines
+    .iter()
+    .map(|l| match l {
+      DiffLine::Same(_) => "=",
+      DiffLine::Added(_) => "+",
+      DiffLine::Removed(_) => "-",
+    })
+    .collect();
+  assert_eq!(tags, ["=", "-", "+"]);
+}
+
+/// An image with no picker to draw it never says "Loading" forever.
+#[test]
+fn image_preview_without_a_picker_is_not_stuck_loading() {
+  let mut state = make_state();
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Enter);
+  let ds = state.diff_state.as_ref().unwrap();
+  assert!(matches!(ds.content, DiffContent::Images));
+  assert!(matches!(ds.primary.preview, PreviewState::None));
+  assert!(ds.primary.rx.is_none());
+}
+
+#[test]
+fn diff_footer_only_offers_cycling_in_dupes_mode() {
+  let mut dupes = dupes_set_of_three(DuplicateType::Exact);
+  dupes.handle_key(KeyCode::Char('D'));
+  assert!(draw(&mut dupes, 160, 40).contains("cycle files"));
+
+  let mut organize = state_with_dupes(vec![DuplicateSet {
+    canonical: 0,
+    duplicates: vec![2],
+    duplicate_type: DuplicateType::Exact,
+  }]);
+  organize.handle_key(KeyCode::Tab);
+  organize.handle_key(KeyCode::Char('D'));
+  assert!(matches!(organize.mode, Mode::DiffView { .. }));
+  assert!(!draw(&mut organize, 160, 40).contains("cycle files"));
+}
+
+/// The diff header names the pair actually shown, which in organize
+/// mode can come from two different groups.
+#[test]
+fn organize_diff_metadata_names_the_pair_shown() {
+  let mut state = state_with_dupes(vec![DuplicateSet {
+    canonical: 0,
+    duplicates: vec![2],
+    duplicate_type: DuplicateType::Exact,
+  }]);
+  state = state.with_file_metadata(&files());
+  state.handle_key(KeyCode::Down);
+  state.handle_key(KeyCode::Tab);
+  state.handle_key(KeyCode::Char('D'));
+  let screen = draw(&mut state, 160, 40);
+  assert!(screen.contains("beach1.jpg"), "{screen}");
+  assert!(screen.contains("cat1.jpg"), "{screen}");
+  // The old header read the current group instead: cat1 vs cat2.
+  assert!(!screen.contains("cat2.jpg"), "{screen}");
 }

@@ -166,19 +166,9 @@ pub(crate) fn render_group_picker(
   let items: Vec<ListItem> = targets
     .iter()
     .enumerate()
-    .map(|(i, (_, group))| {
+    .map(|(i, &(group_idx, group))| {
       let is_cursor = i == cursor;
-      let file_count = state
-        .group_moves
-        .get(
-          state
-            .groups
-            .iter()
-            .position(|g| g.id == group.id)
-            .unwrap_or(0),
-        )
-        .map(|m| m.len())
-        .unwrap_or(0);
+      let file_count = state.group_moves[group_idx].len();
 
       let label_style = if is_cursor {
         theme::selected()
@@ -212,18 +202,15 @@ pub(crate) fn render_group_picker(
 pub(crate) fn render_new_group_input(
   frame: &mut Frame,
   area: Rect,
-  _state: &ReviewState,
+  state: &ReviewState,
   input: &str,
   cursor_pos: usize,
   title: &str,
 ) {
   let block = panel_block(title, true);
-  let slug = crate::group::sanitize_folder_name(input.trim());
-  let slug = if input.trim().is_empty() {
-    String::new()
-  } else {
-    slug
-  };
+  // The same path confirming creates, so the preview cannot drift.
+  let dest = (!input.trim().is_empty())
+    .then(|| state.dir_for_name(input.trim()));
 
   let mut input_spans: Vec<Span> = Vec::new();
   input_spans.push(Span::styled("  ", Style::default()));
@@ -235,7 +222,7 @@ pub(crate) fn render_new_group_input(
       input_spans.push(Span::styled(ch.to_string(), theme::value()));
     }
   }
-  if cursor_pos >= input.len() {
+  if cursor_pos >= input.chars().count() {
     input_spans.push(Span::styled(" ", theme::input_cursor()));
   }
 
@@ -245,14 +232,14 @@ pub(crate) fn render_new_group_input(
     Line::from(""),
   ];
 
-  if !slug.is_empty() {
+  if let Some(dest) = dest {
     lines.push(Line::from(Span::styled(
       "  DESTINATION",
       theme::label(),
     )));
     lines.push(Line::from(vec![
       Span::styled("  ", Style::default()),
-      Span::styled(format!("{slug}/"), theme::path()),
+      Span::styled(format!("{}/", dest.display()), theme::path()),
     ]));
   }
 

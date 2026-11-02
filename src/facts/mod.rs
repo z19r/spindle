@@ -416,27 +416,25 @@ fn pdf_facts(path: &Path, size: u64, out: &mut Vec<Fact>) {
 
 /// "D:20240115093000Z" → "2024-01-15 09:30"; anything else unchanged.
 ///
-/// Counts characters rather than bytes. The value reaches us through
-/// `String::from_utf8_lossy`, so a single bad byte in the PDF becomes
-/// a three-byte U+FFFD, and a byte index into that string lands inside
-/// a character and panics the run.
+/// The value reaches us through `String::from_utf8_lossy`, so a bad
+/// byte becomes a three-byte U+FFFD. `get` returns `None` instead of
+/// panicking when byte 12 falls inside it, and once the head is all
+/// ASCII digits, every byte index into it is a character boundary.
 fn pdf_date(s: &str) -> String {
   let digits = s.strip_prefix("D:").unwrap_or(s);
-  let head: Vec<char> = digits.chars().take(12).collect();
-  if head.len() == 12 && head.iter().all(char::is_ascii_digit) {
-    let part = |range: std::ops::Range<usize>| -> String {
-      head[range].iter().collect()
-    };
-    format!(
+  match digits
+    .get(..12)
+    .filter(|head| head.bytes().all(|b| b.is_ascii_digit()))
+  {
+    Some(d) => format!(
       "{}-{}-{} {}:{}",
-      part(0..4),
-      part(4..6),
-      part(6..8),
-      part(8..10),
-      part(10..12)
-    )
-  } else {
-    s.to_string()
+      &d[..4],
+      &d[4..6],
+      &d[6..8],
+      &d[8..10],
+      &d[10..12]
+    ),
+    None => s.to_string(),
   }
 }
 

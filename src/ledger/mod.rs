@@ -70,11 +70,7 @@ pub fn hash_hex(blake3_hash: &[u8; 32]) -> String {
 
 /// Default global ledger location: `<data_dir>/spindle/ledger.json`.
 pub fn default_ledger_path() -> PathBuf {
-  directories::BaseDirs::new()
-    .map(|d| d.data_dir().join("spindle").join("ledger.json"))
-    .unwrap_or_else(|| {
-      PathBuf::from(".local/share/spindle/ledger.json")
-    })
+  crate::config::data_dir().join("ledger.json")
 }
 
 impl Ledger {

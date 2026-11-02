@@ -353,9 +353,6 @@ pub fn subtle() -> Color {
 pub fn selected_bg() -> Color {
   active().selected_bg
 }
-pub fn on_accent() -> Color {
-  active().on_accent
-}
 
 pub fn title_badge() -> Style {
   Style::default()

@@ -13,7 +13,7 @@ pub(crate) fn render_footer(
   let keys: Vec<(&str, &str)> = match &state.mode {
     Mode::Normal => key_table(state.review_mode, Some(state.focus)),
     Mode::MoveToGroup { .. } => vec![
-      ("j/k", "navigate"),
+      ("\u{2191}\u{2193}", "navigate"),
       ("\u{23ce}", "confirm"),
       ("esc", "cancel"),
     ],
@@ -25,7 +25,7 @@ pub(crate) fn render_footer(
       ]
     }
     Mode::MergeInto { .. } => vec![
-      ("j/k", "navigate"),
+      ("\u{2191}\u{2193}", "navigate"),
       ("\u{23ce}", "merge"),
       ("esc", "cancel"),
     ],
@@ -36,26 +36,18 @@ pub(crate) fn render_footer(
       vec![("\u{23ce}/y", "confirm"), ("esc/n", "cancel")]
     }
     Mode::Help => vec![("any key", "close")],
-    Mode::DiffView { .. } => {
-      let mut k = vec![("j/k", "cycle files")];
-      let is_text = state
-        .diff_state
-        .as_ref()
-        .map(|ds| matches!(ds.content, DiffContent::Text(_)))
-        .unwrap_or(false);
-      if is_text {
-        k.push(("[/]", "scroll"));
+    Mode::DiffView { .. } | Mode::Preview => {
+      let mut k = Vec::new();
+      // Only a duplicate set has further copies to step through.
+      if matches!(state.mode, Mode::DiffView { .. })
+        && state.review_mode == ReviewMode::Dupes
+      {
+        k.push(("\u{2191}\u{2193}", "cycle files"));
       }
-      k.push(("esc", "close"));
-      k
-    }
-    Mode::Preview => {
-      let mut k: Vec<(&str, &str)> = Vec::new();
       let is_text = state
         .diff_state
         .as_ref()
-        .map(|ds| matches!(ds.content, DiffContent::Text(_)))
-        .unwrap_or(false);
+        .is_some_and(|ds| matches!(ds.content, DiffContent::Text(_)));
       if is_text {
         k.push(("[/]", "scroll"));
       }
@@ -104,7 +96,7 @@ pub(crate) fn key_table(
   // list-pane key would be a lie there.
   if pane == Some(Pane::Detail) {
     return vec![
-      ("j/k", "scroll"),
+      ("\u{2191}\u{2193}", "scroll"),
       ("pgup/pgdn", "page"),
       ("home/end", "top/bottom"),
       ("tab", "pane"),
@@ -118,7 +110,8 @@ pub(crate) fn key_table(
   let files = pane != Some(Pane::Groups);
   let organize = review_mode == ReviewMode::Organize;
 
-  let mut k: Vec<(&str, &str)> = vec![("j/k", "navigate")];
+  let mut k: Vec<(&str, &str)> =
+    vec![("\u{2191}\u{2193}", "navigate")];
   match pane {
     Some(Pane::Groups) => k.push(("\u{23ce}", "open files")),
     Some(Pane::Files) => k.push(("\u{23ce}", "preview")),

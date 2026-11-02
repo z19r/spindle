@@ -19,10 +19,7 @@ pub struct ExecutorPaths {
 impl ExecutorPaths {
   /// Global defaults: `<data_dir>/spindle/{journal,trash}`.
   pub fn default_paths() -> Self {
-    let base = directories::BaseDirs::new()
-      .map(|d| d.data_dir().join("spindle"))
-      .unwrap_or_else(|| PathBuf::from(".local/share/spindle"));
-    Self::under(&base)
+    Self::under(&crate::config::data_dir())
   }
 
   /// Both directories under one root — used by tests.
