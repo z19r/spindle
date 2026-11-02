@@ -117,7 +117,8 @@ pub fn execute_plan(
 
   for path in &plan.deletions {
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let dest = trash::trash_path_for(&paths.trash_dir, &run_id, path);
+    let trash_dir = trash::trash_dir_for(&paths.trash_dir, path);
+    let dest = trash::trash_path_for(&trash_dir, &run_id, path);
     if let Err(e) = move_file(path, &dest) {
       tracing::warn!(
         path = %path.display(),
@@ -751,7 +752,7 @@ mod tests {
     };
     execute_plan(&plan, &paths, dir.path());
 
-    let report = trash::purge(&paths.trash_dir, None).unwrap();
+    let report = trash::purge(&paths, None).unwrap();
 
     assert_eq!(report.runs_purged, 1);
     assert_eq!(report.bytes_freed, 128);
@@ -821,7 +822,7 @@ mod tests {
       skipped_files: vec![],
     };
     let report = execute_plan(&plan, &paths, dir.path());
-    trash::purge(&paths.trash_dir, None).unwrap();
+    trash::purge(&paths, None).unwrap();
 
     let undo = undo_run(&paths, Some(&report.run_id)).unwrap();
 

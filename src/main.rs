@@ -544,7 +544,7 @@ fn run_list_undo() -> Result<()> {
 
 fn run_purge(older_than_days: Option<u64>) -> Result<()> {
   let paths = ExecutorPaths::default_paths();
-  let report = trash::purge(&paths.trash_dir, older_than_days)?;
+  let report = trash::purge(&paths, older_than_days)?;
   println!(
     "Purged {} run(s) from trash, {} reclaimed.",
     report.runs_purged,

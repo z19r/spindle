@@ -33,6 +33,7 @@ fn is_trash_path(path: &Path) -> bool {
       || s.starts_with(".Trash-")
       || s == "$RECYCLE.BIN"
       || s == "$Recycle.Bin"
+      || s == crate::executor::trash::FOREIGN_TRASH
   })
 }
 
@@ -539,6 +540,9 @@ mod tests {
       "/mnt/disk/.Trash-1000/files/old.png"
     )));
     assert!(is_trash_path(&PathBuf::from("/d/$RECYCLE.BIN/stuff")));
+    assert!(is_trash_path(&PathBuf::from(
+      "/m/.spindle-trash/r/a.jpg"
+    )));
     assert!(!is_trash_path(&PathBuf::from(
       "/home/user/photos/cat.jpg"
     )));
