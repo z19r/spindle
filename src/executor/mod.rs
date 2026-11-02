@@ -371,7 +371,9 @@ fn restore(
 }
 
 /// Legacy undo for logs written by pre-journal versions (`--undo-log`).
-pub fn undo(undo_log_path: &Path) -> Result<Vec<PathBuf>> {
+/// Restores like [`undo_run`]: never over another file, and one
+/// failure does not stop the rest.
+pub fn undo(undo_log_path: &Path) -> Result<UndoReport> {
   let content =
     std::fs::read_to_string(undo_log_path).with_context(|| {
       format!("Failed to read undo log: {}", undo_log_path.display())
@@ -379,21 +381,25 @@ pub fn undo(undo_log_path: &Path) -> Result<Vec<PathBuf>> {
   let log: UndoLog = serde_json::from_str(&content)
     .context("Failed to parse undo log")?;
 
-  let mut restored = Vec::new();
-  for entry in &log.moves {
-    move_file(&entry.moved_to, &entry.original).with_context(
-      || {
-        format!(
-          "Failed to undo move: {} -> {}",
-          entry.moved_to.display(),
-          entry.original.display()
-        )
-      },
-    )?;
-    restored.push(entry.original.clone());
+  let mut report = UndoReport {
+    run_id: undo_log_path.display().to_string(),
+    restored: Vec::new(),
+    failed: Vec::new(),
+    renamed: Vec::new(),
+    unfiled: Vec::new(),
+  };
+  for entry in log.moves.iter().rev() {
+    if restore(
+      &entry.moved_to,
+      &entry.original,
+      &mut report.restored,
+      &mut report.failed,
+      &mut report.renamed,
+    ) {
+      report.unfiled.push(entry.moved_to.clone());
+    }
   }
-
-  Ok(restored)
+  Ok(report)
 }
 
 #[cfg(test)]
@@ -818,11 +824,48 @@ mod tests {
     fs::write(&log_path, serde_json::to_string(&log).unwrap())
       .unwrap();
 
-    let restored = undo(&log_path).unwrap();
+    let report = undo(&log_path).unwrap();
 
-    assert_eq!(restored.len(), 1);
+    assert_eq!(report.restored.len(), 1);
+    assert_eq!(report.unfiled, vec![moved.clone()]);
     assert!(src.path().join("a.jpg").exists());
     assert!(!moved.exists());
+  }
+
+  #[test]
+  fn legacy_undo_keeps_going_and_never_overwrites() {
+    let src = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    let moved = dest.path().join("a.jpg");
+    fs::write(&moved, "old").unwrap();
+    // Something new took the original name since the run.
+    fs::write(src.path().join("a.jpg"), "new").unwrap();
+
+    let log = UndoLog {
+      moves: vec![
+        UndoEntry {
+          original: src.path().join("gone.jpg"),
+          moved_to: dest.path().join("gone.jpg"),
+        },
+        UndoEntry {
+          original: src.path().join("a.jpg"),
+          moved_to: moved.clone(),
+        },
+      ],
+      timestamp: "t".to_string(),
+    };
+    let log_path = dest.path().join("undo.json");
+    fs::write(&log_path, serde_json::to_string(&log).unwrap())
+      .unwrap();
+
+    let report = undo(&log_path).unwrap();
+
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.renamed.len(), 1);
+    let new = fs::read_to_string(src.path().join("a.jpg")).unwrap();
+    assert_eq!(new, "new");
+    let restored = fs::read_to_string(&report.renamed[0].1).unwrap();
+    assert_eq!(restored, "old");
   }
 
   #[test]

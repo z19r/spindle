@@ -448,22 +448,13 @@ fn print_organized_duplicates(result: &pipeline::PipelineResult) {
 fn run_undo(cli: &CliArgs) -> Result<()> {
   // Legacy escape hatch: an explicit --undo-log path uses the old
   // single-shot undo log format.
-  if let Some(undo_path) = &cli.undo_log {
-    println!("Undoing from legacy log: {}", undo_path.display());
-    let restored = spindle::executor::undo(undo_path)?;
-    println!(
-      "Restored {} files to their original locations.",
-      restored.len()
-    );
-    for path in &restored {
-      println!("  ← {}", path.display());
-    }
-    return Ok(());
-  }
-
-  let paths = ExecutorPaths::default_paths();
-  let report =
-    spindle::executor::undo_run(&paths, cli.undo_run.as_deref())?;
+  let report = match &cli.undo_log {
+    Some(undo_path) => spindle::executor::undo(undo_path)?,
+    None => spindle::executor::undo_run(
+      &ExecutorPaths::default_paths(),
+      cli.undo_run.as_deref(),
+    )?,
+  };
   forget_unfiled(cli, &report.unfiled);
 
   println!(
@@ -493,9 +484,7 @@ fn run_undo(cli: &CliArgs) -> Result<()> {
     eprintln!("  ✗ {} ({err})", path.display());
   }
   if !report.failed.is_empty() {
-    anyhow::bail!(
-      "Some files could not be restored; the run journal was kept."
-    );
+    anyhow::bail!("Some files could not be restored.");
   }
   Ok(())
 }
