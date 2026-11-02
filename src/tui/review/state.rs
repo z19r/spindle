@@ -143,7 +143,10 @@ pub(crate) fn decode_image(
 
 /// The lines a text modal shows: the file itself, or its line diff
 /// against `other`. An unreadable file reads as empty.
-pub(crate) fn text_lines(path: &Path, other: Option<&Path>) -> Vec<DiffLine> {
+pub(crate) fn text_lines(
+  path: &Path,
+  other: Option<&Path>,
+) -> Vec<DiffLine> {
   let text = std::fs::read_to_string(path).unwrap_or_default();
   let Some(other) = other else {
     return text
