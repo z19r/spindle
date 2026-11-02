@@ -437,19 +437,23 @@ impl ClaudeProvider {
       let status = response.status();
 
       if is_retryable_status(status) && attempt < self.max_retries {
+        let header = response
+          .headers()
+          .get(reqwest::header::RETRY_AFTER)
+          .and_then(|v| v.to_str().ok())
+          .map(str::to_owned);
         let body = response.text().await.unwrap_or_default();
-        let delay = 1u64 << attempt;
+        let delay = retry_delay(attempt, header.as_deref(), &body);
         tracing::warn!(
           attempt = attempt + 1,
           max = self.max_retries,
           status = %status,
-          delay_secs = delay,
+          delay_ms = delay.as_millis() as u64,
           "Retryable API error ({}): {}",
           status,
           preview(&body, 200),
         );
-        tokio::time::sleep(std::time::Duration::from_secs(delay))
-          .await;
+        tokio::time::sleep(delay).await;
         last_err = Some(anyhow::anyhow!(
           "Claude API error ({}): {}",
           status,
@@ -1141,6 +1145,44 @@ fn looks_degenerate(text: &str) -> bool {
       .count();
     repeats >= MIN_REPEATS && repeats * unit >= TAIL / 2
   })
+}
+
+/// How long the server asked us to wait: the `retry-after` header
+/// (seconds), or a "Retry after 0.6s" phrase some proxies put in the
+/// body instead.
+fn retry_hint(header: Option<&str>, body: &str) -> Option<f64> {
+  if let Some(secs) =
+    header.and_then(|h| h.trim().parse::<f64>().ok())
+  {
+    return Some(secs);
+  }
+  let lower = body.to_ascii_lowercase();
+  let rest =
+    &lower[lower.find("retry after ")? + "retry after ".len()..];
+  let end = rest
+    .find(|c: char| !c.is_ascii_digit() && c != '.')
+    .unwrap_or(rest.len());
+  rest[..end].parse().ok()
+}
+
+/// Wait before retry `attempt`: exponential backoff, never shorter
+/// than the server asked for (capped at a minute), plus up to 25%
+/// jitter so concurrent requests that were limited together do not
+/// all retry in the same instant.
+fn retry_delay(
+  attempt: usize,
+  header: Option<&str>,
+  body: &str,
+) -> std::time::Duration {
+  let backoff = (1u64 << attempt) as f64;
+  let hint = retry_hint(header, body).unwrap_or(0.0).clamp(0.0, 60.0);
+  let base = backoff.max(hint);
+  let nanos = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.subsec_nanos())
+    .unwrap_or(0);
+  let jitter = f64::from(nanos % 1000) / 1000.0 * 0.25;
+  std::time::Duration::from_secs_f64(base * (1.0 + jitter))
 }
 
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
@@ -2519,6 +2561,25 @@ mod tests {
 
     assert_eq!(results.len(), 2);
     assert!(results.iter().all(|r| r.is_ok()));
+  }
+
+  #[test]
+  fn retries_wait_at_least_as_long_as_the_server_asks() {
+    use std::time::Duration;
+    assert_eq!(retry_hint(Some("30"), ""), Some(30.0));
+    let proxy = r#"{"detail":"Rate limited. Retry after 0.6s"}"#;
+    assert_eq!(retry_hint(None, proxy), Some(0.6));
+    assert_eq!(retry_hint(None, "overloaded"), None);
+
+    let long = retry_delay(0, Some("30"), "");
+    assert!(long >= Duration::from_secs(30), "{long:?}");
+    assert!(long <= Duration::from_secs_f64(37.5), "{long:?}");
+    // A short hint never cuts the backoff.
+    assert!(retry_delay(1, None, proxy) >= Duration::from_secs(2));
+    // An absurd hint is capped.
+    assert!(
+      retry_delay(0, Some("86400"), "") <= Duration::from_secs(75)
+    );
   }
 
   #[tokio::test]
