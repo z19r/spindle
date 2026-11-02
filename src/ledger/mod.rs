@@ -5,7 +5,7 @@
 //! be compared against that history — flagged as exact duplicates of
 //! organized content, or sorted into an existing group folder.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -46,8 +46,14 @@ pub struct OrganizedDuplicate {
 pub struct Ledger {
   #[serde(default = "default_version")]
   pub version: u32,
+  /// Changed only through `record` and `forget`, which keep
+  /// `by_hash` in step.
   #[serde(default)]
-  pub entries: Vec<LedgerEntry>,
+  entries: Vec<LedgerEntry>,
+  /// Entry indices by content hash, so per-file lookups do not scan
+  /// every file ever organized.
+  #[serde(skip)]
+  by_hash: HashMap<String, Vec<usize>>,
 }
 
 fn default_version() -> u32 {
@@ -59,6 +65,7 @@ impl Default for Ledger {
     Self {
       version: LEDGER_VERSION,
       entries: Vec::new(),
+      by_hash: HashMap::new(),
     }
   }
 }
@@ -82,7 +89,10 @@ impl Ledger {
       return Self::default();
     };
     match serde_json::from_str::<Self>(&content) {
-      Ok(ledger) if ledger.version == LEDGER_VERSION => ledger,
+      Ok(mut ledger) if ledger.version == LEDGER_VERSION => {
+        ledger.reindex();
+        ledger
+      }
       Ok(ledger) => {
         tracing::warn!(
           path = %path.display(),
@@ -119,8 +129,36 @@ impl Ledger {
     )
   }
 
+  fn reindex(&mut self) {
+    self.by_hash.clear();
+    for (i, entry) in self.entries.iter().enumerate() {
+      self
+        .by_hash
+        .entry(entry.blake3_hex.clone())
+        .or_default()
+        .push(i);
+    }
+  }
+
+  fn with_hash<'a>(
+    &'a self,
+    blake3_hex: &str,
+  ) -> impl Iterator<Item = &'a LedgerEntry> + 'a {
+    self
+      .by_hash
+      .get(blake3_hex)
+      .into_iter()
+      .flatten()
+      .map(|&i| &self.entries[i])
+  }
+
   /// Append an organized-file record.
   pub fn record(&mut self, entry: LedgerEntry) {
+    self
+      .by_hash
+      .entry(entry.blake3_hex.clone())
+      .or_default()
+      .push(self.entries.len());
     self.entries.push(entry);
   }
 
@@ -132,17 +170,20 @@ impl Ledger {
       dests.iter().collect();
     let before = self.entries.len();
     self.entries.retain(|e| !dests.contains(&e.dest_path));
-    before - self.entries.len()
+    let gone = before - self.entries.len();
+    if gone > 0 {
+      self.reindex();
+    }
+    gone
   }
 
   /// Has this exact file (matching content hash at this exact path) already
   /// been organized? Matches either the source or the destination path so a
   /// re-scan of either location recognizes the file.
   pub fn is_organized(&self, path: &Path, blake3_hex: &str) -> bool {
-    self.entries.iter().any(|e| {
-      e.blake3_hex == blake3_hex
-        && (e.dest_path == path || e.source_path == path)
-    })
+    self
+      .with_hash(blake3_hex)
+      .any(|e| e.dest_path == path || e.source_path == path)
   }
 
   /// If a *new* file (different path) is byte-identical to organized
@@ -151,7 +192,7 @@ impl Ledger {
     &self,
     blake3_hex: &str,
   ) -> Option<&LedgerEntry> {
-    self.entries.iter().find(|e| e.blake3_hex == blake3_hex)
+    self.with_hash(blake3_hex).next()
   }
 
   /// Content hashes of files in each existing group, keyed by label.
@@ -222,6 +263,24 @@ mod tests {
       group_label: label.to_string(),
       organized_at: "2026-06-13T00:00:00Z".to_string(),
     }
+  }
+
+  #[test]
+  fn lookups_still_work_after_save_load_and_forget() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("ledger.json");
+    let mut ledger = Ledger::default();
+    ledger.record(entry("/dl/a.jpg", "/out/p/a.jpg", "h1", "P"));
+    ledger.record(entry("/dl/b.jpg", "/out/p/b.jpg", "h2", "P"));
+    ledger.save(&path).unwrap();
+
+    let mut ledger = Ledger::load(&path);
+    assert!(ledger.is_organized(Path::new("/out/p/b.jpg"), "h2"));
+    ledger.forget(&[PathBuf::from("/out/p/a.jpg")]);
+
+    assert!(ledger.duplicate_of("h1").is_none());
+    let b = ledger.duplicate_of("h2").unwrap();
+    assert_eq!(b.dest_path, PathBuf::from("/out/p/b.jpg"));
   }
 
   #[test]
