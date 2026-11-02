@@ -24,7 +24,7 @@ pub struct CliArgs {
   #[arg(short = 'n', long)]
   pub dry_run: bool,
 
-  /// Skip AI analysis (only hash-based dedup)
+  /// No AI: find duplicates only, like --dupes-only
   #[arg(long)]
   pub no_ai: bool,
 
@@ -61,7 +61,8 @@ pub struct CliArgs {
   #[arg(short, long, action = clap::ArgAction::Count)]
   pub verbose: u8,
 
-  /// Only find exact duplicates (no AI, no grouping, no TUI)
+  /// Duplicates only: no AI, no grouping. Review which copies go to
+  /// the trash.
   #[arg(long)]
   pub dupes_only: bool,
 

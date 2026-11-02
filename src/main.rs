@@ -111,18 +111,14 @@ async fn main() -> Result<()> {
     return run_undo(&cli);
   }
 
-  if cli.dupes_only {
+  // Without the model there is nothing to group by, only duplicates
+  // to find; filing every file into one folder is not organizing.
+  if cli.dupes_only || cli.no_ai {
     return run_dupes_only(&cli, &config);
   }
 
-  // The API key is only needed when the AI pipeline will actually run.
-  let api_key = if cli.no_ai {
-    String::new()
-  } else {
-    config.api_key()?.to_string()
-  };
   let mut provider = ClaudeProvider::new(
-    api_key,
+    config.api_key()?.to_string(),
     config.ai.model.clone(),
     config.ai.max_retries,
   )
@@ -138,7 +134,7 @@ async fn main() -> Result<()> {
   let pipeline_config = PipelineConfig {
     target_dirs: config.general.target_dirs.clone(),
     output_dir: config.general.output_dir.clone(),
-    no_ai: cli.no_ai,
+    no_ai: false,
     max_files: config.ai.max_files_to_analyze,
     max_file_size_mb: config.ai.skip_files_larger_than_mb,
     max_cost: cli.max_cost,

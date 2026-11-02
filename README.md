@@ -102,8 +102,8 @@ spindle --purge --older-than 7
 | `--max-cost <USD>` | Stop before spending more than this on analysis. |
 | `--max-files <N>` | Cap how many files go to the model. |
 | `--batch` | Use the Batch API: half the price, minutes to hours. |
-| `--dupes-only` | Exact duplicates only — no AI, no grouping, no review screen. |
-| `--no-ai` | Skip analysis entirely; hash-based dedup only. |
+| `--dupes-only` | Duplicates only, no AI or grouping. Review the copies. |
+| `--no-ai` | Same as `--dupes-only`. |
 | `--include-trash` | Scan trash and recycle-bin folders too. |
 | `-c, --config <PATH>` | Config file to use instead of the default. |
 | `-v, --verbose` | Repeatable: `-v`, `-vv`, `-vvv`. |
