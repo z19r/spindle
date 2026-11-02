@@ -23,15 +23,23 @@ pub fn compute_blake3(path: &Path) -> Result<[u8; 32]> {
   Ok(*hasher.finalize().as_bytes())
 }
 
+/// Hash every file. A file that cannot be read (deleted mid-scan, no
+/// permission) is logged and left out rather than failing the run.
 pub fn fingerprint_files(
   files: Vec<ScannedFile>,
-) -> Result<Vec<FingerprintedFile>> {
+) -> Vec<FingerprintedFile> {
   use rayon::prelude::*;
 
   files
     .into_par_iter()
-    .map(|scanned| {
-      let blake3_hash = compute_blake3(&scanned.path)?;
+    .filter_map(|scanned| {
+      let blake3_hash = match compute_blake3(&scanned.path) {
+        Ok(hash) => hash,
+        Err(err) => {
+          tracing::warn!(error = %format!("{err:#}"), "Skipping file");
+          return None;
+        }
+      };
       let perceptual_hash = if scanned.file_type.is_image() {
         compute_perceptual_hash(&scanned.path).ok()
       } else if scanned.file_type.is_video() {
@@ -41,7 +49,7 @@ pub fn fingerprint_files(
       } else {
         None
       };
-      Ok(FingerprintedFile {
+      Some(FingerprintedFile {
         scanned,
         blake3_hash,
         perceptual_hash,
@@ -342,10 +350,25 @@ mod tests {
       make_scanned(dir.path(), "b.jpg", b"bbb"),
     ];
 
-    let results = fingerprint_files(files).unwrap();
+    let results = fingerprint_files(files);
 
     assert_eq!(results.len(), 2);
     assert_ne!(results[0].blake3_hash, results[1].blake3_hash);
+  }
+
+  #[test]
+  fn fingerprint_files_skips_unreadable_files() {
+    let dir = TempDir::new().unwrap();
+    let files = vec![
+      make_scanned(dir.path(), "a.jpg", b"aaa"),
+      make_scanned(dir.path(), "gone.jpg", b"bbb"),
+    ];
+    std::fs::remove_file(dir.path().join("gone.jpg")).unwrap();
+
+    let results = fingerprint_files(files);
+
+    assert_eq!(results.len(), 1);
+    assert!(results[0].scanned.path.ends_with("a.jpg"));
   }
 
   #[test]
@@ -357,7 +380,7 @@ mod tests {
       vec![make_scanned(dir.path(), "img.png", &png_data)];
     files[0].file_type = FileType::Image(ImageFormat::Png);
 
-    let results = fingerprint_files(files).unwrap();
+    let results = fingerprint_files(files);
 
     assert!(results[0].perceptual_hash.is_some());
   }
@@ -375,7 +398,7 @@ mod tests {
       file_type: FileType::Video(crate::model::VideoFormat::Mp4),
     }];
 
-    let results = fingerprint_files(files).unwrap();
+    let results = fingerprint_files(files);
 
     assert!(results[0].perceptual_hash.is_none());
   }

@@ -609,7 +609,7 @@ fn run_dupes_only(cli: &CliArgs, config: &Config) -> Result<()> {
   );
 
   print!("  Fingerprinting...  ");
-  let mut fingerprinted = fingerprint_files(scanned)?;
+  let mut fingerprinted = fingerprint_files(scanned);
 
   // Skip files a previous run already organized.
   if let Some(ledger_path) = spindle::config::resolve_ledger_path(cli)

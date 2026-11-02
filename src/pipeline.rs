@@ -192,7 +192,7 @@ pub async fn run<P: AiProvider>(
     })
     .await;
 
-  let mut fingerprinted = fingerprint_files(scanned)?;
+  let mut fingerprinted = fingerprint_files(scanned);
 
   // Drop files a previous run already organized (matched by path + content
   // hash); collect any brand-new files that are byte-identical to

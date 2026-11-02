@@ -639,10 +639,7 @@ fn extract_zip(
   }
 
   let scanned = scan_directory(dest).unwrap_or_default();
-  Ok(
-    crate::fingerprint::fingerprint_files(scanned)
-      .unwrap_or_default(),
-  )
+  Ok(crate::fingerprint::fingerprint_files(scanned))
 }
 
 /// `.tar.gz` and `.tgz` hold a tarball; any other `.gz` is one file.
@@ -749,10 +746,7 @@ fn extract_tar(
   }
 
   let scanned = scan_directory(dest).unwrap_or_default();
-  Ok(
-    crate::fingerprint::fingerprint_files(scanned)
-      .unwrap_or_default(),
-  )
+  Ok(crate::fingerprint::fingerprint_files(scanned))
 }
 
 /// A lone `.gz` file: decompress to the name without the suffix so the
@@ -793,10 +787,7 @@ fn extract_gz_single(
   })?;
 
   let scanned = scan_directory(dest).unwrap_or_default();
-  Ok(
-    crate::fingerprint::fingerprint_files(scanned)
-      .unwrap_or_default(),
-  )
+  Ok(crate::fingerprint::fingerprint_files(scanned))
 }
 
 /// Max bytes of extracted text sent to the API per document
