@@ -1509,6 +1509,19 @@ mod tests {
   use std::fs;
   use tempfile::TempDir;
 
+  /// The description most fake providers below return for any file.
+  fn photo_description(
+    context: &DescribeContext,
+  ) -> ContentDescription {
+    ContentDescription {
+      summary: format!("Description of {}", context.filename),
+      tags: vec![],
+      suggested_category: "photo".to_string(),
+      confidence: 0.9,
+      source: DescriptionSource::Ai,
+    }
+  }
+
   struct FakeProvider;
 
   impl AiProvider for FakeProvider {
@@ -2096,13 +2109,7 @@ mod tests {
       if context.filename == self.skip {
         anyhow::bail!("simulated analysis failure");
       }
-      Ok(ContentDescription {
-        summary: format!("Description of {}", context.filename),
-        tags: vec![],
-        suggested_category: "photo".to_string(),
-        confidence: 0.9,
-        source: DescriptionSource::Ai,
-      })
+      Ok(photo_description(context))
     }
 
     async fn propose_groups(
@@ -2230,13 +2237,7 @@ mod tests {
       _mime_type: &str,
       context: &DescribeContext,
     ) -> anyhow::Result<ContentDescription> {
-      Ok(ContentDescription {
-        summary: format!("Description of {}", context.filename),
-        tags: vec![],
-        suggested_category: "photo".to_string(),
-        confidence: 0.9,
-        source: DescriptionSource::Ai,
-      })
+      Ok(photo_description(context))
     }
 
     async fn propose_groups(
@@ -2271,13 +2272,7 @@ mod tests {
       _mime_type: &str,
       context: &DescribeContext,
     ) -> anyhow::Result<ContentDescription> {
-      Ok(ContentDescription {
-        summary: format!("Description of {}", context.filename),
-        tags: vec![],
-        suggested_category: "photo".to_string(),
-        confidence: 0.9,
-        source: DescriptionSource::Ai,
-      })
+      Ok(photo_description(context))
     }
 
     async fn propose_groups(
@@ -2314,13 +2309,7 @@ mod tests {
       _mime_type: &str,
       context: &DescribeContext,
     ) -> anyhow::Result<ContentDescription> {
-      Ok(ContentDescription {
-        summary: format!("Description of {}", context.filename),
-        tags: vec![],
-        suggested_category: "photo".to_string(),
-        confidence: 0.9,
-        source: DescriptionSource::Ai,
-      })
+      Ok(photo_description(context))
     }
 
     async fn propose_groups(
@@ -2481,13 +2470,7 @@ mod tests {
       _mime_type: &str,
       context: &DescribeContext,
     ) -> anyhow::Result<ContentDescription> {
-      Ok(ContentDescription {
-        summary: format!("Description of {}", context.filename),
-        tags: vec![],
-        suggested_category: "photo".to_string(),
-        confidence: 0.9,
-        source: DescriptionSource::Ai,
-      })
+      Ok(photo_description(context))
     }
 
     async fn propose_groups(
@@ -2680,13 +2663,7 @@ mod tests {
       _mime_type: &str,
       context: &DescribeContext,
     ) -> anyhow::Result<ContentDescription> {
-      Ok(ContentDescription {
-        summary: format!("Description of {}", context.filename),
-        tags: vec![],
-        suggested_category: "photo".to_string(),
-        confidence: 0.9,
-        source: DescriptionSource::Ai,
-      })
+      Ok(photo_description(context))
     }
 
     async fn route_files(
@@ -2793,13 +2770,7 @@ mod tests {
       _mime_type: &str,
       context: &DescribeContext,
     ) -> anyhow::Result<ContentDescription> {
-      Ok(ContentDescription {
-        summary: format!("Description of {}", context.filename),
-        tags: vec![],
-        suggested_category: "photo".to_string(),
-        confidence: 0.9,
-        source: DescriptionSource::Ai,
-      })
+      Ok(photo_description(context))
     }
 
     async fn route_files(
@@ -3272,13 +3243,7 @@ mod tests {
       _mime_type: &str,
       context: &DescribeContext,
     ) -> anyhow::Result<ContentDescription> {
-      Ok(ContentDescription {
-        summary: format!("Description of {}", context.filename),
-        tags: vec![],
-        suggested_category: "photo".to_string(),
-        confidence: 0.9,
-        source: DescriptionSource::Ai,
-      })
+      Ok(photo_description(context))
     }
 
     async fn propose_groups(
@@ -3380,13 +3345,7 @@ mod tests {
       _mime_type: &str,
       context: &DescribeContext,
     ) -> anyhow::Result<ContentDescription> {
-      Ok(ContentDescription {
-        summary: format!("Description of {}", context.filename),
-        tags: vec![],
-        suggested_category: "photo".to_string(),
-        confidence: 0.9,
-        source: DescriptionSource::Ai,
-      })
+      Ok(photo_description(context))
     }
 
     async fn propose_groups(
@@ -3544,13 +3503,7 @@ mod tests {
       _mime_type: &str,
       context: &DescribeContext,
     ) -> anyhow::Result<ContentDescription> {
-      Ok(ContentDescription {
-        summary: format!("Description of {}", context.filename),
-        tags: vec![],
-        suggested_category: "photo".to_string(),
-        confidence: 0.9,
-        source: DescriptionSource::Ai,
-      })
+      Ok(photo_description(context))
     }
 
     async fn route_files(

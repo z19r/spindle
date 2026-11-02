@@ -10,12 +10,15 @@ pub(crate) fn render_confirm_execute_modal(
   let mut lines: Vec<Line<'static>> = vec![Line::from("")];
   match state.review_mode {
     ReviewMode::Organize => {
-      let groups = state.approved_groups();
-      let moves = state.approved_moves();
+      // Counted from what the groups hold now, not from the plan the
+      // pipeline proposed: files may have been moved, removed or
+      // marked for deletion since.
+      let groups = state.approved_group_counts();
+      let moving: usize = groups.iter().map(|(_, n)| n).sum();
       lines.push(Line::from(vec![
         Span::styled("  Move ", theme::normal()),
         Span::styled(
-          format!("{}", moves.len()),
+          format!("{moving}"),
           Style::default()
             .fg(theme::ok())
             .add_modifier(Modifier::BOLD),
@@ -30,14 +33,11 @@ pub(crate) fn render_confirm_execute_modal(
         Span::styled(" folders:", theme::normal()),
       ]));
       lines.push(Line::from(""));
-      for group in groups.iter().take(6) {
+      for (group, count) in groups.iter().take(6) {
         lines.push(Line::from(vec![
           Span::styled("    ", Style::default()),
           Span::styled(group.label.clone(), theme::value()),
-          Span::styled(
-            format!("  ({} files)", group.members.len()),
-            theme::dim(),
-          ),
+          Span::styled(format!("  ({count} files)"), theme::dim()),
         ]));
       }
       if groups.len() > 6 {
@@ -165,118 +165,122 @@ pub(crate) fn render_preview_modal(
   frame: &mut Frame,
   state: &mut ReviewState,
 ) {
-  let area = frame.area();
-  let modal_w = (area.width * 75 / 100).max(40).min(area.width - 2);
-  let modal_h = (area.height * 75 / 100).max(10).min(area.height - 2);
-  let x = (area.width.saturating_sub(modal_w)) / 2;
-  let y = (area.height.saturating_sub(modal_h)) / 2;
-  let modal_area = Rect::new(x, y, modal_w, modal_h);
-
+  let modal_area = centered_modal(frame, 75, 75);
   frame.render_widget(Clear, modal_area);
 
-  let filename = state
-    .diff_state
-    .as_ref()
-    .and_then(|ds| ds.primary_path.as_ref())
-    .and_then(|p| p.file_name())
-    .map(|n| n.to_string_lossy().to_string())
-    .unwrap_or_else(|| "Preview".to_string());
-
-  let bottom_spans = vec![
-    Span::styled("[/]", theme::key_hint()),
-    Span::styled(" scroll  ", theme::dim()),
-    Span::styled("\u{2191}\u{2193}", theme::key_hint()),
-    Span::styled(" navigate  ", theme::dim()),
-    Span::styled("esc", theme::key_hint()),
-    Span::styled(" close", theme::dim()),
-  ];
-
+  let Some(ds) = state.diff_state.as_mut() else {
+    return;
+  };
   let block = Block::default()
     .borders(ratatui::widgets::Borders::ALL)
     .border_style(Style::default().fg(theme::accent()))
     .title(Span::styled(
-      format!(" {} ", filename),
+      format!(" {} ", file_name(&ds.primary.path)),
       Style::default()
         .fg(theme::accent())
         .add_modifier(Modifier::BOLD),
     ))
-    .title_bottom(Line::from(bottom_spans));
+    .title_bottom(Line::from(vec![
+      Span::styled("[/]", theme::key_hint()),
+      Span::styled(" scroll  ", theme::dim()),
+      Span::styled("esc", theme::key_hint()),
+      Span::styled(" close", theme::dim()),
+    ]));
   let inner = block.inner(modal_area);
   frame.render_widget(block, modal_area);
 
-  if let Some(ref mut ds) = state.diff_state {
-    if let Some(rx) = ds.primary_rx.as_ref() {
-      if let Ok((path, protocol)) = rx.try_recv() {
-        if Some(&path) == ds.primary_path.as_ref() {
-          ds.primary_preview =
-            PreviewState::Ready(Box::new(protocol));
-        }
-        ds.primary_rx = None;
+  let DiffContent::Text(lines) = &ds.content else {
+    render_side_image(
+      frame,
+      inner,
+      &mut ds.primary.preview,
+      "No preview available",
+    );
+    return;
+  };
+  let visible_h = inner.height as usize;
+  ds.scroll = ds.scroll.min(lines.len().saturating_sub(visible_h));
+  let shown: Vec<Line> = lines
+    .iter()
+    .skip(ds.scroll)
+    .take(visible_h)
+    .map(|line| match line {
+      DiffLine::Same(s)
+      | DiffLine::Added(s)
+      | DiffLine::Removed(s) => {
+        Line::from(Span::styled(s.clone(), theme::dim()))
       }
+    })
+    .collect();
+  frame.render_widget(Paragraph::new(shown), inner);
+}
+
+/// A file's name for a modal title or header.
+fn file_name(path: &Path) -> String {
+  path
+    .file_name()
+    .unwrap_or_default()
+    .to_string_lossy()
+    .to_string()
+}
+
+/// Draw a decoded image into `area`, or a dim line while it is still
+/// loading or when there is nothing to draw.
+fn render_side_image(
+  frame: &mut Frame,
+  area: Rect,
+  preview: &mut PreviewState,
+  none_msg: &str,
+) {
+  let msg = match preview {
+    PreviewState::Ready(protocol) => {
+      let image = ratatui_image::StatefulImage::new();
+      frame.render_stateful_widget(image, area, protocol.as_mut());
+      return;
     }
-
-    match &mut ds.primary_preview {
-      PreviewState::Ready(protocol) => {
-        let img = ratatui_image::StatefulImage::new();
-        frame.render_stateful_widget(img, inner, protocol.as_mut());
-      }
-      PreviewState::Animated(anim) => {
-        let img = ratatui_image::StatefulImage::new();
-        frame.render_stateful_widget(
-          img,
-          inner,
-          anim.protocol.as_mut(),
-        );
-      }
-      PreviewState::Loading => {
-        let loading = Paragraph::new(Span::styled(
-          "Loading preview\u{2026}",
-          theme::dim(),
-        ))
-        .alignment(Alignment::Center);
-        frame.render_widget(loading, inner);
-      }
-      PreviewState::None => match &ds.content {
-        DiffContent::Text(lines) => {
-          let visible_h = inner.height as usize;
-          let total = lines.len();
-          let scroll = ds.scroll.min(total.saturating_sub(visible_h));
-          ds.scroll = scroll;
-
-          let styled_lines: Vec<Line> = lines
-            .iter()
-            .skip(scroll)
-            .take(visible_h)
-            .map(|dl| match dl {
-              DiffLine::Same(s) => {
-                Line::from(Span::styled(s.clone(), theme::dim()))
-              }
-              DiffLine::Added(s) => Line::from(Span::styled(
-                s.clone(),
-                Style::default().fg(ratatui::style::Color::Green),
-              )),
-              DiffLine::Removed(s) => Line::from(Span::styled(
-                s.clone(),
-                Style::default().fg(ratatui::style::Color::Red),
-              )),
-            })
-            .collect();
-
-          let text = ratatui::text::Text::from(styled_lines);
-          let para = Paragraph::new(text);
-          frame.render_widget(para, inner);
-        }
-        DiffContent::Binary | DiffContent::Images => {
-          let msg = Paragraph::new(Span::styled(
-            "No preview available",
-            theme::dim(),
-          ))
-          .alignment(Alignment::Center);
-          frame.render_widget(msg, inner);
-        }
-      },
+    PreviewState::Animated(anim) => {
+      let image = ratatui_image::StatefulImage::new();
+      frame.render_stateful_widget(
+        image,
+        area,
+        anim.protocol.as_mut(),
+      );
+      return;
     }
+    PreviewState::Loading => "Loading\u{2026}",
+    PreviewState::None => none_msg,
+  };
+  frame.render_widget(
+    Paragraph::new(Span::styled(msg, theme::dim()))
+      .alignment(Alignment::Center),
+    area,
+  );
+}
+
+/// "◉ first  vs  ▸ second", with "(2/5)" when a duplicate set has more
+/// copies to cycle through.
+fn diff_header_line(
+  primary: &str,
+  secondary: &str,
+  counter: Option<(usize, usize)>,
+) -> Line<'static> {
+  let bold =
+    |color| Style::default().fg(color).add_modifier(Modifier::BOLD);
+  let mut spans = vec![
+    Span::styled(format!("  \u{25c9} {primary}"), bold(theme::ok())),
+    Span::styled("    vs    ", theme::dim()),
+    Span::styled(
+      format!("\u{25b8} {secondary}"),
+      bold(theme::warn()),
+    ),
+  ];
+  if let Some((shown, total)) = counter {
+    spans.push(Span::styled(
+      format!("  ({shown}/{total})"),
+      theme::dim(),
+    ));
   }
+  Line::from(spans)
 }
 
 pub(crate) fn render_diff_modal(
@@ -298,305 +302,170 @@ pub(crate) fn render_diff_modal(
 
   frame.render_widget(Clear, modal_area);
 
-  let moves = state.current_group_moves();
-  if moves.len() < 2 {
-    let block = diff_modal_block(&[], false);
+  let pair = state.diff_state.as_ref().and_then(|ds| {
+    let secondary = ds.secondary.as_ref()?;
+    Some((ds.primary.path.clone(), secondary.path.clone()))
+  });
+  let Some((primary, secondary)) = pair else {
     let p = Paragraph::new(Line::from(Span::styled(
       "  Not enough files to diff",
       theme::dim(),
     )))
-    .block(block);
+    .block(diff_modal_block(&[], false));
     frame.render_widget(p, modal_area);
     return;
-  }
-
-  let primary = &moves[0];
-  let secondary_idx = compare_idx + 1;
-  let secondary = match moves.get(secondary_idx) {
-    Some(m) => m,
-    None => return,
   };
-  let total_others = moves.len() - 1;
 
-  let p_name = primary
-    .from
-    .file_name()
-    .unwrap_or_default()
-    .to_string_lossy()
-    .to_string();
-  let s_name = secondary
-    .from
-    .file_name()
-    .unwrap_or_default()
-    .to_string_lossy()
-    .to_string();
+  // Only a duplicate set cycles; an organize diff is one fixed pair,
+  // and its partner may live in another group.
+  let others = match state.review_mode {
+    ReviewMode::Dupes => {
+      state.current_group_moves().len().saturating_sub(1)
+    }
+    ReviewMode::Organize => 1,
+  };
+  let counter = (others > 1).then_some((compare_idx + 1, others));
+  let header = diff_header_line(
+    &file_name(&primary),
+    &file_name(&secondary),
+    counter,
+  );
+  let kind = state
+    .dupe_info(&secondary)
+    .or_else(|| state.dupe_info(&primary))
+    .map(|info| info.kind)
+    .or_else(|| state.dupe_types.get(state.selected).copied());
 
-  let is_text_diff = state
-    .diff_state
-    .as_ref()
-    .map(|ds| matches!(ds.content, DiffContent::Text(_)))
-    .unwrap_or(false);
-  let is_image_diff = state
-    .diff_state
-    .as_ref()
-    .map(|ds| matches!(ds.content, DiffContent::Images))
-    .unwrap_or(false);
+  let metas = [&primary, &secondary]
+    .map(|path| state.file_metadata.get(path).cloned());
 
-  let mut extra_hints: Vec<(&str, &str)> = Vec::new();
-  if is_text_diff {
-    extra_hints.push(("[/]", "scroll"));
-  }
-
-  let block = diff_modal_block(&extra_hints, total_others > 1);
+  let Some(ds) = state.diff_state.as_mut() else {
+    return;
+  };
+  let is_text = matches!(ds.content, DiffContent::Text(_));
+  let hints: &[(&str, &str)] =
+    if is_text { &[("[/]", "scroll")] } else { &[] };
+  let block = diff_modal_block(hints, others > 1);
   let inner = block.inner(modal_area);
   frame.render_widget(block, modal_area);
 
-  if is_image_diff {
-    let header_h: u16 = 3;
-    let image_h = inner.height.saturating_sub(header_h);
-
-    let split = Layout::vertical([
-      Constraint::Length(header_h),
-      Constraint::Min(image_h),
-    ])
-    .split(inner);
-
-    let header_lines = vec![
-      Line::from(vec![
-        Span::styled(
-          format!("  \u{25c9} {p_name}"),
-          Style::default()
-            .fg(theme::ok())
-            .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("    vs    ", theme::dim()),
-        Span::styled(
-          format!("\u{25b8} {s_name}"),
-          Style::default()
-            .fg(theme::warn())
-            .add_modifier(Modifier::BOLD),
-        ),
-        if total_others > 1 {
-          Span::styled(
-            format!("  ({}/{})", compare_idx + 1, total_others),
-            theme::dim(),
-          )
-        } else {
-          Span::raw("")
-        },
-      ]),
-      Line::from(""),
-    ];
-    let header = Paragraph::new(header_lines);
-    frame.render_widget(header, split[0]);
-
-    let img_cols = Layout::horizontal([
-      Constraint::Percentage(50),
-      Constraint::Percentage(50),
-    ])
-    .split(split[1]);
-
-    let left_block = Block::bordered()
-      .border_type(BorderType::Rounded)
-      .title_top(Line::from(Span::styled(
+  match &ds.content {
+    DiffContent::Images => {
+      let split =
+        Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
+          .split(inner);
+      frame.render_widget(
+        Paragraph::new(vec![header, Line::from("")]),
+        split[0],
+      );
+      let cols = Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+      ])
+      .split(split[1]);
+      render_framed_side(
+        frame,
+        cols[0],
         " primary ",
-        Style::default().fg(theme::ok()),
-      )))
-      .border_style(Style::default().fg(theme::subtle()));
-
-    let right_block = Block::bordered()
-      .border_type(BorderType::Rounded)
-      .title_top(Line::from(Span::styled(
-        " compare ",
-        Style::default().fg(theme::warn()),
-      )))
-      .border_style(Style::default().fg(theme::subtle()));
-
-    let left_inner = left_block.inner(img_cols[0]);
-    let right_inner = right_block.inner(img_cols[1]);
-    frame.render_widget(left_block, img_cols[0]);
-    frame.render_widget(right_block, img_cols[1]);
-
-    if let Some(ref mut ds) = state.diff_state {
-      match &mut ds.primary_preview {
-        PreviewState::Ready(protocol) => {
-          let iw = ratatui_image::StatefulImage::new();
-          frame.render_stateful_widget(
-            iw,
-            left_inner,
-            protocol.as_mut(),
-          );
-        }
-        PreviewState::Animated(anim) => {
-          let iw = ratatui_image::StatefulImage::new();
-          frame.render_stateful_widget(
-            iw,
-            left_inner,
-            anim.protocol.as_mut(),
-          );
-        }
-        PreviewState::Loading => {
-          let loading = Paragraph::new(Span::styled(
-            "Loading\u{2026}",
-            theme::dim(),
-          ))
-          .alignment(Alignment::Center);
-          frame.render_widget(loading, left_inner);
-        }
-        PreviewState::None => {
-          let na =
-            Paragraph::new(Span::styled("No preview", theme::dim()))
-              .alignment(Alignment::Center);
-          frame.render_widget(na, left_inner);
-        }
-      }
-      match &mut ds.secondary_preview {
-        PreviewState::Ready(protocol) => {
-          let iw = ratatui_image::StatefulImage::new();
-          frame.render_stateful_widget(
-            iw,
-            right_inner,
-            protocol.as_mut(),
-          );
-        }
-        PreviewState::Animated(anim) => {
-          let iw = ratatui_image::StatefulImage::new();
-          frame.render_stateful_widget(
-            iw,
-            right_inner,
-            anim.protocol.as_mut(),
-          );
-        }
-        PreviewState::Loading => {
-          let loading = Paragraph::new(Span::styled(
-            "Loading\u{2026}",
-            theme::dim(),
-          ))
-          .alignment(Alignment::Center);
-          frame.render_widget(loading, right_inner);
-        }
-        PreviewState::None => {
-          let na =
-            Paragraph::new(Span::styled("No preview", theme::dim()))
-              .alignment(Alignment::Center);
-          frame.render_widget(na, right_inner);
-        }
+        theme::ok(),
+        &mut ds.primary.preview,
+      );
+      if let Some(side) = ds.secondary.as_mut() {
+        render_framed_side(
+          frame,
+          cols[1],
+          " compare ",
+          theme::warn(),
+          &mut side.preview,
+        );
       }
     }
-  } else if is_text_diff {
-    let header_h: u16 = 2;
-    let split = Layout::vertical([
-      Constraint::Length(header_h),
-      Constraint::Min(1),
-    ])
-    .split(inner);
+    DiffContent::Text(diff_lines) => {
+      let split =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1)])
+          .split(inner);
+      frame.render_widget(Paragraph::new(header), split[0]);
+      let visible_h = split[1].height as usize;
+      let scroll =
+        ds.scroll.min(diff_lines.len().saturating_sub(visible_h));
+      let lines = text_diff_lines(diff_lines, scroll, visible_h);
+      frame.render_widget(Paragraph::new(lines), split[1]);
+    }
+    DiffContent::Binary => {
+      render_diff_modal_metadata(frame, inner, header, metas, kind);
+    }
+  }
+}
 
-    let header_lines = vec![Line::from(vec![
-      Span::styled(
-        format!("  \u{25c9} {p_name}"),
+/// One bordered half of an image diff.
+fn render_framed_side(
+  frame: &mut Frame,
+  area: Rect,
+  title: &'static str,
+  color: ratatui::style::Color,
+  preview: &mut PreviewState,
+) {
+  let block = Block::bordered()
+    .border_type(BorderType::Rounded)
+    .title_top(Line::from(Span::styled(
+      title,
+      Style::default().fg(color),
+    )))
+    .border_style(Style::default().fg(theme::subtle()));
+  let inner = block.inner(area);
+  frame.render_widget(block, area);
+  render_side_image(frame, inner, preview, "No preview");
+}
+
+/// The visible rows of a text diff, numbered, with a banner when the
+/// two files have no differing line.
+fn text_diff_lines(
+  diff_lines: &[DiffLine],
+  scroll: usize,
+  visible_h: usize,
+) -> Vec<Line<'static>> {
+  let mut lines = Vec::new();
+  if diff_lines.iter().all(|l| matches!(l, DiffLine::Same(_))) {
+    lines.push(Line::from(Span::styled(
+      "  Files are identical",
+      Style::default()
+        .fg(theme::ok())
+        .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+  }
+  for (i, line) in diff_lines.iter().enumerate().skip(scroll) {
+    if lines.len() >= visible_h {
+      break;
+    }
+    let (marker, marker_style, text, text_style) = match line {
+      DiffLine::Same(text) => {
+        ("  ", theme::dim(), text, theme::normal())
+      }
+      DiffLine::Added(text) => (
+        "+ ",
         Style::default()
           .fg(theme::ok())
           .add_modifier(Modifier::BOLD),
+        text,
+        Style::default().fg(theme::ok()),
       ),
-      Span::styled("    vs    ", theme::dim()),
-      Span::styled(
-        format!("\u{25b8} {s_name}"),
+      DiffLine::Removed(text) => (
+        "- ",
         Style::default()
-          .fg(theme::warn())
+          .fg(theme::error())
           .add_modifier(Modifier::BOLD),
+        text,
+        Style::default().fg(theme::error()),
       ),
-      if total_others > 1 {
-        Span::styled(
-          format!("  ({}/{})", compare_idx + 1, total_others),
-          theme::dim(),
-        )
-      } else {
-        Span::raw("")
-      },
-    ])];
-    frame.render_widget(Paragraph::new(header_lines), split[0]);
-
-    if let Some(ref ds) = state.diff_state {
-      if let DiffContent::Text(ref diff_lines) = ds.content {
-        let visible_h = split[1].height as usize;
-        let scroll =
-          ds.scroll.min(diff_lines.len().saturating_sub(visible_h));
-        let mut lines: Vec<Line> = Vec::new();
-
-        let all_same =
-          diff_lines.iter().all(|l| matches!(l, DiffLine::Same(_)));
-
-        if all_same {
-          lines.push(Line::from(Span::styled(
-            "  Files are identical",
-            Style::default()
-              .fg(theme::ok())
-              .add_modifier(Modifier::BOLD),
-          )));
-          lines.push(Line::from(""));
-        }
-
-        for (i, dl) in diff_lines.iter().enumerate().skip(scroll) {
-          if lines.len() >= visible_h {
-            break;
-          }
-          let line_no = format!("{:>4} ", i + 1);
-          match dl {
-            DiffLine::Same(text) => {
-              lines.push(Line::from(vec![
-                Span::styled(line_no, theme::dim()),
-                Span::styled("  ", theme::dim()),
-                Span::styled(text.clone(), theme::normal()),
-              ]));
-            }
-            DiffLine::Added(text) => {
-              lines.push(Line::from(vec![
-                Span::styled(line_no, theme::dim()),
-                Span::styled(
-                  "+ ",
-                  Style::default()
-                    .fg(theme::ok())
-                    .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                  text.clone(),
-                  Style::default().fg(theme::ok()),
-                ),
-              ]));
-            }
-            DiffLine::Removed(text) => {
-              lines.push(Line::from(vec![
-                Span::styled(line_no, theme::dim()),
-                Span::styled(
-                  "- ",
-                  Style::default()
-                    .fg(theme::error())
-                    .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                  text.clone(),
-                  Style::default().fg(theme::error()),
-                ),
-              ]));
-            }
-          }
-        }
-
-        let diff_para = Paragraph::new(lines);
-        frame.render_widget(diff_para, split[1]);
-      }
-    }
-  } else {
-    render_diff_modal_metadata(
-      frame,
-      inner,
-      state,
-      &p_name,
-      &s_name,
-      compare_idx,
-      total_others,
-    );
+    };
+    lines.push(Line::from(vec![
+      Span::styled(format!("{:>4} ", i + 1), theme::dim()),
+      Span::styled(marker, marker_style),
+      Span::styled(text.clone(), text_style),
+    ]));
   }
+  lines
 }
 
 pub(crate) fn diff_modal_block<'a>(
@@ -632,50 +501,21 @@ pub(crate) fn diff_modal_block<'a>(
     .padding(Padding::new(1, 1, 1, 0))
 }
 
+/// Size, hash and verdict for two files that cannot be shown side by
+/// side. `metas` holds each file's (hash, size), primary first.
 pub(crate) fn render_diff_modal_metadata(
   frame: &mut Frame,
   area: Rect,
-  state: &ReviewState,
-  p_name: &str,
-  s_name: &str,
-  compare_idx: usize,
-  total_others: usize,
+  header: Line<'static>,
+  metas: [Option<(String, u64)>; 2],
+  dupe_type: Option<DuplicateType>,
 ) {
-  let moves = state.current_group_moves();
-  let primary = &moves[0];
-  let secondary = &moves[compare_idx + 1];
-  let dupe_type = state.dupe_types.get(state.selected).copied();
-  let p_meta = state.file_metadata.get(&primary.from);
-  let s_meta = state.file_metadata.get(&secondary.from);
+  let [p_meta, s_meta] = metas;
+  let p_meta = p_meta.as_ref();
   let p_size = p_meta.map(|(_, s)| *s).unwrap_or(0);
-  let s_size = s_meta.map(|(_, s)| *s).unwrap_or(0);
+  let s_size = s_meta.map(|(_, s)| s).unwrap_or(0);
 
-  let mut lines = Vec::new();
-
-  lines.push(Line::from(vec![
-    Span::styled(
-      format!("  \u{25c9} {p_name}"),
-      Style::default()
-        .fg(theme::ok())
-        .add_modifier(Modifier::BOLD),
-    ),
-    Span::styled("    vs    ", theme::dim()),
-    Span::styled(
-      format!("\u{25b8} {s_name}"),
-      Style::default()
-        .fg(theme::warn())
-        .add_modifier(Modifier::BOLD),
-    ),
-    if total_others > 1 {
-      Span::styled(
-        format!("  ({}/{})", compare_idx + 1, total_others),
-        theme::dim(),
-      )
-    } else {
-      Span::raw("")
-    },
-  ]));
-  lines.push(Line::from(""));
+  let mut lines = vec![header, Line::from("")];
 
   lines.push(Line::from(Span::styled("  SIZE", theme::label())));
   if p_size == s_size {

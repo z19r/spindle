@@ -155,14 +155,14 @@ fn parse_theme(s: &str) -> Result<String, String> {
   ))
 }
 
-/// Resolve the ledger path for this run: `None` when disabled, otherwise the
-/// explicit `--ledger` path or the global default.
 /// `None` when corrections are disabled for this run.
 pub fn resolve_corrections_path(cli: &CliArgs) -> Option<PathBuf> {
   (!cli.no_corrections)
     .then(crate::corrections::default_corrections_path)
 }
 
+/// Resolve the ledger path for this run: `None` when disabled, otherwise the
+/// explicit `--ledger` path or the global default.
 pub fn resolve_ledger_path(cli: &CliArgs) -> Option<PathBuf> {
   if cli.no_ledger {
     return None;
@@ -389,6 +389,20 @@ fn dirs_home() -> PathBuf {
   directories::BaseDirs::new()
     .map(|d| d.home_dir().to_path_buf())
     .unwrap_or_else(|| PathBuf::from("~"))
+}
+
+/// `<data_dir>/spindle`: journal, trash, ledger, corrections and log.
+pub fn data_dir() -> PathBuf {
+  directories::BaseDirs::new()
+    .map(|d| d.data_dir().join("spindle"))
+    .unwrap_or_else(|| PathBuf::from(".local/share/spindle"))
+}
+
+/// `<cache_dir>/spindle`: cached descriptions, groupings and routings.
+pub fn cache_dir() -> PathBuf {
+  directories::BaseDirs::new()
+    .map(|d| d.cache_dir().join("spindle"))
+    .unwrap_or_else(|| PathBuf::from(".cache/spindle"))
 }
 
 fn config_path() -> PathBuf {

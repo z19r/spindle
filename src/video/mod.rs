@@ -28,17 +28,6 @@ pub fn ffmpeg_available() -> bool {
   })
 }
 
-pub async fn check_ffmpeg() -> bool {
-  tokio::process::Command::new("ffmpeg")
-    .arg("-version")
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status()
-    .await
-    .map(|s| s.success())
-    .unwrap_or(false)
-}
-
 /// How many decode threads to hand one ffmpeg child when `concurrency`
 /// of them run at once.
 ///

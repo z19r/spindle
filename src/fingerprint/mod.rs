@@ -237,9 +237,10 @@ pub(crate) fn decode_via_magick(
     );
   }
 
-  let img = image::open(&tmp)?;
+  // Remove the temp file whether or not it decodes.
+  let img = image::open(&tmp);
   let _ = std::fs::remove_file(&tmp);
-  Ok(img)
+  Ok(img?)
 }
 
 /// `None` when the hashes have different lengths — they come from

@@ -351,28 +351,31 @@ impl ClaudeProvider {
 
   /// Use a different (usually cheaper) model for per-file
   /// descriptions than for grouping.
-  pub fn with_describe_model(self, model: impl Into<String>) -> Self {
-    let mut this = self;
-    this.describe_model = model.into();
-    this
+  pub fn with_describe_model(
+    mut self,
+    model: impl Into<String>,
+  ) -> Self {
+    self.describe_model = model.into();
+    self
   }
 
   #[cfg(test)]
   pub fn with_poll_interval(
-    self,
+    mut self,
     interval: std::time::Duration,
   ) -> Self {
-    let mut this = self;
-    this.poll_interval = interval;
-    this
+    self.poll_interval = interval;
+    self
   }
 
   /// Give up on a single API call after `timeout`; the call is then
   /// retried like any other transport error.
-  pub fn with_timeout(self, timeout: std::time::Duration) -> Self {
-    let mut this = self;
-    this.client = http_client(timeout);
-    this
+  pub fn with_timeout(
+    mut self,
+    timeout: std::time::Duration,
+  ) -> Self {
+    self.client = http_client(timeout);
+    self
   }
 
   fn record_usage(&self, model: &str, usage: Usage) {
@@ -381,19 +384,11 @@ impl ClaudeProvider {
     }
   }
 
-  /// Treat a streaming reply as stalled after `idle` without bytes.
-  pub fn with_idle_timeout(self, idle: std::time::Duration) -> Self {
-    let mut this = self;
-    this.idle_timeout = idle;
-    this
-  }
-
   /// Override the API base URL (e.g. for a proxy). Trailing slashes are
   /// trimmed so endpoint joining stays correct.
-  pub fn with_base_url(self, url: impl Into<String>) -> Self {
-    let mut this = self;
-    this.base_url = url.into().trim_end_matches('/').to_string();
-    this
+  pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
+    self.base_url = url.into().trim_end_matches('/').to_string();
+    self
   }
 
   async fn send_request(

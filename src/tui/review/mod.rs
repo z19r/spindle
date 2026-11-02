@@ -126,13 +126,19 @@ enum DiffContent {
   Binary,
 }
 
+/// One file in the preview or diff modal, and its image once a worker
+/// thread has decoded it.
+struct DiffSide {
+  path: PathBuf,
+  preview: PreviewState,
+  rx: Option<Receiver<(PathBuf, StatefulProtocol)>>,
+}
+
+/// What the preview modal (one file) or diff modal (two) shows.
 struct DiffState {
-  primary_preview: PreviewState,
-  secondary_preview: PreviewState,
-  primary_rx: Option<Receiver<(PathBuf, StatefulProtocol)>>,
-  secondary_rx: Option<Receiver<(PathBuf, StatefulProtocol)>>,
-  primary_path: Option<PathBuf>,
-  secondary_path: Option<PathBuf>,
+  primary: DiffSide,
+  /// The file compared against; `None` in the preview.
+  secondary: Option<DiffSide>,
   content: DiffContent,
   scroll: usize,
 }

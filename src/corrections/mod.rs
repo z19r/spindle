@@ -51,10 +51,7 @@ impl Default for Corrections {
 
 /// `<data_dir>/spindle/corrections.json`, beside the ledger.
 pub fn default_corrections_path() -> PathBuf {
-  directories::BaseDirs::new()
-    .map(|d| d.data_dir().join("spindle"))
-    .unwrap_or_else(|| PathBuf::from(".local/share/spindle"))
-    .join("corrections.json")
+  crate::config::data_dir().join("corrections.json")
 }
 
 impl Corrections {

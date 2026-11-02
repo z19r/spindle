@@ -119,43 +119,95 @@ pub(crate) fn decode_animation(
   (frames.len() > 1).then_some(frames)
 }
 
+/// Decode an image for a preview, through ImageMagick for formats the
+/// `image` crate cannot read (HEIC, AVIF, …).
 pub(crate) fn decode_image(
   path: &Path,
 ) -> Option<image::DynamicImage> {
-  match image::ImageReader::open(path)
+  let decoded = image::ImageReader::open(path)
     .and_then(|r| r.with_guessed_format())
-  {
-    Ok(reader) => match reader.decode() {
-      Ok(img) => return Some(img),
-      Err(e) => {
-        tracing::debug!(?path, %e, "image crate failed, trying magick")
-      }
-    },
+    .map_err(image::ImageError::IoError)
+    .and_then(|r| r.decode());
+  match decoded {
+    Ok(img) => return Some(img),
     Err(e) => {
       tracing::debug!(?path, %e, "image crate failed, trying magick")
     }
   }
+  crate::fingerprint::decode_via_magick(path, 1200)
+    .map_err(
+      |e| tracing::warn!(?path, %e, "magick convert also failed"),
+    )
+    .ok()
+}
 
-  let tmp = std::env::temp_dir()
-    .join(format!("spindle-preview-{}.png", std::process::id()));
-  let ok = std::process::Command::new("magick")
-    .arg("convert")
-    .arg(path)
-    .arg("-resize")
-    .arg("1200x1200>")
-    .arg(&tmp)
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status()
-    .map(|s| s.success())
-    .unwrap_or(false);
-  if !ok {
-    tracing::warn!(?path, "magick convert also failed");
-    return None;
+/// The lines a text modal shows: the file itself, or its line diff
+/// against `other`. An unreadable file reads as empty.
+pub(crate) fn text_lines(path: &Path, other: Option<&Path>) -> Vec<DiffLine> {
+  let text = std::fs::read_to_string(path).unwrap_or_default();
+  let Some(other) = other else {
+    return text
+      .lines()
+      .map(|l| DiffLine::Same(l.to_string()))
+      .collect();
+  };
+  let other_text = std::fs::read_to_string(other).unwrap_or_default();
+  similar::TextDiff::from_lines(&text, &other_text)
+    .iter_all_changes()
+    .map(|change| {
+      let line = change.value().trim_end_matches('\n').to_string();
+      match change.tag() {
+        similar::ChangeTag::Equal => DiffLine::Same(line),
+        similar::ChangeTag::Insert => DiffLine::Added(line),
+        similar::ChangeTag::Delete => DiffLine::Removed(line),
+      }
+    })
+    .collect()
+}
+
+impl DiffSide {
+  /// Start decoding `path` on a worker thread when there is a picker
+  /// to draw it with; without one the side shows no preview rather
+  /// than "Loading" forever.
+  fn new(path: PathBuf, picker: Option<&Picker>) -> Self {
+    let rx = picker.map(|picker| {
+      let picker = picker.clone();
+      let path = path.clone();
+      let (tx, rx) = mpsc::channel();
+      thread::spawn(move || {
+        if let Some(img) = decode_image(&path) {
+          let _ = tx.send((path, picker.new_resize_protocol(img)));
+        }
+      });
+      rx
+    });
+    let preview = if rx.is_some() {
+      PreviewState::Loading
+    } else {
+      PreviewState::None
+    };
+    Self { path, preview, rx }
   }
-  let result = image::open(&tmp).ok();
-  let _ = std::fs::remove_file(&tmp);
-  result
+
+  /// Take the decoded image if the worker has finished.
+  fn poll(&mut self) {
+    let Some(rx) = &self.rx else { return };
+    match rx.try_recv() {
+      Ok((path, protocol)) => {
+        if path == self.path {
+          self.preview = PreviewState::Ready(Box::new(protocol));
+        }
+        self.rx = None;
+      }
+      Err(mpsc::TryRecvError::Disconnected) => {
+        if matches!(self.preview, PreviewState::Loading) {
+          self.preview = PreviewState::None;
+        }
+        self.rx = None;
+      }
+      Err(mpsc::TryRecvError::Empty) => {}
+    }
+  }
 }
 
 impl ReviewState {
@@ -338,7 +390,20 @@ impl ReviewState {
     self.file_notes.get(path).map(String::as_str)
   }
 
+  /// Dupes mode: record what kind of match each set is. Only sets whose
+  /// extra copies are redundant by content (byte-identical files, an
+  /// archive already extracted) start with them marked for deletion;
+  /// look-alike photos, similar text and same-recording audio are
+  /// different files, so they start kept until the user decides.
   pub fn set_dupe_types(&mut self, types: Vec<DuplicateType>) {
+    for (keeps, kind) in self.file_keep.iter_mut().zip(&types) {
+      if !matches!(
+        kind,
+        DuplicateType::Exact | DuplicateType::ArchiveMatch
+      ) {
+        keeps.fill(true);
+      }
+    }
     self.dupe_types = types;
   }
 
@@ -471,6 +536,23 @@ impl ReviewState {
       .enumerate()
       .filter(|(i, _)| self.approved[*i])
       .map(|(_, g)| g)
+      .collect()
+  }
+
+  /// Each approved group with the number of files that will move into
+  /// it: what is in the group now, less what is marked for deletion.
+  pub fn approved_group_counts(&self) -> Vec<(&FileGroup, usize)> {
+    self
+      .groups
+      .iter()
+      .enumerate()
+      .filter(|(i, _)| self.approved[*i])
+      .map(|(gi, group)| {
+        let kept = (0..self.group_moves[gi].len())
+          .filter(|&fi| self.is_file_kept(gi, fi))
+          .count();
+        (group, kept)
+      })
       .collect()
   }
 
@@ -673,16 +755,14 @@ impl ReviewState {
 
   pub(crate) fn enter_diff_view(&mut self, compare_idx: usize) {
     let moves = self.current_group_moves();
-    if moves.len() < 2 {
+    let (Some(primary), Some(secondary)) =
+      (moves.first(), moves.get(compare_idx + 1))
+    else {
       return;
-    }
-    let primary_path = moves[0].from.clone();
-    let secondary_idx = compare_idx + 1;
-    let secondary_path = match moves.get(secondary_idx) {
-      Some(m) => m.from.clone(),
-      None => return,
     };
-    self.enter_diff_paths(primary_path, secondary_path);
+    let (primary, secondary) =
+      (primary.from.clone(), secondary.from.clone());
+    self.open_modal(primary, Some(secondary));
   }
 
   /// Organize mode: diff the current file against its duplicate
@@ -701,107 +781,7 @@ impl ReviewState {
       (info.partner, path)
     };
     self.mode = Mode::DiffView { compare_idx: 0 };
-    self.enter_diff_paths(primary, secondary);
-  }
-
-  pub(crate) fn enter_diff_paths(
-    &mut self,
-    primary_path: PathBuf,
-    secondary_path: PathBuf,
-  ) {
-    let primary_ext = primary_path
-      .extension()
-      .and_then(|e| e.to_str())
-      .map(FileType::from_extension);
-
-    let is_image = primary_ext
-      .as_ref()
-      .map(|ft| ft.is_image())
-      .unwrap_or(false);
-
-    let is_text =
-      primary_ext.as_ref().map(|ft| ft.is_text()).unwrap_or(false);
-
-    if is_image {
-      let mut ds = DiffState {
-        primary_preview: PreviewState::Loading,
-        secondary_preview: PreviewState::Loading,
-        primary_rx: None,
-        secondary_rx: None,
-        primary_path: Some(primary_path.clone()),
-        secondary_path: Some(secondary_path.clone()),
-        content: DiffContent::Images,
-        scroll: 0,
-      };
-
-      if let Some(picker) = &self.picker {
-        let pk1 = picker.clone();
-        let (tx1, rx1) = mpsc::channel();
-        let p1 = primary_path.clone();
-        thread::spawn(move || {
-          if let Some(img) = decode_image(&p1) {
-            let protocol = pk1.new_resize_protocol(img);
-            let _ = tx1.send((p1, protocol));
-          }
-        });
-        ds.primary_rx = Some(rx1);
-
-        let pk2 = picker.clone();
-        let (tx2, rx2) = mpsc::channel();
-        let p2 = secondary_path.clone();
-        thread::spawn(move || {
-          if let Some(img) = decode_image(&p2) {
-            let protocol = pk2.new_resize_protocol(img);
-            let _ = tx2.send((p2, protocol));
-          }
-        });
-        ds.secondary_rx = Some(rx2);
-      }
-
-      self.diff_state = Some(ds);
-    } else if is_text {
-      let primary_text =
-        std::fs::read_to_string(&primary_path).unwrap_or_default();
-      let secondary_text =
-        std::fs::read_to_string(&secondary_path).unwrap_or_default();
-
-      let diff =
-        similar::TextDiff::from_lines(&primary_text, &secondary_text);
-      let lines: Vec<DiffLine> = diff
-        .iter_all_changes()
-        .map(|change| {
-          let text =
-            change.value().trim_end_matches('\n').to_string();
-          match change.tag() {
-            similar::ChangeTag::Equal => DiffLine::Same(text),
-            similar::ChangeTag::Insert => DiffLine::Added(text),
-            similar::ChangeTag::Delete => DiffLine::Removed(text),
-          }
-        })
-        .collect();
-
-      self.diff_state = Some(DiffState {
-        primary_preview: PreviewState::None,
-        secondary_preview: PreviewState::None,
-        primary_rx: None,
-        secondary_rx: None,
-        primary_path: Some(primary_path),
-        secondary_path: Some(secondary_path),
-        content: DiffContent::Text(lines),
-        scroll: 0,
-      });
-    } else {
-      self.diff_state = Some(DiffState {
-        primary_preview: PreviewState::None,
-        secondary_preview: PreviewState::None,
-        primary_rx: None,
-        secondary_rx: None,
-        primary_path: Some(primary_path),
-        secondary_path: Some(secondary_path),
-        content: DiffContent::Binary,
-        scroll: 0,
-      });
-    }
+    self.open_modal(primary, Some(secondary));
   }
 
   pub(crate) fn exit_diff_view(&mut self) {
@@ -809,78 +789,43 @@ impl ReviewState {
   }
 
   pub(crate) fn enter_preview(&mut self) {
-    let mv = match self.current_file_move() {
-      Some(m) => m,
-      None => return,
+    let Some(path) = self.current_file_move().map(|m| m.from.clone())
+    else {
+      return;
     };
-    let path = mv.from.clone();
+    self.open_modal(path, None);
+    self.mode = Mode::Preview;
+  }
 
-    let ft = path
+  /// Load what the preview (one file) or diff (two) modal shows. The
+  /// first file's type decides: images decode in the background,
+  /// text is read and diffed, anything else gets the metadata view.
+  fn open_modal(
+    &mut self,
+    primary: PathBuf,
+    secondary: Option<PathBuf>,
+  ) {
+    let file_type = primary
       .extension()
       .and_then(|e| e.to_str())
       .map(FileType::from_extension);
+    let is_image = file_type.as_ref().is_some_and(FileType::is_image);
+    let is_text = file_type.as_ref().is_some_and(FileType::is_text);
 
-    let is_image = ft.as_ref().map(|f| f.is_image()).unwrap_or(false);
-    let is_text = ft.as_ref().map(|f| f.is_text()).unwrap_or(false);
-
-    if is_image {
-      let mut ds = DiffState {
-        primary_preview: PreviewState::Loading,
-        secondary_preview: PreviewState::None,
-        primary_rx: None,
-        secondary_rx: None,
-        primary_path: Some(path.clone()),
-        secondary_path: None,
-        content: DiffContent::Images,
-        scroll: 0,
-      };
-
-      if let Some(picker) = &self.picker {
-        let pk = picker.clone();
-        let (tx, rx) = mpsc::channel();
-        let p = path;
-        thread::spawn(move || {
-          if let Some(img) = decode_image(&p) {
-            let protocol = pk.new_resize_protocol(img);
-            let _ = tx.send((p, protocol));
-          }
-        });
-        ds.primary_rx = Some(rx);
-      } else {
-        ds.primary_preview = PreviewState::None;
-      }
-
-      self.diff_state = Some(ds);
+    let content = if is_image {
+      DiffContent::Images
     } else if is_text {
-      let text = std::fs::read_to_string(&path).unwrap_or_default();
-      let lines: Vec<DiffLine> = text
-        .lines()
-        .map(|l| DiffLine::Same(l.to_string()))
-        .collect();
-      self.diff_state = Some(DiffState {
-        primary_preview: PreviewState::None,
-        secondary_preview: PreviewState::None,
-        primary_rx: None,
-        secondary_rx: None,
-        primary_path: Some(path),
-        secondary_path: None,
-        content: DiffContent::Text(lines),
-        scroll: 0,
-      });
+      DiffContent::Text(text_lines(&primary, secondary.as_deref()))
     } else {
-      self.diff_state = Some(DiffState {
-        primary_preview: PreviewState::None,
-        secondary_preview: PreviewState::None,
-        primary_rx: None,
-        secondary_rx: None,
-        primary_path: Some(path),
-        secondary_path: None,
-        content: DiffContent::Binary,
-        scroll: 0,
-      });
-    }
-
-    self.mode = Mode::Preview;
+      DiffContent::Binary
+    };
+    let picker = self.picker.as_ref().filter(|_| is_image);
+    self.diff_state = Some(DiffState {
+      primary: DiffSide::new(primary, picker),
+      secondary: secondary.map(|path| DiffSide::new(path, picker)),
+      content,
+      scroll: 0,
+    });
   }
 
   pub(crate) fn update_image_preview(&mut self) {
@@ -955,42 +900,10 @@ impl ReviewState {
       }
     }
 
-    if let Some(ref mut ds) = self.diff_state {
-      if let Some(rx) = &ds.primary_rx {
-        match rx.try_recv() {
-          Ok((path, protocol)) => {
-            if Some(&path) == ds.primary_path.as_ref() {
-              ds.primary_preview =
-                PreviewState::Ready(Box::new(protocol));
-            }
-            ds.primary_rx = None;
-          }
-          Err(mpsc::TryRecvError::Disconnected) => {
-            if matches!(ds.primary_preview, PreviewState::Loading) {
-              ds.primary_preview = PreviewState::None;
-            }
-            ds.primary_rx = None;
-          }
-          Err(mpsc::TryRecvError::Empty) => {}
-        }
-      }
-      if let Some(rx) = &ds.secondary_rx {
-        match rx.try_recv() {
-          Ok((path, protocol)) => {
-            if Some(&path) == ds.secondary_path.as_ref() {
-              ds.secondary_preview =
-                PreviewState::Ready(Box::new(protocol));
-            }
-            ds.secondary_rx = None;
-          }
-          Err(mpsc::TryRecvError::Disconnected) => {
-            if matches!(ds.secondary_preview, PreviewState::Loading) {
-              ds.secondary_preview = PreviewState::None;
-            }
-            ds.secondary_rx = None;
-          }
-          Err(mpsc::TryRecvError::Empty) => {}
-        }
+    if let Some(ds) = &mut self.diff_state {
+      ds.primary.poll();
+      if let Some(side) = &mut ds.secondary {
+        side.poll();
       }
     }
   }

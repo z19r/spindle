@@ -74,7 +74,8 @@ async fn main() -> Result<()> {
   // Piped runs and --json/--yes keep stderr, which stays off stdout.
   let interactive =
     std::io::stdout().is_terminal() && !cli.yes && !cli.json;
-  let log_path = interactive.then(default_log_path);
+  let log_path = interactive
+    .then(|| spindle::config::data_dir().join("spindle.log"));
   let log_file = log_path.as_ref().and_then(|p| {
     std::fs::create_dir_all(p.parent()?).ok()?;
     std::fs::OpenOptions::new()
@@ -144,7 +145,7 @@ async fn main() -> Result<()> {
     near_duplicate_threshold: config
       .duplicates
       .near_duplicate_threshold,
-    cache_dir: default_cache_dir(),
+    cache_dir: spindle::config::cache_dir(),
     max_concurrent: config.ai.max_concurrent_requests,
     include_trash: cli.include_trash,
     type_filter: cli.file_types.clone(),
@@ -169,13 +170,12 @@ async fn main() -> Result<()> {
   // output gets plain lines instead.
   // --yes and --json never open the review screen, so keep the plain
   // progress lines for them too.
-  let session =
-    if std::io::stdout().is_terminal() && !cli.yes && !cli.json {
-      init_theme(&cli, &config);
-      Some(TerminalSession::enter()?)
-    } else {
-      None
-    };
+  let session = if interactive {
+    init_theme(&cli, &config);
+    Some(TerminalSession::enter()?)
+  } else {
+    None
+  };
   let event_handle: tokio::task::JoinHandle<(
     Option<TerminalSession>,
     Result<()>,
@@ -733,11 +733,22 @@ fn dupes_to_groups(
 
     dupe_types.push(set.duplicate_type);
 
+    // Dupes mode never relocates: each "move" stays put, and the
+    // review screen only decides which copies are deleted.
+    for &idx in &members {
+      let path = &fingerprinted[idx].scanned.path;
+      moves.push(FileMove {
+        from: path.clone(),
+        to: path.clone(),
+        group_id: i,
+      });
+    }
+
     groups.push(FileGroup {
       id: i,
       label: format!("Duplicate Set {}", i + 1),
       rationale,
-      members: members.clone(),
+      members,
       member_destinations: vec![],
       suggested_path: canonical
         .scanned
@@ -747,21 +758,6 @@ fn dupes_to_groups(
         .to_path_buf(),
       member_notes: vec![],
     });
-
-    moves.push(FileMove {
-      from: canonical.scanned.path.clone(),
-      to: canonical.scanned.path.clone(),
-      group_id: i,
-    });
-
-    for &dup_idx in &set.duplicates {
-      let dup = &fingerprinted[dup_idx];
-      moves.push(FileMove {
-        from: dup.scanned.path.clone(),
-        to: dup.scanned.path.clone(),
-        group_id: i,
-      });
-    }
   }
 
   (groups, moves, dupe_types)
@@ -973,21 +969,6 @@ fn print_undo_info(report: &ExecutionReport) {
       report.run_id
     );
   }
-}
-
-fn default_log_path() -> std::path::PathBuf {
-  directories::BaseDirs::new()
-    .map(|d| d.data_dir().join("spindle"))
-    .unwrap_or_else(|| {
-      std::path::PathBuf::from(".local/share/spindle")
-    })
-    .join("spindle.log")
-}
-
-fn default_cache_dir() -> std::path::PathBuf {
-  directories::BaseDirs::new()
-    .map(|d| d.cache_dir().join("spindle"))
-    .unwrap_or_else(|| std::path::PathBuf::from(".cache/spindle"))
 }
 
 fn format_bytes(bytes: u64) -> String {
