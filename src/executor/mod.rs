@@ -239,6 +239,10 @@ pub struct UndoReport {
   /// (wanted, actually restored to). The file is back and nothing was
   /// destroyed, but it does not have its old name.
   pub renamed: Vec<(PathBuf, PathBuf)>,
+  /// Organized destinations whose file was moved back. Their ledger
+  /// entries must go, or the next run would see the restored file at
+  /// its old path and skip it as already organized.
+  pub unfiled: Vec<PathBuf>,
 }
 
 /// Reverse a journaled run: moves go back where they came from and
@@ -261,16 +265,19 @@ pub fn undo_run(
   let mut restored = Vec::new();
   let mut failed = Vec::new();
   let mut renamed = Vec::new();
+  let mut unfiled = Vec::new();
 
   // Reverse moves last-first so nested collisions unwind cleanly.
   for mv in run_journal.moves.iter().rev() {
-    restore(
+    if restore(
       &mv.to,
       &mv.from,
       &mut restored,
       &mut failed,
       &mut renamed,
-    );
+    ) {
+      unfiled.push(mv.to.clone());
+    }
   }
   for del in &run_journal.deletions {
     restore(
@@ -291,6 +298,7 @@ pub fn undo_run(
     restored,
     failed,
     renamed,
+    unfiled,
   })
 }
 
@@ -309,7 +317,7 @@ fn restore(
   restored: &mut Vec<PathBuf>,
   failed: &mut Vec<(PathBuf, String)>,
   renamed: &mut Vec<(PathBuf, PathBuf)>,
-) {
+) -> bool {
   let dest = unique_dest(wanted);
   match move_file(from, &dest) {
     Ok(()) => {
@@ -317,8 +325,12 @@ fn restore(
         renamed.push((wanted.to_path_buf(), dest.clone()));
       }
       restored.push(dest);
+      true
     }
-    Err(e) => failed.push((wanted.to_path_buf(), e.to_string())),
+    Err(e) => {
+      failed.push((wanted.to_path_buf(), e.to_string()));
+      false
+    }
   }
 }
 
@@ -531,6 +543,7 @@ mod tests {
     assert!(undo.failed.is_empty());
     assert!(src.path().join("restore.jpg").exists());
     assert!(!dest.path().join("restore.jpg").exists());
+    assert_eq!(undo.unfiled, vec![dest.path().join("restore.jpg")]);
     // Undone run no longer shows up as undoable.
     assert!(journal::list_runs(&paths.journal_dir).is_empty());
   }

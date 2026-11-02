@@ -468,6 +468,7 @@ fn run_undo(cli: &CliArgs) -> Result<()> {
   let paths = ExecutorPaths::default_paths();
   let report =
     spindle::executor::undo_run(&paths, cli.undo_run.as_deref())?;
+  forget_unfiled(cli, &report.unfiled);
 
   println!(
     "Undid run {}: {} restored, {} failed.",
@@ -501,6 +502,29 @@ fn run_undo(cli: &CliArgs) -> Result<()> {
     );
   }
   Ok(())
+}
+
+/// Take files an undo moved back out of the ledger, so the next run
+/// treats them as new instead of skipping them as already organized.
+/// A ledger write failure is logged, never fatal: the files are back.
+fn forget_unfiled(cli: &CliArgs, unfiled: &[std::path::PathBuf]) {
+  let Some(path) = spindle::config::resolve_ledger_path(cli) else {
+    return;
+  };
+  if unfiled.is_empty() || !path.exists() {
+    return;
+  }
+  let mut ledger = Ledger::load(&path);
+  if ledger.forget(unfiled) == 0 {
+    return;
+  }
+  if let Err(err) = ledger.save(&path) {
+    tracing::warn!(
+      path = %path.display(),
+      error = %err,
+      "Failed to update the ledger after undo"
+    );
+  }
 }
 
 fn run_list_undo() -> Result<()> {

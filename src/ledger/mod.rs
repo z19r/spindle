@@ -121,6 +121,17 @@ impl Ledger {
     self.entries.push(entry);
   }
 
+  /// Drop the records of files that were filed at any of `dests`, so
+  /// files an undo moved back count as new again. Returns how many
+  /// records went.
+  pub fn forget(&mut self, dests: &[PathBuf]) -> usize {
+    let dests: std::collections::HashSet<&PathBuf> =
+      dests.iter().collect();
+    let before = self.entries.len();
+    self.entries.retain(|e| !dests.contains(&e.dest_path));
+    before - self.entries.len()
+  }
+
   /// Has this exact file (matching content hash at this exact path) already
   /// been organized? Matches either the source or the destination path so a
   /// re-scan of either location recognizes the file.
@@ -208,6 +219,19 @@ mod tests {
       group_label: label.to_string(),
       organized_at: "2026-06-13T00:00:00Z".to_string(),
     }
+  }
+
+  #[test]
+  fn forget_drops_only_the_given_destinations() {
+    let mut ledger = Ledger::default();
+    ledger.record(entry("/dl/a.jpg", "/out/p/a.jpg", "h1", "P"));
+    ledger.record(entry("/dl/b.jpg", "/out/p/b.jpg", "h2", "P"));
+
+    let gone = ledger.forget(&[PathBuf::from("/out/p/a.jpg")]);
+
+    assert_eq!(gone, 1);
+    assert!(!ledger.is_organized(Path::new("/dl/a.jpg"), "h1"));
+    assert!(ledger.is_organized(Path::new("/dl/b.jpg"), "h2"));
   }
 
   #[test]
