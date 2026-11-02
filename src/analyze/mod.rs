@@ -25,6 +25,8 @@ pub struct AnalyzeOptions {
   /// Extract video keyframes with ffmpeg. Callers set this from
   /// `video::ffmpeg_available()`; tests turn it off.
   pub use_ffmpeg: bool,
+  /// Stop describing once the provider reports this much spend (USD).
+  pub max_cost: Option<f64>,
 }
 
 impl Default for AnalyzeOptions {
@@ -37,6 +39,7 @@ impl Default for AnalyzeOptions {
       max_archive_files: 20,
       max_archive_file_size_mb: 50,
       use_ffmpeg: false,
+      max_cost: None,
     }
   }
 }
@@ -532,6 +535,7 @@ async fn extract_and_analyze_archive(
     max_archive_files: 0,
     max_archive_file_size_mb: 0,
     use_ffmpeg: options.use_ffmpeg,
+    max_cost: options.max_cost,
   };
 
   let mut results = Vec::new();
@@ -1317,6 +1321,15 @@ pub async fn analyze_batch(
           .acquire()
           .await
           .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
+        if let Some(limit) = options.max_cost {
+          let (spent, ..) =
+            crate::cost::spend_summary(&provider.usage());
+          if spent >= limit {
+            anyhow::bail!(
+              "not described: --max-cost ${limit:.2} reached"
+            );
+          }
+        }
         analyze_file(provider, file, options).await
       }
     })
@@ -1776,6 +1789,47 @@ mod tests {
       analyze_file(&PanicProvider, &file, &opts).await.unwrap();
 
     assert_eq!(result.summary, "A sunset over the ocean");
+  }
+
+  #[tokio::test]
+  async fn analysis_stops_at_the_cost_limit() {
+    struct SpentProvider;
+    impl AiProvider for SpentProvider {
+      async fn describe_image(
+        &self,
+        _: &[u8],
+        _: &str,
+        _: &DescribeContext,
+      ) -> Result<ContentDescription> {
+        panic!("over the limit; nothing should be described");
+      }
+      async fn propose_groups(
+        &self,
+        _: &[crate::model::FileSummary],
+      ) -> Result<Vec<crate::model::ProposedGroup>> {
+        panic!("unused");
+      }
+      fn usage(&self) -> Vec<(String, crate::ai::Usage)> {
+        let usage = crate::ai::Usage {
+          output_tokens: 1_000_000,
+          ..Default::default()
+        };
+        vec![("claude-opus-4-8".to_string(), usage)]
+      }
+    }
+    let cache_dir = TempDir::new().unwrap();
+    let file_dir = TempDir::new().unwrap();
+    let file = make_test_file(file_dir.path(), "a.jpg", b"raw");
+    let opts = AnalyzeOptions {
+      cache_dir: cache_dir.path().to_path_buf(),
+      max_cost: Some(1.0),
+      ..Default::default()
+    };
+
+    let results = analyze_batch(&SpentProvider, &[file], &opts).await;
+
+    let err = results[0].as_ref().unwrap_err().to_string();
+    assert!(err.contains("--max-cost"), "{err}");
   }
 
   #[tokio::test]

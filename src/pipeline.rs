@@ -522,6 +522,7 @@ async fn run_ai_pipeline<P: AiProvider>(
     max_archive_files: config.max_archive_files,
     max_archive_file_size_mb: config.max_archive_file_size_mb,
     use_ffmpeg: crate::video::ffmpeg_available(),
+    max_cost: config.max_cost,
   };
 
   let subset: Vec<_> =
@@ -586,6 +587,19 @@ async fn run_ai_pipeline<P: AiProvider>(
       failed_files,
     })
     .await;
+
+  // The estimate can be wrong; what was really spent is not. Stop
+  // before grouping spends more. Descriptions are cached, so a rerun
+  // with a higher limit does not pay for them again.
+  if let Some(max_cost) = config.max_cost {
+    let (spent, ..) = crate::cost::spend_summary(&provider.usage());
+    if spent >= max_cost {
+      anyhow::bail!(
+        "Spent ${spent:.4} describing files, which reaches the \
+         --max-cost limit of ${max_cost:.4}. Raise the limit to group."
+      );
+    }
+  }
 
   // Grouping is the one Claude call left on an otherwise-cached run. Key it
   // by the exact set of file hashes + existing folder labels so an unchanged
