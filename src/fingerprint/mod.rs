@@ -72,7 +72,14 @@ pub fn find_exact_duplicates(
     .into_values()
     .filter(|indices| indices.len() > 1)
     .map(|mut indices| {
-      indices.sort_unstable();
+      // Keep the original: copies made by cp or a re-download are
+      // newer, and "photo.jpg" beats "photo (1).jpg". Scan order is
+      // directory order, which says nothing about which came first.
+      indices.sort_unstable_by_key(|&i| {
+        let f = &files[i].scanned;
+        let name_len = f.path.file_name().map_or(0, |n| n.len());
+        (f.modified, name_len, f.path.clone())
+      });
       DuplicateSet {
         canonical: indices[0],
         duplicates: indices[1..].to_vec(),

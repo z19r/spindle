@@ -457,20 +457,54 @@ fn empty_directory_produces_empty_plan() {
 }
 
 #[test]
-fn deterministic_canonical_selection() {
+fn the_oldest_copy_is_kept() {
   let dir = TempDir::new().unwrap();
-  let content = b"identical content for all";
-
-  for name in &["z.png", "a.png", "m.png"] {
-    fs::write(dir.path().join(name), content).unwrap();
+  let set_mtime = |name: &str, secs: u64| {
+    fs::File::options()
+      .write(true)
+      .open(dir.path().join(name))
+      .unwrap()
+      .set_modified(
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+      )
+      .unwrap();
+  };
+  for name in ["a-copy.png", "z.png", "photo (1).png"] {
+    fs::write(dir.path().join(name), b"identical").unwrap();
   }
+  set_mtime("a-copy.png", 2_000);
+  set_mtime("z.png", 1_000);
+  set_mtime("photo (1).png", 3_000);
 
-  let scanned = scan_directory(dir.path()).unwrap();
-  let fingerprinted = fingerprint_files(scanned);
+  let fingerprinted =
+    fingerprint_files(scan_directory(dir.path()).unwrap());
   let dupes = find_exact_duplicates(&fingerprinted);
 
-  assert_eq!(dupes.len(), 1);
-  let canonical_idx = dupes[0].canonical;
-  assert!(canonical_idx < dupes[0].duplicates[0]);
-  assert!(canonical_idx < dupes[0].duplicates[1]);
+  let kept = &fingerprinted[dupes[0].canonical].scanned.path;
+  assert!(kept.ends_with("z.png"), "{}", kept.display());
+}
+
+#[test]
+fn same_age_copies_keep_the_shortest_name() {
+  let dir = TempDir::new().unwrap();
+  for name in ["bill2-dup.txt", "bill2.txt", "bill2 (1).txt"] {
+    fs::write(dir.path().join(name), b"identical").unwrap();
+  }
+  let then =
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(5);
+  for name in ["bill2-dup.txt", "bill2.txt", "bill2 (1).txt"] {
+    fs::File::options()
+      .write(true)
+      .open(dir.path().join(name))
+      .unwrap()
+      .set_modified(then)
+      .unwrap();
+  }
+
+  let fingerprinted =
+    fingerprint_files(scan_directory(dir.path()).unwrap());
+  let dupes = find_exact_duplicates(&fingerprinted);
+
+  let kept = &fingerprinted[dupes[0].canonical].scanned.path;
+  assert!(kept.ends_with("bill2.txt"), "{}", kept.display());
 }
