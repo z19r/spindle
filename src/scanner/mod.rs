@@ -38,10 +38,10 @@ fn is_trash_path(path: &Path) -> bool {
 }
 
 pub fn scan_directory(path: &Path) -> Result<Vec<ScannedFile>> {
-  scan_directory_opts(path, false)
+  walk_directory(path, false)
 }
 
-pub fn scan_directory_opts(
+fn walk_directory(
   path: &Path,
   include_trash: bool,
 ) -> Result<Vec<ScannedFile>> {
@@ -98,25 +98,6 @@ pub fn scan_directory_opts(
   Ok(files)
 }
 
-pub fn scan_directories(
-  paths: &[impl AsRef<Path>],
-) -> Result<Vec<ScannedFile>> {
-  scan_directories_opts(paths, false)
-}
-
-pub fn scan_directories_opts(
-  paths: &[impl AsRef<Path>],
-  include_trash: bool,
-) -> Result<Vec<ScannedFile>> {
-  scan_directories_filtered(
-    paths,
-    &ScanOptions {
-      include_trash,
-      ..Default::default()
-    },
-  )
-}
-
 pub fn scan_directories_filtered(
   paths: &[impl AsRef<Path>],
   opts: &ScanOptions,
@@ -133,7 +114,7 @@ pub fn scan_directories_filtered(
       continue;
     }
 
-    let files = scan_directory_opts(path, opts.include_trash)?;
+    let files = walk_directory(path, opts.include_trash)?;
     for file in files {
       if !opts.type_filter.is_empty() {
         let dominated = file
@@ -376,8 +357,11 @@ mod tests {
     fs::write(dir1.path().join("a.jpg"), b"aaa").unwrap();
     fs::write(dir2.path().join("b.png"), b"bbb").unwrap();
 
-    let results =
-      scan_directories(&[dir1.path(), dir2.path()]).unwrap();
+    let results = scan_directories_filtered(
+      &[dir1.path(), dir2.path()],
+      &ScanOptions::default(),
+    )
+    .unwrap();
 
     assert_eq!(results.len(), 2);
   }
@@ -387,8 +371,11 @@ mod tests {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("x.jpg"), b"xxx").unwrap();
 
-    let results =
-      scan_directories(&[dir.path(), dir.path()]).unwrap();
+    let results = scan_directories_filtered(
+      &[dir.path(), dir.path()],
+      &ScanOptions::default(),
+    )
+    .unwrap();
 
     assert_eq!(results.len(), 1);
   }
@@ -399,7 +386,11 @@ mod tests {
     fs::write(dir.path().join("real.png"), b"real").unwrap();
     let fake = Path::new("/nonexistent/garbage/path");
 
-    let results = scan_directories(&[dir.path(), fake]).unwrap();
+    let results = scan_directories_filtered(
+      &[dir.path(), fake],
+      &ScanOptions::default(),
+    )
+    .unwrap();
 
     assert_eq!(results.len(), 1);
   }
@@ -409,7 +400,10 @@ mod tests {
     let a = Path::new("/nonexistent/one");
     let b = Path::new("/nonexistent/two");
 
-    let err = scan_directories(&[a, b]).unwrap_err().to_string();
+    let err =
+      scan_directories_filtered(&[a, b], &ScanOptions::default())
+        .unwrap_err()
+        .to_string();
 
     assert!(err.contains("None of the target directories exist"));
     assert!(err.contains("/nonexistent/one"));
@@ -425,8 +419,12 @@ mod tests {
     let first = dir.path().join("old");
     let second = PathBuf::from("photos");
 
-    let err =
-      scan_directories(&[first, second]).unwrap_err().to_string();
+    let err = scan_directories_filtered(
+      &[first, second],
+      &ScanOptions::default(),
+    )
+    .unwrap_err()
+    .to_string();
 
     assert!(err.contains("split at a space"));
     assert!(err.contains(&format!("\"{}\"", spaced.display())));
@@ -526,7 +524,7 @@ mod tests {
     fs::create_dir_all(&trash).unwrap();
     fs::write(trash.join("deleted.jpg"), b"gone").unwrap();
 
-    let results = scan_directory_opts(dir.path(), true).unwrap();
+    let results = walk_directory(dir.path(), true).unwrap();
     assert_eq!(results.len(), 2);
   }
 

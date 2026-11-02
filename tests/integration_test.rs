@@ -14,7 +14,9 @@ use spindle::fingerprint::{
 use spindle::group::build_groups;
 use spindle::model::*;
 use spindle::plan::propose_plan;
-use spindle::scanner::{scan_directories, scan_directory};
+use spindle::scanner::{
+  scan_directories_filtered, scan_directory, ScanOptions,
+};
 
 fn create_test_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
   use image::{ImageBuffer, RgbaImage};
@@ -71,8 +73,11 @@ fn scan_multiple_dirs_then_dedup() {
   fs::write(dir2.path().join("b.png"), &png).unwrap();
   fs::write(dir2.path().join("c.jpg"), b"different").unwrap();
 
-  let scanned =
-    scan_directories(&[dir1.path(), dir2.path()]).unwrap();
+  let scanned = scan_directories_filtered(
+    &[dir1.path(), dir2.path()],
+    &ScanOptions::default(),
+  )
+  .unwrap();
   assert_eq!(scanned.len(), 3);
 
   let fingerprinted = fingerprint_files(scanned);
