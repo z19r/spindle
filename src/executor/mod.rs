@@ -296,7 +296,7 @@ pub fn undo_run(
       .next()
       .context("Nothing to undo: no journaled runs found")?,
   };
-  let run_journal = journal::load(&paths.journal_dir, &run_id)?;
+  let mut run_journal = journal::load(&paths.journal_dir, &run_id)?;
 
   let mut restored = Vec::new();
   let mut failed = Vec::new();
@@ -304,7 +304,8 @@ pub fn undo_run(
   let mut unfiled = Vec::new();
 
   // Reverse moves last-first so nested collisions unwind cleanly.
-  for mv in run_journal.moves.iter().rev() {
+  let moves = std::mem::take(&mut run_journal.moves);
+  for mv in moves.into_iter().rev() {
     if restore(
       &mv.to,
       &mv.from,
@@ -312,21 +313,30 @@ pub fn undo_run(
       &mut failed,
       &mut renamed,
     ) {
-      unfiled.push(mv.to.clone());
+      unfiled.push(mv.to);
+    } else {
+      run_journal.moves.insert(0, mv);
     }
   }
-  for del in &run_journal.deletions {
-    restore(
+  let deletions = std::mem::take(&mut run_journal.deletions);
+  for del in deletions {
+    if !restore(
       &del.trashed_to,
       &del.original,
       &mut restored,
       &mut failed,
       &mut renamed,
-    );
+    ) {
+      run_journal.deletions.push(del);
+    }
   }
 
+  // Keep only what is still out of place, so a retry once the cause
+  // is fixed finishes the undo instead of redoing the restored files.
   if failed.is_empty() {
     journal::mark_undone(&paths.journal_dir, &run_id)?;
+  } else {
+    run_journal.save(&paths.journal_dir)?;
   }
 
   Ok(UndoReport {
@@ -735,6 +745,36 @@ mod tests {
 
     assert_eq!(report.runs_purged, 1);
     assert_eq!(report.bytes_freed, 128);
+  }
+
+  #[test]
+  fn a_failed_undo_can_be_retried() {
+    let src = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    let paths = paths(&src);
+    let plan = ApprovedPlan {
+      moves: vec![
+        make_test_move(src.path(), dest.path(), "a.jpg"),
+        make_test_move(src.path(), dest.path(), "b.jpg"),
+      ],
+      deletions: vec![],
+      skipped_files: vec![],
+    };
+    execute_plan(&plan, &paths, dest.path());
+    // b.jpg goes missing from the organized folder for a while.
+    let held = src.path().join("held.jpg");
+    fs::rename(dest.path().join("b.jpg"), &held).unwrap();
+
+    let first = undo_run(&paths, None).unwrap();
+    assert_eq!(first.restored, vec![src.path().join("a.jpg")]);
+    assert_eq!(first.failed.len(), 1);
+
+    fs::rename(&held, dest.path().join("b.jpg")).unwrap();
+    let second = undo_run(&paths, None).unwrap();
+
+    assert_eq!(second.restored, vec![src.path().join("b.jpg")]);
+    assert!(second.failed.is_empty());
+    assert!(journal::list_runs(&paths.journal_dir).is_empty());
   }
 
   #[test]

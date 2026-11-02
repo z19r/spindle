@@ -484,7 +484,10 @@ fn run_undo(cli: &CliArgs) -> Result<()> {
     eprintln!("  ✗ {} ({err})", path.display());
   }
   if !report.failed.is_empty() {
-    anyhow::bail!("Some files could not be restored.");
+    anyhow::bail!(
+      "Some files could not be restored. Fix the cause and undo \
+       again to put back the rest."
+    );
   }
   Ok(())
 }
