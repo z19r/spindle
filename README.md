@@ -49,6 +49,9 @@ spindle --type photo,video /path/to/folder
 spindle --max-cost 1.00 /path/to/folder
 ```
 
+A folder holding a file named `.spindle-ignore` is skipped, with
+everything inside it.
+
 ## Undoing a run
 
 Every executed run is journalled, and nothing is deleted outright:
@@ -69,8 +72,8 @@ spindle --undo-run <RUN_ID>
 
 Undo moves files back where they came from and restores deletions out
 of the staged trash. If some files cannot be restored — you moved one
-yourself since the run, say — spindle reports them and keeps the
-journal, so you can clear the obstruction and undo again.
+yourself since the run, say — spindle reports them and keeps them in
+the journal, so you can clear the obstruction and undo again.
 
 Undo never overwrites. If something else has taken an original path
 since the run — a re-download with the same name, say — the restored

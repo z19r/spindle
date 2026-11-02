@@ -41,6 +41,11 @@ pub fn scan_directory(path: &Path) -> Result<Vec<ScannedFile>> {
   walk_directory(path, false)
 }
 
+/// A directory holding one of these files is skipped with everything
+/// under it.
+const IGNORE_MARKERS: [&str; 2] =
+  [".spindle-ignore", ".spindel-ignore"];
+
 fn walk_directory(
   path: &Path,
   include_trash: bool,
@@ -54,8 +59,9 @@ fn walk_directory(
   for entry in walkdir::WalkDir::new(path)
     .into_iter()
     .filter_entry(|e| {
+      // `.spindel-ignore` is the project's old spelling; still honoured.
       if e.file_type().is_dir()
-        && e.path().join(".spindel-ignore").exists()
+        && IGNORE_MARKERS.iter().any(|m| e.path().join(m).exists())
       {
         return false;
       }
@@ -584,7 +590,7 @@ mod tests {
   #[test]
   fn spindel_ignore_at_root_excludes_everything() {
     let dir = TempDir::new().unwrap();
-    fs::write(dir.path().join(".spindel-ignore"), b"").unwrap();
+    fs::write(dir.path().join(".spindle-ignore"), b"").unwrap();
     fs::write(dir.path().join("file.jpg"), b"data").unwrap();
 
     let results = scan_directory(dir.path()).unwrap();
