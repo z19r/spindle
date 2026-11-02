@@ -263,6 +263,16 @@ fn copy_verify_remove(from: &Path, to: &Path) -> Result<()> {
     let _ = std::fs::remove_file(to);
     anyhow::bail!("copy verification failed (content mismatch)");
   }
+  // fs::copy keeps permissions but not the modified time, and dates
+  // are what people sort and search their files by.
+  if let Ok(mtime) =
+    std::fs::metadata(from).and_then(|m| m.modified())
+  {
+    let _ = std::fs::File::options()
+      .write(true)
+      .open(to)
+      .and_then(|f| f.set_modified(mtime));
+  }
   std::fs::remove_file(from).context("failed to remove source")?;
   Ok(())
 }
@@ -745,6 +755,27 @@ mod tests {
 
     assert_eq!(report.runs_purged, 1);
     assert_eq!(report.bytes_freed, 128);
+  }
+
+  #[test]
+  fn copying_across_drives_keeps_the_modified_time() {
+    let dir = TempDir::new().unwrap();
+    let from = dir.path().join("old.jpg");
+    let to = dir.path().join("copy.jpg");
+    fs::write(&from, "x").unwrap();
+    let then = std::time::SystemTime::UNIX_EPOCH
+      + std::time::Duration::from_secs(1_000_000_000);
+    fs::File::options()
+      .write(true)
+      .open(&from)
+      .unwrap()
+      .set_modified(then)
+      .unwrap();
+
+    copy_verify_remove(&from, &to).unwrap();
+
+    assert!(!from.exists());
+    assert_eq!(fs::metadata(&to).unwrap().modified().unwrap(), then);
   }
 
   #[test]
