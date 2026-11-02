@@ -1,5 +1,10 @@
 //! Append-only run journal: one JSON file per execute run, recording every
 //! move and staged deletion so any run can be reversed later.
+//!
+//! While a run executes, each step is appended to `<run>.inprogress.jsonl`
+//! the moment it happens, so a run killed halfway still leaves a record
+//! of what it moved. A finished run turns that log into `<run>.json`;
+//! an unfinished one is turned into it the next time journals are read.
 
 use std::path::{Path, PathBuf};
 
@@ -12,6 +17,8 @@ const JOURNAL_VERSION: u32 = 1;
 /// skipped when picking "the latest run" but kept for the record.
 const UNDONE_SUFFIX: &str = ".undone.json";
 const ACTIVE_SUFFIX: &str = ".json";
+/// The step-by-step log of a run that is executing, or was cut short.
+const INPROGRESS_SUFFIX: &str = ".inprogress.jsonl";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalMove {
@@ -80,8 +87,134 @@ impl RunJournal {
   }
 }
 
+/// One line of an in-progress log.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Step {
+  Move(JournalMove),
+  Deletion(JournalDeletion),
+}
+
+/// Records a run step by step as it executes. Every step reaches the
+/// operating system before the next file is touched, so a crash or
+/// Ctrl-C loses at most the step in flight.
+pub struct JournalWriter {
+  journal: RunJournal,
+  journal_dir: PathBuf,
+  log: std::fs::File,
+  log_path: PathBuf,
+}
+
+impl JournalWriter {
+  /// Open the log before anything moves. A run that cannot be
+  /// journaled must not start: it could not be undone.
+  pub fn begin(journal_dir: &Path, run_id: &str) -> Result<Self> {
+    std::fs::create_dir_all(journal_dir).with_context(|| {
+      format!(
+        "Failed to create journal dir: {}",
+        journal_dir.display()
+      )
+    })?;
+    let log_path =
+      journal_dir.join(format!("{run_id}{INPROGRESS_SUFFIX}"));
+    let log = std::fs::OpenOptions::new()
+      .create_new(true)
+      .append(true)
+      .open(&log_path)
+      .with_context(|| {
+        format!("Failed to start journal: {}", log_path.display())
+      })?;
+    Ok(Self {
+      journal: RunJournal::new(run_id),
+      journal_dir: journal_dir.to_path_buf(),
+      log,
+      log_path,
+    })
+  }
+
+  pub fn record_move(&mut self, mv: JournalMove) -> Result<()> {
+    self.append(&Step::Move(mv.clone()))?;
+    self.journal.moves.push(mv);
+    Ok(())
+  }
+
+  pub fn record_deletion(
+    &mut self,
+    del: JournalDeletion,
+  ) -> Result<()> {
+    self.append(&Step::Deletion(del.clone()))?;
+    self.journal.deletions.push(del);
+    Ok(())
+  }
+
+  fn append(&mut self, step: &Step) -> Result<()> {
+    use std::io::Write;
+    let mut line = serde_json::to_vec(step)
+      .context("Failed to encode journal step")?;
+    line.push(b'\n');
+    // One write per line on an unbuffered file: the line is with the
+    // OS when this returns, and survives the process dying.
+    self.log.write_all(&line).with_context(|| {
+      format!("Failed to append to {}", self.log_path.display())
+    })
+  }
+
+  /// Write the finished journal and drop the step log. `None` when the
+  /// run did nothing, so there is nothing to undo.
+  pub fn finish(self) -> Result<Option<PathBuf>> {
+    let path = if self.journal.is_empty() {
+      None
+    } else {
+      Some(self.journal.save(&self.journal_dir)?)
+    };
+    let _ = std::fs::remove_file(&self.log_path);
+    Ok(path)
+  }
+}
+
+/// Turn the step logs of runs that never finished into journals, so
+/// they can be listed and undone like any other run. A torn last line
+/// (the process died mid-write) is skipped; every line before it is a
+/// step that completed.
+fn recover_interrupted(journal_dir: &Path) {
+  let Ok(entries) = std::fs::read_dir(journal_dir) else {
+    return;
+  };
+  for entry in entries.filter_map(|e| e.ok()) {
+    let name = entry.file_name().to_string_lossy().to_string();
+    let Some(run_id) = name.strip_suffix(INPROGRESS_SUFFIX) else {
+      continue;
+    };
+    let log_path = entry.path();
+    let Ok(text) = std::fs::read_to_string(&log_path) else {
+      continue;
+    };
+    let mut journal = RunJournal::new(run_id);
+    for step in
+      text.lines().filter_map(|l| serde_json::from_str(l).ok())
+    {
+      match step {
+        Step::Move(mv) => journal.moves.push(mv),
+        Step::Deletion(del) => journal.deletions.push(del),
+      }
+    }
+    if !journal.is_empty() {
+      if let Err(e) = journal.save(journal_dir) {
+        tracing::warn!(error = %e, run_id, "Could not recover journal");
+        continue;
+      }
+      tracing::warn!(
+        run_id,
+        "Recovered the journal of an interrupted run"
+      );
+    }
+    let _ = std::fs::remove_file(&log_path);
+  }
+}
+
 /// Load a specific run's journal by id.
 pub fn load(journal_dir: &Path, run_id: &str) -> Result<RunJournal> {
+  recover_interrupted(journal_dir);
   let path = journal_dir.join(format!("{run_id}{ACTIVE_SUFFIX}"));
   let content =
     std::fs::read_to_string(&path).with_context(|| {
@@ -95,6 +228,7 @@ pub fn load(journal_dir: &Path, run_id: &str) -> Result<RunJournal> {
 /// Run ids sort lexicographically because they start with a
 /// `YYYYMMDD-HHMMSS` timestamp.
 pub fn list_runs(journal_dir: &Path) -> Vec<String> {
+  recover_interrupted(journal_dir);
   let Ok(entries) = std::fs::read_dir(journal_dir) else {
     return Vec::new();
   };
@@ -175,6 +309,45 @@ mod tests {
       runs,
       vec!["20260810-000000000-1", "20260809-000000000-1"]
     );
+  }
+
+  /// A run killed halfway leaves its step log. Listing journals turns
+  /// it into a normal, undoable journal, torn last line and all.
+  #[test]
+  fn an_interrupted_run_is_recovered_from_its_step_log() {
+    let dir = TempDir::new().unwrap();
+    let mut writer =
+      JournalWriter::begin(dir.path(), "20260811-000000000-7")
+        .unwrap();
+    writer
+      .record_move(JournalMove {
+        from: PathBuf::from("/a"),
+        to: PathBuf::from("/b"),
+      })
+      .unwrap();
+    // The process dies here: no finish(), and half a line on disk.
+    let log =
+      dir.path().join("20260811-000000000-7.inprogress.jsonl");
+    let mut text = std::fs::read_to_string(&log).unwrap();
+    text.push_str("{\"move\":{\"from\":\"/c");
+    std::fs::write(&log, text).unwrap();
+    drop(writer);
+
+    assert_eq!(list_runs(dir.path()), vec!["20260811-000000000-7"]);
+    let journal = load(dir.path(), "20260811-000000000-7").unwrap();
+    assert_eq!(journal.moves.len(), 1);
+    assert_eq!(journal.moves[0].to, PathBuf::from("/b"));
+    assert!(!log.exists());
+  }
+
+  #[test]
+  fn finishing_an_empty_run_leaves_no_files() {
+    let dir = TempDir::new().unwrap();
+    let writer =
+      JournalWriter::begin(dir.path(), "run-empty").unwrap();
+
+    assert_eq!(writer.finish().unwrap(), None);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
   }
 
   #[test]

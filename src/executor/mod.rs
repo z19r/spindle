@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{ApprovedPlan, ExecutionReport, FileMove};
-use journal::{JournalDeletion, JournalMove, RunJournal};
+use journal::{JournalDeletion, JournalMove, JournalWriter};
 
 /// Where run journals and staged trash live.
 #[derive(Debug, Clone)]
@@ -51,79 +51,115 @@ pub fn execute_plan(
   output_dir: &Path,
 ) -> ExecutionReport {
   let run_id = journal::new_run_id();
-  let mut run_journal = RunJournal::new(&run_id);
+  let mut report = ExecutionReport {
+    run_id: run_id.clone(),
+    moves_completed: Vec::new(),
+    moves_failed: Vec::new(),
+    deletions_staged: Vec::new(),
+    bytes_staged: 0,
+    journal_path: None,
+    journal_error: None,
+  };
 
-  let mut moves_completed = Vec::new();
-  let mut moves_failed = Vec::new();
+  // Nothing moves until the run can be journaled: an unrecorded move
+  // could never be undone.
+  let mut writer = match JournalWriter::begin(
+    &paths.journal_dir,
+    &run_id,
+  ) {
+    Ok(writer) => writer,
+    Err(e) => {
+      tracing::error!(error = %e, "Cannot journal this run; not starting");
+      let reason = format!("not started: {e:#}");
+      report.moves_failed = plan
+        .moves
+        .iter()
+        .map(|mv| (mv.clone(), reason.clone()))
+        .collect();
+      report.journal_error = Some(format!("{e:#}"));
+      return report;
+    }
+  };
 
-  for file_move in &plan.moves {
+  for (i, file_move) in plan.moves.iter().enumerate() {
     if let Err(e) = validate_move_target(&file_move.to, output_dir) {
-      moves_failed.push((file_move.clone(), e.to_string()));
+      report.moves_failed.push((file_move.clone(), e.to_string()));
       continue;
     }
     // Never overwrite: auto-rename on collision and record the real
     // destination so the ledger and the journal both stay truthful.
     let actual_to = unique_dest(&file_move.to);
-    match move_file(&file_move.from, &actual_to) {
-      Ok(()) => {
-        run_journal.moves.push(JournalMove {
-          from: file_move.from.clone(),
-          to: actual_to.clone(),
-        });
-        moves_completed.push(FileMove {
-          from: file_move.from.clone(),
-          to: actual_to,
-          group_id: file_move.group_id,
-        });
-      }
-      Err(e) => {
-        moves_failed.push((file_move.clone(), e.to_string()));
-      }
+    if let Err(e) = move_file(&file_move.from, &actual_to) {
+      report.moves_failed.push((file_move.clone(), e.to_string()));
+      continue;
+    }
+    report.moves_completed.push(FileMove {
+      from: file_move.from.clone(),
+      to: actual_to.clone(),
+      group_id: file_move.group_id,
+    });
+    let step = JournalMove {
+      from: file_move.from.clone(),
+      to: actual_to,
+    };
+    if let Err(e) = writer.record_move(step) {
+      // The journal can no longer keep up; stop before moving files
+      // it would not know about.
+      let reason = "not started: the run journal stopped writing";
+      report.moves_failed.extend(
+        plan.moves[i + 1..]
+          .iter()
+          .map(|mv| (mv.clone(), reason.to_string())),
+      );
+      return finish_report(report, writer, Some(e));
     }
   }
 
-  let mut deletions_staged = Vec::new();
-  let mut bytes_staged = 0u64;
   for path in &plan.deletions {
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let dest = trash::trash_path_for(&paths.trash_dir, &run_id, path);
-    match move_file(path, &dest) {
-      Ok(()) => {
-        run_journal.deletions.push(JournalDeletion {
-          original: path.clone(),
-          trashed_to: dest,
-          size,
-        });
-        bytes_staged += size;
-        deletions_staged.push(path.clone());
-      }
-      Err(e) => {
-        tracing::warn!(path = %path.display(), error = %e, "Failed to stage deletion");
-      }
+    if let Err(e) = move_file(path, &dest) {
+      tracing::warn!(
+        path = %path.display(),
+        error = %e,
+        "Failed to stage deletion"
+      );
+      continue;
+    }
+    report.bytes_staged += size;
+    report.deletions_staged.push(path.clone());
+    let step = JournalDeletion {
+      original: path.clone(),
+      trashed_to: dest,
+      size,
+    };
+    if let Err(e) = writer.record_deletion(step) {
+      return finish_report(report, writer, Some(e));
     }
   }
 
-  let (journal_path, journal_error) = if run_journal.is_empty() {
-    (None, None)
-  } else {
-    match run_journal.save(&paths.journal_dir) {
-      Ok(path) => (Some(path), None),
-      Err(e) => {
-        tracing::error!(error = %e, "Failed to write run journal");
-        (None, Some(e.to_string()))
-      }
-    }
-  };
+  finish_report(report, writer, None)
+}
 
-  ExecutionReport {
-    run_id,
-    moves_completed,
-    moves_failed,
-    deletions_staged,
-    bytes_staged,
-    journal_path,
-    journal_error,
+/// Write the finished journal into the report, keeping the first
+/// journal error if one already happened.
+fn finish_report(
+  mut report: ExecutionReport,
+  writer: JournalWriter,
+  error: Option<anyhow::Error>,
+) -> ExecutionReport {
+  match writer.finish() {
+    Ok(path) => report.journal_path = path,
+    Err(e) => {
+      tracing::error!(error = %e, "Failed to write run journal");
+      report.journal_error = Some(format!("{e:#}"));
+    }
   }
+  if let Some(e) = error {
+    tracing::error!(error = %e, "Run journal stopped writing");
+    report.journal_error = Some(format!("{e:#}"));
+  }
+  report
 }
 
 fn validate_move_target(
@@ -500,6 +536,33 @@ mod tests {
       journal::load(&paths.journal_dir, &report.run_id).unwrap();
     assert_eq!(loaded.moves.len(), 1);
     assert_eq!(loaded.moves[0].to, dest.path().join("a.jpg"));
+  }
+
+  /// A run that cannot be journaled could not be undone, so it must
+  /// not move anything.
+  #[test]
+  fn nothing_moves_when_the_journal_cannot_be_written() {
+    let src = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    let blocked = src.path().join("not-a-dir");
+    fs::write(&blocked, "a file where the journal dir should be")
+      .unwrap();
+    let paths = ExecutorPaths {
+      journal_dir: blocked,
+      trash_dir: src.path().join("trash"),
+    };
+    let plan = ApprovedPlan {
+      moves: vec![make_test_move(src.path(), dest.path(), "a.jpg")],
+      deletions: vec![],
+      skipped_files: vec![],
+    };
+
+    let report = execute_plan(&plan, &paths, dest.path());
+
+    assert!(report.moves_completed.is_empty());
+    assert_eq!(report.moves_failed.len(), 1);
+    assert!(report.journal_error.is_some());
+    assert!(src.path().join("a.jpg").exists());
   }
 
   #[test]
